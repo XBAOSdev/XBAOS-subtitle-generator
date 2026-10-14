@@ -1794,6 +1794,44 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
       /if \(!devViewInjected\) void checkModelsOnStart\(\)/.test(appModelsSrc),
     '不检查的话用户会一路点到「开始识别」才失败',
   )
+
+  /* ---- 「模型不随包」文案守门（2026-10-14）
+   *
+   * 「装完就有模型可用」这个前提当初散落在**多处**：界面弹窗、设置页提示、
+   * 安装器许可页、对外 README。改分发形态时只改一处必漏，上一轮就漏了两处
+   * 用户可见的（设置页文案 + build/license.txt），是用户自己截图指出来的。
+   *
+   * 这组守的是「已失效的断言句」而不是「随包」这个词 —— 注释里说明
+   * bundled 来源不可删之类仍然是对的，不该连坐。
+   */
+  const STALE_MODEL_CLAIMS = ['随包内置', '随包分发的模型', '随包默认', '随包附带', '装完即用']
+  const modelCopySurfaces = [
+    'src/views/SettingsView.vue',
+    'src/views/ModelView.vue',
+    'src/views/AboutView.vue',
+    'src/App.vue',
+    'src/legal/index.ts',
+    'src/stores/settings.ts',
+    'electron/paths.js',
+    'electron/main.js',
+    'build/license.txt',
+    'NOTICE',
+    'README.md',
+  ]
+  for (const rel of modelCopySurfaces) {
+    const hits = STALE_MODEL_CLAIMS.filter((claim) => readSource(rel).includes(claim))
+    check(
+      `「${rel}」没有残留「随包 / 装完即用」的旧说法`,
+      hits.length === 0,
+      `命中：${hits.join(' / ')}`,
+    )
+  }
+  check(
+    '安装器许可页不再主张模型权利',
+    !readSource('build/license.txt').includes('模型文件等全部组成部分') &&
+      readSource('build/license.txt').includes('不属于本软件的权利范围'),
+    '模型是 MIT、著作权属原作者，我方不能主张',
+  )
 }
 
 /* ---- 架构不变量：时间轴（泳道 / 缩放 / 拖拽边界） ----

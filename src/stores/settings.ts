@@ -37,8 +37,10 @@ export interface SettingsSnapshot {
   /** 推理后端 */
   backend: InferenceBackend
   /**
-   * 识别用的模型文件名（如 ggml-base.bin）。空串表示用默认的随包模型。
+   * 识别用的模型文件名（如 ggml-base.bin）。空串表示让主进程自己挑一个。
    * 模型管理页「切换使用」写入；识别时随请求传给主进程解析。
+   * 「使用中」的判定以主进程 `models:resolve` 的返回为准，不要拿这个字段自己比 ——
+   * 用户可能从软件外部删掉文件，这个字段不会跟着变。
    */
   modelFile: string
   /** 识别语言，zh 表示简体中文 */

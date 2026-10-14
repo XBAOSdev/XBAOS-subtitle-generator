@@ -837,7 +837,11 @@ function registerIpc() {
       node: process.versions.node,
       theme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
       engine: { exe, source, available: !!exe },
-      // 模型清单带 source 字段，界面可以据此显示「随包附带」「用户目录」
+      /*
+       * 模型清单带 source 字段（user / custom / bundled / env / dev）。
+       * 「哪些算已装」由这里说了算：只按 .bin 后缀收，文件名不参与判定 ——
+       * 用户从浏览器重复下载会得到 ggml-small(1).bin，自己改名也常见。
+       */
       models: listAvailableModels(modelCtx()),
       // 全部模型查找目录（按优先级拼接），诊断「为什么没找到模型」时看这个
       modelsDir: modelSearchDirs(modelCtx())

@@ -124,7 +124,7 @@ async function changeModelsDir(): Promise<void> {
     message: `要把模型存储位置改成这个文件夹吗？\n\n${dir}`,
     detail:
       '更改后软件只从这个新文件夹里查找模型。原来位置已经下载好的模型不会自动搬过去 —— ' +
-      '请尽快把它们手动复制到新文件夹，否则界面上就只剩随包内置的模型可用了。',
+      '请尽快把它们手动复制到新文件夹，否则界面上会显示没有可用模型，需要重新下载。',
     buttons: ['取消', '确认更改'],
     defaultId: 0,
     cancelId: 0,
@@ -296,7 +296,7 @@ function reset(): void {
             </div>
             <p class="hint">
               更改后软件<strong>只会</strong>从新位置查找模型。原位置已下载的模型需自行复制过去，
-              否则仅随包内置模型可用。
+              否则会显示没有可用模型，需要重新下载。
             </p>
           </div>
         </section>

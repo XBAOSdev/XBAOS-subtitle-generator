@@ -231,7 +231,7 @@ export interface EngineLocation {
 /**
  * 模型文件的来源。
  *   custom  —— 用户在设置里指定的模型目录
- *   bundled —— 随安装包分发，只读
+ *   bundled —— 安装目录内的 models/，只读；正式包不放模型，留给用户手动放置
  *   user    —— 默认用户数据目录，用户自己下载或放置的
  *   env     —— 环境变量 XBAOS_MODELS_DIR 指定的调试目录
  *   dev     —— 开发态仓库内的 models/
