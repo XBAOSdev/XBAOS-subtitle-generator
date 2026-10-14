@@ -1,0 +1,45 @@
+XBAOS 字幕生成器
+Copyright 2026 XBAOS
+https://www.xbaos.com.cn/
+
+
+一、源代码的授权
+----------------
+
+本项目的源代码依 Apache License, Version 2.0 授权，全文见同目录下的 LICENSE 文件。
+
+
+二、不属于源代码、不适用 Apache License 2.0 的内容
+--------------------------------------------------
+
+下列内容不是「源代码」，不在 Apache License 2.0 的授权范围内，其全部权利归 XBAOS 所有。
+（Apache License 2.0 第 6 条亦不授予任何商标许可。）
+
+  1. 品牌名称与标志
+     「XBAOS」「XBAOS 字幕生成器」，以及相关的文字与图形标识。
+
+  2. 应用图标与安装器美术资源
+     build/ 目录下的全部图标与位图文件，包括 icon.ico、icon-*.png、
+     installerHeader.bmp、installerSidebar.bmp、uninstallerSidebar.bmp。
+
+  3. 项目文档
+     docs/ 目录下的全部内容。
+
+如需在 Apache License 2.0 之外使用上述内容，请先取得 XBAOS 的书面许可。
+基于本仓库的源代码构建衍生版本时，请替换上述品牌标识与美术资源。
+
+
+三、关于语音识别模型
+--------------------
+
+本项目**不分发**语音识别模型文件。软件使用的 ggml 格式 Whisper 模型由使用者
+自行获取并放入模型文件夹，采用 MIT 许可发布（权重来自 ggerganov/whisper.cpp，
+原始模型源自 OpenAI），版权归其各自权利人所有。它不属于本软件的权利范围，
+也不在 Apache License 2.0 的授权范围内。
+
+
+四、第三方组件
+--------------
+
+本软件包含多个第三方开源组件，它们的许可原文见 licenses/ 目录，
+组件清单与版本见 licenses/THIRD-PARTY.md。

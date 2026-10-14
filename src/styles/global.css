@@ -1,0 +1,778 @@
+/* ==========================================================================
+   全局基础样式与可复用控件类
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-base);
+  color: var(--color-text-primary);
+  background: var(--color-bg-base);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* 桌面应用：滚动交给内部容器，页面本身不滚 */
+  overflow: hidden;
+}
+
+/* --------------------------------------------------------------------------
+   文本选中策略
+
+   Electron 的界面本质是个浏览器，默认「界面上任何文字都能划选」—— 在网页里
+   这没问题，在桌面软件里就很别扭：想点按钮、拖时间轴、双击列表，稍一错手
+   就把整片界面文案刷成蓝色，还会连带触发「拖文字」而不是「拖元素」。
+
+   所以默认关闭，再按「这段文字是否真的值得复制」逐个放行：
+     · 放行 —— 字幕正文（用户要把内容拷去别处）、输入框与文本域（本来就要编辑）、
+               时间码（复制去别处对齐很常用）、路径
+     · 不放行 —— 导航、按钮标签、状态栏、工具面板、校验结果、时间轴上的字幕条
+               文字（那是截断过的标签，复制的价值为零，误选却很烦）
+   -------------------------------------------------------------------------- */
+html,
+body,
+#app {
+  user-select: none;
+}
+
+/*
+ * 表单控件必须放行：`user-select: none` 会被继承下来，导致输入框里连自己的
+ * 内容都选不中（Ctrl+A 全选、双击选词全部失效）。Chromium 对可编辑元素有
+ * 内建的豁免，但不能依赖它 —— 显式写出来才是确定的。
+ */
+input,
+textarea,
+select,
+[contenteditable='true'] {
+  user-select: text;
+}
+
+/** 需要整段复制的静态文本，挂这个类即可 */
+.selectable {
+  user-select: text;
+  cursor: text;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  font-weight: var(--weight-semibold);
+  line-height: var(--line-tight);
+}
+
+p {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 0;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+table {
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+::selection {
+  background: var(--color-accent-subtle);
+  color: var(--color-text-primary);
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-scrollbar);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-scrollbar-hover);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 拖拽文件过程中 */
+body.is-dragging {
+  user-select: none;
+}
+
+/* ==========================================================================
+   按钮
+   ========================================================================== */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: var(--control-height);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-strong);
+}
+
+.btn:active:not(:disabled) {
+  background: var(--color-bg-active);
+}
+
+.btn:disabled {
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.btn--primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  /* 深色下 accent 是浅灰，实心底一律配反色文字 */
+  color: var(--color-text-inverse);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.btn--primary:active:not(:disabled) {
+  background: var(--color-accent-active);
+}
+
+/**
+ * AI 校对：界面其余按钮都是中性灰，这个功能要一眼能看见。
+ * 实心靛蓝 + 一点同色投影，既是强调也提示「这是个新能力」。
+ * 禁用态回落到普通按钮观感，不用灰底靛蓝字那种半吊子状态。
+ */
+.btn--ai {
+  background: var(--color-ai);
+  border-color: var(--color-ai);
+  color: var(--color-text-inverse);
+  font-weight: var(--weight-medium);
+}
+
+.btn--ai:hover:not(:disabled) {
+  background: var(--color-ai-hover);
+  border-color: var(--color-ai-hover);
+}
+
+.btn--ai:active:not(:disabled) {
+  background: var(--color-ai-active);
+  border-color: var(--color-ai-active);
+}
+
+.btn--ai:focus-visible {
+  outline: 2px solid var(--color-ai);
+  outline-offset: 2px;
+}
+
+.btn--ai:disabled {
+  background: var(--color-bg-subtle);
+  border-color: var(--color-border);
+  color: var(--color-text-disabled);
+}
+
+.btn--danger {
+  color: var(--color-danger);
+  border-color: var(--color-danger-border);
+  background: var(--color-bg-surface);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--color-danger-subtle);
+}
+
+.btn--ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  border-color: transparent;
+}
+
+.btn--sm {
+  height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-xs);
+}
+
+.btn--lg {
+  height: var(--control-height-lg);
+  padding: 0 var(--space-5);
+  font-size: var(--font-size-base);
+}
+
+.btn--icon {
+  width: var(--control-height);
+  padding: 0;
+  flex: none;
+}
+
+.btn--icon.btn--sm {
+  width: var(--control-height-sm);
+}
+
+/* ==========================================================================
+   表单控件
+   ========================================================================== */
+
+.input,
+.select,
+.textarea {
+  height: var(--control-height);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  transition: border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+  width: 100%;
+}
+
+.textarea {
+  height: auto;
+  min-height: 72px;
+  padding: var(--space-2) var(--space-3);
+  line-height: var(--line-base);
+  resize: vertical;
+}
+
+.input:hover,
+.select:hover,
+.textarea:hover {
+  border-color: var(--color-border-strong);
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-subtle);
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.input:disabled,
+.select:disabled {
+  background: var(--color-bg-subtle);
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}
+
+.input--mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.select {
+  appearance: none;
+  padding-right: var(--space-8);
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 16px) calc(50% + 1px),
+    calc(100% - 11px) calc(50% + 1px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+.select option {
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+}
+
+/* 复选框 */
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  user-select: none;
+}
+
+.checkbox input[type='checkbox'],
+.checkbox input[type='radio'] {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+/* 开关 */
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch__track {
+  width: 38px;
+  height: 22px;
+  flex: none;
+  border-radius: var(--radius-pill);
+  background: var(--color-border-strong);
+  transition: background var(--dur-base) var(--ease-out);
+  position: relative;
+}
+
+.switch__track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: var(--shadow-xs);
+  transition: transform var(--dur-base) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.switch input:checked + .switch__track {
+  background: var(--color-accent);
+}
+
+/* 选中时轨道变成浅灰实心，圆点要跟着转成反色才看得清 */
+.switch input:checked + .switch__track::after {
+  background: var(--color-text-inverse);
+}
+
+.switch input:checked + .switch__track::after {
+  transform: translateX(16px);
+}
+
+.switch input:focus-visible + .switch__track {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ==========================================================================
+   容器
+   ========================================================================== */
+
+.card {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.panel {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.section-title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+  margin-bottom: var(--space-2);
+}
+
+.hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: var(--line-loose);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.divider {
+  height: 1px;
+  background: var(--color-border-subtle);
+  border: none;
+  margin: var(--space-4) 0;
+}
+
+/* 键盘按键 */
+kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 5px;
+  border: 1px solid var(--color-border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-subtle);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+/* 屏幕阅读器专用 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 滚动区域 */
+.scroll-y {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ==========================================================================
+   视图通用布局
+   ========================================================================== */
+
+/* 页面切换过渡（导入 ↔ 编辑）。
+   两个视图的信息密度差很大，硬切会让人以为界面卡了一下。
+
+   **刻意只做进场**：出场若也占满 180ms，这段时间里新旧两个视图会同时在 DOM 里，
+   于是「时间轴上有几条字幕」「队列里有几个文件」这类查询会数到两倍 ——
+   探针第一轮就被这个坑绊住过。所以：旧的立即卸下（leave-active 不写过渡），
+   新的从下方 4px 淡入。 */
+.viewfade-enter-active {
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+
+.viewfade-enter-from {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.viewfade-leave-active {
+  transition: none;
+}
+
+.view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.view__head {
+  flex: none;
+  padding: var(--space-5) var(--space-6) var(--space-3);
+}
+
+.view__head-inner {
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+}
+
+.view__title {
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.view__desc {
+  margin-top: 2px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.view__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-6) var(--space-6);
+}
+
+.view__body-inner {
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.view__foot {
+  flex: none;
+  padding: var(--space-3) var(--space-6);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
+}
+
+.view__foot-inner {
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* 内容区块 */
+.block {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-surface);
+  overflow: hidden;
+}
+
+.block__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.block__title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.block__body {
+  padding: var(--space-4);
+}
+
+.spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ==========================================================================
+   分段控件的滑动指示块（v-seg-thumb 指令注入的元素）
+   ========================================================================== */
+
+.seg-thumb {
+  position: absolute;
+  z-index: 0;
+  border-radius: inherit;
+  background: var(--color-bg-raised);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--color-accent-border);
+  transition: left var(--dur-base) var(--ease-out), width var(--dur-base) var(--ease-out),
+    top var(--dur-base) var(--ease-out), height var(--dur-base) var(--ease-out);
+  pointer-events: none;
+}
+
+/* 首帧定位 / 关动画偏好：直接跳到位，不从 (0,0) 滑过来 */
+.seg-thumb--jump {
+  transition: none;
+}
+
+/* ==========================================================================
+   毛玻璃（Acrylic）—— 三个窗口共用
+   --------------------------------------------------------------------------
+   主进程在「用户开了 + 系统 Win11 22H2+」时给窗口开 backgroundMaterial，
+   并给 html 挂上 glass 类（首帧前经启动参数注入，运行期经 app:glass 回推）。
+   材质是窗口**背后**的一层：页面里任何不透明底色都会把它盖住，而且
+   **「头顶所有层透过率相乘」才是实际透出的量** —— 层数比数值更关键，
+   同一个区域绝不允许压两层（页脚条曾压了第二层，8% × 12% ≈ 1%，怎么调都不像玻璃）。
+
+   分档强度，跟着内容重要性走：
+     标题栏 .titlebar/.abar/.rbar  —— 最透，要的就是玻璃观感
+     页脚条 .view__foot/.editor__foot —— 只吃外壳那一层（不压第二层）→ 透出量是内容区的两三倍
+     内容区 .view__head/.view__body/.editor__center —— 外壳 + 内容区两级，材质只透一成
+     侧栏 / 状态条 / 编辑器侧栏 —— 面板色（surface 系），比内容区略抬起
+     卡片   不动（surface 底，正文与表格坐在上面，一透就没法读了）
+   不支持的环境不会有这个类，以下规则整体不生效，界面保持纯色。
+   ========================================================================== */
+html.glass,
+html.glass body {
+  /* index.html 的首屏底色也是普通样式表规则，同特异性下靠 !important 压过它 */
+  background: transparent !important;
+}
+
+/* ---- 壳层：整块界面都有一层极淡的玻璃味，但绝不干扰读字 ---- */
+/*
+ * 外壳这一层**不铺底**：它下面还有内容区/侧栏/状态条各自那一层半透明，
+ * 而**材质只认「头顶所有层透过率相乘」**。这里先把外壳放空，让每个区域只留
+ * 一层半透明（细则见 theme-light.css 里 --glass-shell-bg 的注释）。
+ */
+html.glass .app {
+  background: transparent;
+}
+
+/*
+ * 内容列的外壳遮罩（--glass-shell-bg）：它是整个内容区**唯一的底**，
+ * 页脚条就靠这一层吃材质 —— 页脚条自己不再压第二层，材质才透得出来。
+ */
+html.glass .app__main {
+  background: var(--glass-shell-bg, var(--color-bg-base));
+}
+
+/*
+ * 内容区（--glass-region-bg）：在外壳遮罩之上再压一层，把材质透出量收到一成左右。
+ * 正文、表格、表单都坐在这一层上，透多了就没法读。
+ * 页脚条刻意不在这份名单里 —— 它下面只有外壳那一层，玻璃才明显。
+ */
+html.glass .view__head,
+html.glass .view__body,
+html.glass .editor__center {
+  background: var(--glass-region-bg, transparent);
+}
+
+/* 单层容器：两个附属窗口的根元素没有「外壳 + 内容区」两级，直接给最终观感 */
+html.glass .assist,
+html.glass .rec {
+  background: var(--glass-app-bg, var(--color-bg-base));
+}
+
+/* 结构面板（侧栏 / 状态条 / 编辑器侧栏）：surface 调，比内容区略「抬起」 */
+html.glass .sidebar,
+html.glass .statusbar,
+html.glass .editor__side {
+  background: var(--glass-panel-bg, var(--color-bg-surface));
+  /* 分隔线同步淡化：半透明的面上留一条实线会很跳 */
+  border-color: var(--glass-titlebar-border, var(--color-border));
+}
+
+/*
+ * 内容列里的页脚条（导入页 / 编辑器底部）：**自己不再铺底**，只留外壳那一层。
+ * 这样材质透出量是内容区的两三倍 —— 用户要的「看得见的玻璃」就在这儿。
+ * 上一版给它压了一层底色遮罩，结果两层相乘后只剩 1%，怎么调都像块实心板。
+ */
+html.glass .view__foot,
+html.glass .editor__foot {
+  background: transparent;
+  border-color: var(--glass-titlebar-border, var(--color-border));
+}
+
+/* ---- 标题栏（三个窗口：主界面 / AI 辅助 / 录音）---- */
+html.glass .titlebar,
+html.glass .abar,
+html.glass .rbar {
+  background: var(--glass-titlebar-bg, var(--color-bg-surface));
+  border-bottom-color: var(--glass-titlebar-border, var(--color-border));
+  /* 顶部一道细内高光：半透明色块本身没有材质感，高光一加才立得住 */
+  box-shadow: inset 0 1px 0 var(--glass-titlebar-sheen, transparent);
+}
+
+/*
+ * 标题栏文字适配。背后是真实画面，底色随位置浮动，灰阶文字（尤其
+ * tertiary 那档）会时深时浅 —— 用户反馈「文字不是很清楚」就是这么来的。
+ * 两条一起上：颜色统一提一档，再补一圈与底色同向的极淡光晕
+ * （浅色主题白光晕、深色主题黑光晕），文字在任何背景上都咬得住。
+ */
+html.glass .titlebar__name,
+html.glass .abar__name,
+html.glass .rbar__name,
+html.glass .titlebar__btn,
+html.glass .abar__icon,
+html.glass .rbar__icon {
+  color: var(--color-text-primary);
+  text-shadow: 0 0 2px var(--glass-text-halo, transparent);
+}
+
+/* 窗口标题是次级信息，不必到 primary（那是品牌名的档位），但要从 tertiary 提上来 */
+html.glass .titlebar__view,
+html.glass .abar__sub,
+html.glass .abar__pin-label {
+  color: var(--color-text-secondary);
+  text-shadow: 0 0 2px var(--glass-text-halo, transparent);
+}

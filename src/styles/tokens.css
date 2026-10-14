@@ -1,0 +1,83 @@
+/* ==========================================================================
+   设计令牌  与主题无关的部分
+   间距采用 4px 网格；字号以 rem 为基础，标题用 clamp 做响应式
+   ========================================================================== */
+
+:root {
+  /* 字体族：思源黑体优先，逐级回退。字体文件不嵌入，仅声明回退栈 */
+  --font-sans: "Source Han Sans SC", "Noto Sans SC", "PingFang SC",
+    "HarmonyOS Sans SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Mono", "JetBrains Mono", "Consolas", "Courier New",
+    monospace;
+
+  /* 字号 */
+  --font-size-xs: 0.75rem;      /* 12px  辅助说明 */
+  --font-size-sm: 0.8125rem;    /* 13px  次要信息 */
+  --font-size-base: 0.875rem;   /* 14px  正文 */
+  --font-size-md: 0.9375rem;    /* 15px  强调正文 */
+  --font-size-lg: 1.0625rem;    /* 17px  区块标题 */
+  --font-size-xl: clamp(1.25rem, 1.1rem + 0.5vw, 1.5rem);
+  --font-size-2xl: clamp(1.5rem, 1.3rem + 0.9vw, 2rem);
+
+  --line-tight: 1.25;
+  --line-base: 1.5;
+  --line-loose: 1.7;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* 间距 4px 网格 */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* 圆角 */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-pill: 999px;
+
+  /* 过渡
+     统一口径（2026-10-11 定稿）——
+     时长只用三档：--dur-fast 状态变化（120ms）｜--dur-base 出现 / 消失（180ms）｜
+     --dur-slow 跨元素的空间指引（460ms，目前只有「开始识别」飞向进度条那一处）。
+     缓动只用两条：--ease-out 出现（先快后极缓，不会跳变）｜--ease-in 消失。
+     判据只有一条：动画是在解释「东西从哪来、到哪去」（加），还是在解释「我很活泼」（不加）。
+     所有 CSS 动画 / 过渡由 global.css 的 prefers-reduced-motion 段一刀关掉；
+     WAAPI（element.animate）不在那段管辖内，用之前必须自己 matchMedia 判一次。 */
+  --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 460ms;
+
+  /* 结构尺寸 */
+  --titlebar-height: 40px;
+  --statusbar-height: 28px;
+  --sidebar-width: 208px;
+  --control-height-sm: 26px;
+  --control-height: 32px;
+  --control-height-lg: 38px;
+
+  /* 布局约束 */
+  --content-max-width: 1180px;
+
+  /* 层级 */
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-overlay: 900;
+  --z-modal: 1000;
+  --z-toast: 1100;
+}

@@ -1,0 +1,204 @@
+/* ==========================================================================
+   深色主题  中性灰阶
+   整套色板不含任何色相偏移，层级完全依靠亮度差与描边表达。
+   唯一的彩色只保留在语义色（成功 / 警告 / 危险）与播放头，避免界面出现
+   高饱和强调色带来的「模板感」。
+   ========================================================================== */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    /* 表面：由内到外逐级提亮 */
+    --color-bg-base: #121212;
+    --color-bg-surface: #1a1a1a;
+    --color-bg-raised: #212121;
+    --color-bg-subtle: #242424;
+    --color-bg-inset: #161616;
+    --color-bg-hover: rgba(255, 255, 255, 0.055);
+    --color-bg-active: rgba(255, 255, 255, 0.09);
+    --color-bg-selected: #2c2c2c;
+
+    /*
+     * 毛玻璃标题栏（细则见 theme-light.css 同名注释）。
+     * 深色下比浅色**更薄**：材质本来就暗，遮罩一厚就完全看不出透明，
+     * 只剩一条和内容区一样的黑带 —— 这正是「深色没效果」的原因。
+     */
+    --glass-titlebar-bg: color-mix(in srgb, var(--color-bg-base) 62%, transparent);
+    --glass-titlebar-sheen: rgba(255, 255, 255, 0.06);
+    --glass-titlebar-border: color-mix(in srgb, var(--color-border) 45%, transparent);
+    /* 壳层同样只留一成左右的透出量，两级拆分的理由见 theme-light.css */
+    --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 78%, transparent);
+    --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 58%, transparent);
+    --glass-app-bg: color-mix(in srgb, var(--color-bg-base) 90%, transparent);
+    --glass-panel-bg: color-mix(in srgb, var(--color-bg-surface) 88%, transparent);
+    /* 深色下用深色光晕，浅色下用白色光晕 */
+    --glass-text-halo: rgba(0, 0, 0, 0.5);
+
+    /* 描边 */
+    --color-border: #303030;
+    --color-border-strong: #454545;
+    --color-border-subtle: #242424;
+
+    /* 文字 */
+    --color-text-primary: #e6e6e6;
+    --color-text-secondary: #a1a1a1;
+    --color-text-tertiary: #757575;
+    --color-text-disabled: #565656;
+    --color-text-inverse: #141414;
+
+    /* 强调：中性浅灰。作实心底时配 --color-text-inverse 深色文字 */
+    --color-accent: #d6d6d6;
+    --color-accent-hover: #ededed;
+    --color-accent-active: #bdbdbd;
+    --color-accent-subtle: rgba(255, 255, 255, 0.08);
+    --color-accent-border: #525252;
+    --color-accent-text: #ededed;
+
+    /* 语义色：保留辨识度，但整体降饱和以贴合中性格调 */
+    --color-success: #6ea87f;
+    --color-success-subtle: #1b2a20;
+    --color-success-border: #35543f;
+    --color-warning: #d2a355;
+    --color-warning-subtle: #2e2618;
+    --color-warning-border: #57482a;
+    --color-danger: #dd6a61;
+    --color-danger-subtle: #331d1b;
+    --color-danger-border: #5e3632;
+    --color-info: #93a6b6;
+    --color-info-subtle: #21282e;
+    --color-info-border: #3d4b57;
+
+    /* AI 强调色：深色下略降明度保证白字对比（实测白字 5.08:1），
+       同时在深底上仍明显跳色（对比 3.42:1） */
+    --color-ai: #5a5ce8;
+    --color-ai-hover: #6d6ff0;
+    --color-ai-active: #4a4cd8;
+    --color-ai-subtle: rgba(99, 102, 241, 0.16);
+    --color-ai-border: rgba(129, 140, 248, 0.42);
+    --color-ai-text: #a5b4fc;
+
+    /* 波形与字幕色块：用亮度而非色相区分状态 */
+    --color-waveform: #5c5c5c;
+    --color-waveform-played: #b8b8b8;
+    --color-segment-band: rgba(255, 255, 255, 0.1);
+    --color-segment-band-active: rgba(255, 255, 255, 0.2);
+    --color-segment-border: #a8a8a8;
+    --color-playhead: #e08040;
+    --color-grid-line: rgba(255, 255, 255, 0.065);
+
+    /* 时间轴字幕条（深色下靠提亮底色表示选中） */
+    --color-lane-line: rgba(255, 255, 255, 0.07);
+    --color-clip: rgba(255, 255, 255, 0.09);
+    --color-clip-active: rgba(255, 255, 255, 0.22);
+    --color-clip-border: rgba(255, 255, 255, 0.18);
+    --color-clip-border-active: #d6d6d6;
+    --color-clip-grip: rgba(255, 255, 255, 0.24);
+    /* 超出「同时最多 5 条」的字幕条：只能和第 5 层叠在一起，靠红色摘出来 */
+    --color-clip-overflow: #331d1b;
+    --color-clip-overflow-border: #5e3632;
+    --color-waveform-played-mask: rgba(255, 255, 255, 0.07);
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5), 0 2px 4px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6), 0 4px 8px rgba(0, 0, 0, 0.35);
+
+    --color-scrollbar: #3a3a3a;
+    --color-scrollbar-hover: #4d4d4d;
+
+    --color-overlay: rgba(0, 0, 0, 0.62);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-bg-base: #121212;
+  --color-bg-surface: #1a1a1a;
+  --color-bg-raised: #212121;
+  --color-bg-subtle: #242424;
+  --color-bg-inset: #161616;
+  --color-bg-hover: rgba(255, 255, 255, 0.055);
+  --color-bg-active: rgba(255, 255, 255, 0.09);
+  --color-bg-selected: #2c2c2c;
+
+  --color-border: #303030;
+  --color-border-strong: #454545;
+  --color-border-subtle: #242424;
+
+  /* 毛玻璃标题栏：数值须与上面的媒体查询块保持一致（两处都要改） */
+  --glass-titlebar-bg: color-mix(in srgb, var(--color-bg-base) 62%, transparent);
+  --glass-titlebar-sheen: rgba(255, 255, 255, 0.06);
+  --glass-titlebar-border: color-mix(in srgb, var(--color-border) 45%, transparent);
+  --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 78%, transparent);
+  --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 58%, transparent);
+  --glass-app-bg: color-mix(in srgb, var(--color-bg-base) 90%, transparent);
+  --glass-panel-bg: color-mix(in srgb, var(--color-bg-surface) 88%, transparent);
+  --glass-text-halo: rgba(0, 0, 0, 0.5);
+
+  --color-text-primary: #e6e6e6;
+  --color-text-secondary: #a1a1a1;
+  --color-text-tertiary: #757575;
+  --color-text-disabled: #565656;
+  --color-text-inverse: #141414;
+
+  --color-accent: #d6d6d6;
+  --color-accent-hover: #ededed;
+  --color-accent-active: #bdbdbd;
+  --color-accent-subtle: rgba(255, 255, 255, 0.08);
+  --color-accent-border: #525252;
+  --color-accent-text: #ededed;
+
+  --color-success: #6ea87f;
+  --color-success-subtle: #1b2a20;
+  --color-success-border: #35543f;
+  --color-warning: #d2a355;
+  --color-warning-subtle: #2e2618;
+  --color-warning-border: #57482a;
+  --color-danger: #dd6a61;
+  --color-danger-subtle: #331d1b;
+  --color-danger-border: #5e3632;
+  --color-info: #93a6b6;
+  --color-info-subtle: #21282e;
+  --color-info-border: #3d4b57;
+
+  /* AI 强调色：深色下略降明度保证白字对比（实测白字 5.08:1），
+     同时在深底上仍明显跳色（对比 3.42:1） */
+  --color-ai: #5a5ce8;
+  --color-ai-hover: #6d6ff0;
+  --color-ai-active: #4a4cd8;
+  --color-ai-subtle: rgba(99, 102, 241, 0.16);
+  --color-ai-border: rgba(129, 140, 248, 0.42);
+  --color-ai-text: #a5b4fc;
+
+  --color-waveform: #5c5c5c;
+  --color-waveform-played: #b8b8b8;
+  --color-segment-band: rgba(255, 255, 255, 0.1);
+  --color-segment-band-active: rgba(255, 255, 255, 0.2);
+  --color-segment-border: #a8a8a8;
+  --color-playhead: #e08040;
+  --color-grid-line: rgba(255, 255, 255, 0.065);
+
+  /* 时间轴字幕条（深色下靠提亮底色表示选中） */
+  --color-lane-line: rgba(255, 255, 255, 0.07);
+  --color-clip: rgba(255, 255, 255, 0.09);
+  --color-clip-active: rgba(255, 255, 255, 0.22);
+  --color-clip-border: rgba(255, 255, 255, 0.18);
+  --color-clip-border-active: #d6d6d6;
+  --color-clip-grip: rgba(255, 255, 255, 0.24);
+  /* 超出「同时最多 5 条」的字幕条：只能和第 5 层叠在一起，靠红色摘出来 */
+  --color-clip-overflow: #331d1b;
+  --color-clip-overflow-border: #5e3632;
+  --color-waveform-played-mask: rgba(255, 255, 255, 0.07);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5), 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6), 0 4px 8px rgba(0, 0, 0, 0.35);
+
+  --color-scrollbar: #3a3a3a;
+  --color-scrollbar-hover: #4d4d4d;
+
+  --color-overlay: rgba(0, 0, 0, 0.62);
+}

@@ -1,0 +1,133 @@
+/* ==========================================================================
+   浅色主题  中性灰阶
+   选择器规则：
+     无 data-theme 或 data-theme="auto"  → 跟随系统
+     data-theme="light"                  → 强制浅色
+     data-theme="dark"                   → 强制深色（见 theme-dark.css）
+   ========================================================================== */
+
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* 表面。整档比纯白压暗一档（2026-10-11：用户反馈浅色太晃眼），
+     层级关系保持 base < inset < surface ≤ raised */
+  --color-bg-base: #ededed;
+  --color-bg-surface: #f7f7f7;
+  --color-bg-raised: #f7f7f7;
+  --color-bg-subtle: #e6e6e6;
+  --color-bg-inset: #f1f1f1;
+  --color-bg-hover: rgba(0, 0, 0, 0.045);
+  --color-bg-active: rgba(0, 0, 0, 0.08);
+  --color-bg-selected: #dedede;
+
+  /*
+   * 毛玻璃标题栏（仅在 Electron 且系统支持时生效，见 global.css 的 html.glass）。
+   *
+   * 遮罩刻意用 **主界面底色**（不是 surface）：浅色下 surface 比 base 亮一档，
+   * 叠在明亮的材质上会拉出一条明显的浅色带，看起来「标题栏和界面不是一套」。
+   * 透明度留约四成给材质，既看得见透，色调又不跳。
+   */
+  --glass-titlebar-bg: color-mix(in srgb, var(--color-bg-base) 76%, transparent);
+  /* 顶部一道细高光：给玻璃条一点厚度感，否则只是一块半透明色 */
+  --glass-titlebar-sheen: rgba(255, 255, 255, 0.5);
+  --glass-titlebar-border: color-mix(in srgb, var(--color-border) 55%, transparent);
+
+  /*
+   * 标题栏**下方**的壳层。分两级是有原因的：材质只认「它头顶上所有层的透过率相乘」，
+   * 页脚条如果真的压在内容区那层遮罩**之上**，两层的透过率相乘后只剩 1%（8% × 12%），
+   * 材质等于透不出来 —— 这就是「页脚条怎么调都不像玻璃」的根因（2026-10-13）。
+   *
+   * 所以拆成：外壳一层薄遮罩（--glass-shell-bg）+ 内容区再压一层（--glass-region-bg），
+   * 乘起来正好是想要的 8% 透出；而页脚条**不再压第二层**，直接吃外壳那层，
+   * 材质透出量是内容区的两三倍，玻璃才看得见。
+   */
+  --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 80%, transparent);
+  --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 62%, transparent);
+  /*
+   * 单层容器（AI 辅助 / 录音两个窗口的根元素）用这个：它们只有一层，
+   * 所以取的是上面两级乘出来的**最终观感**。
+   */
+  --glass-app-bg: color-mix(in srgb, var(--color-bg-base) 92%, transparent);
+  --glass-panel-bg: color-mix(in srgb, var(--color-bg-surface) 90%, transparent);
+  /* 文字光晕：半透明底上文字对比会随背后的画面浮动，用与底色同向的极淡描边补回来 */
+  --glass-text-halo: rgba(255, 255, 255, 0.6);
+
+  /* 描边 */
+  --color-border: #dcdcdc;
+  --color-border-strong: #c2c2c2;
+  --color-border-subtle: #ebebeb;
+
+  /* 文字 */
+  --color-text-primary: #1c1c1c;
+  --color-text-secondary: #5c5c5c;
+  --color-text-tertiary: #8f8f8f;
+  --color-text-disabled: #b5b5b5;
+  --color-text-inverse: #ffffff;
+
+  /* 强调：中性深灰。作实心底时配 --color-text-inverse 白色文字 */
+  --color-accent: #2b2b2b;
+  --color-accent-hover: #404040;
+  --color-accent-active: #1a1a1a;
+  --color-accent-subtle: #ebebeb;
+  --color-accent-border: #c4c4c4;
+  --color-accent-text: #1f1f1f;
+
+  /* 语义色 */
+  --color-success: #15803d;
+  --color-success-subtle: #e5f6ea;
+  --color-success-border: #a5d8b6;
+  --color-warning: #b45309;
+  --color-warning-subtle: #fdf1e0;
+  --color-warning-border: #f0cd96;
+  --color-danger: #b91c1c;
+  --color-danger-subtle: #fdeceb;
+  --color-danger-border: #efb0ac;
+  --color-info: #55697a;
+  --color-info-subtle: #edf1f4;
+  --color-info-border: #c0cbd4;
+
+  /* AI 相关操作的强调色：靛蓝。刻意避开红色（红色在本项目里是删除/危险语义），
+     也无蓝色那么接近系统默认链接色，作实心底配白色文字足够醒目 */
+  --color-ai: #4f46e5;
+  --color-ai-hover: #4338ca;
+  --color-ai-active: #3730a3;
+  --color-ai-subtle: #eef2ff;
+  --color-ai-border: #c7d2fe;
+  --color-ai-text: #4338ca;
+
+  /* 波形与字幕色块：用亮度而非色相区分状态 */
+  --color-waveform: #a8a8a8;
+  --color-waveform-played: #4a4a4a;
+  --color-segment-band: rgba(0, 0, 0, 0.09);
+  --color-segment-band-active: rgba(0, 0, 0, 0.19);
+  --color-segment-border: #3f3f3f;
+  --color-playhead: #c2410c;
+  --color-grid-line: rgba(0, 0, 0, 0.07);
+
+  /* 时间轴字幕条（浅色下靠加深底色表示选中，不引入彩色） */
+  --color-lane-line: rgba(0, 0, 0, 0.07);
+  --color-clip: rgba(0, 0, 0, 0.08);
+  --color-clip-active: rgba(0, 0, 0, 0.2);
+  --color-clip-border: rgba(0, 0, 0, 0.16);
+  --color-clip-border-active: #4a4a4a;
+  --color-clip-grip: rgba(0, 0, 0, 0.22);
+  /* 超出「同时最多 5 条」的字幕条：只能和第 5 层叠在一起，靠红色摘出来 */
+  --color-clip-overflow: #fdeceb;
+  --color-clip-overflow-border: #efb0ac;
+  /* 已播区域：浅色下压暗一档，与未播区分 */
+  --color-waveform-played-mask: rgba(0, 0, 0, 0.05);
+
+  /* 阴影 */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.09), 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.16), 0 4px 8px rgba(0, 0, 0, 0.06);
+
+  /* 滚动条 */
+  --color-scrollbar: #cccccc;
+  --color-scrollbar-hover: #adadad;
+
+  /* 遮罩 */
+  --color-overlay: rgba(0, 0, 0, 0.42);
+}

@@ -1,0 +1,41 @@
+{
+  "name": "xbaos-subtitle-generator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "XBAOS 字幕生成器 本地离线的音频转字幕工具",
+  "author": "XBAOS",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "node tools/dev.mjs",
+    "dev:stop": "node tools/dev-stop.mjs",
+    "dev:ui": "vite",
+    "build:ui": "vite build",
+    "preview:ui": "vite preview",
+    "unit": "node tools/run-unit.mjs",
+    "start": "electron .",
+    "typecheck": "vue-tsc --noEmit",
+    "probe": "node tools/ui-probe.mjs",
+    "probe:electron": "node tools/electron-probe.mjs",
+    "probe:site": "node tools/site-probe.mjs",
+    "verify": "npm run typecheck && npm run build:ui && node tools/ui-probe.mjs",
+    "verify:app": "npm run typecheck && npm run build:ui && node tools/electron-probe.mjs",
+    "engine": "bash engine/build.sh",
+    "dist:dir": "npm run build:ui && electron-builder --win --dir",
+    "dist": "npm run build:ui && electron-builder --win"
+  },
+  "dependencies": {
+    "pinia": "^4.0.3",
+    "vue": "^3.5.43"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@vitejs/plugin-vue": "^6.0.9",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.2",
+    "vue-tsc": "^3.3.12"
+  }
+}

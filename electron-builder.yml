@@ -1,0 +1,104 @@
+# electron-builder 打包配置
+#
+# 遵循两条硬约束：
+#   1. 产物不含任何专有编解码器（downloadAlternateFFmpeg 把 Electron 自带的
+#      含 H.264 / AAC 的 ffmpeg 换成纯开源编解码版本）
+#   2. 不含任何需要单独授权的第三方组件。识别引擎是 /MT 静态链接，
+#      不依赖 vcruntime140.dll 之类的微软运行时
+
+appId: com.xbaos.subtitle-generator
+productName: XBAOS 字幕生成器
+copyright: © 2026 XBAOS
+executableName: XBAOS-Subtitle-Generator
+
+directories:
+  output: release
+  buildResources: build
+
+# 进 asar 的内容。engine/ 与 models/ 走 extraResources（要能以真实文件路径访问，
+# 引擎进程不能从 asar 里读）
+files:
+  - dist/**/*
+  - electron/**/*
+  - package.json
+  - '!**/*.map'
+  - '!**/*.ts'
+
+asar: true
+
+extraResources:
+  # 识别引擎。Vulkan 版同时含 CPU 后端，机器没显卡或用户选了 cpu 时会自动走 CPU，
+  # 所以只发这一个就够。用 /MT 静态链接，零外部 DLL 依赖。
+  - from: engine/build/vulkan/bin/xbaos-engine.exe
+    to: engine/xbaos-engine.exe
+
+  # 模型**不随包分发**（2026-10-14 起）：安装包里不含任何模型文件。
+  # 用户要么在软件内下载（模型管理页），要么自行把 ggml-*.bin 放进模型目录后导入。
+  # 首次启动若一个模型都找不到，软件会自动跳到模型管理页提示配置。
+  #
+  # 主进程的模型查找本来就同时看 userData/models（用户自己放的）和这里的
+  # resources/models，两种发行形态共用同一套查找逻辑，不需要改代码（见 electron/paths.js）。
+  # 若将来要恢复「随包分发」，把下面两行取消注释即可 —— 代价是安装包增大约 550MB。
+  #
+  # - from: models/ggml-small.bin
+  #   to: models/ggml-small.bin
+
+  - from: licenses
+    to: licenses
+    filter:
+      - '**/*'
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # 原创图标（tools/make-icons.py 生成，纯几何方块组合）
+  icon: build/icon.ico
+  # 明确声明不请求管理员权限（应用本身不需要，装到用户目录即可）
+  requestedExecutionLevel: asInvoker
+  legalTrademarks: XBAOS
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: XBAOS 字幕生成器
+  # 安装器与卸载程序图标（桌面快捷方式、开始菜单、控制面板卸载入口共用）
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  # 向导页的品牌位图（tools/make-installer-art.py 生成，纯几何，不含文字）。
+  # 尺寸必须是 NSIS 规定的 164x314 / 150x57 —— 给别的尺寸 MUI 会拉伸，边缘会糊。
+  # 这三个文件放在 build/ 下就是默认位置，这里写出来是为了改名字时能一眼找到。
+  installerSidebar: build/installerSidebar.bmp
+  uninstallerSidebar: build/uninstallerSidebar.bmp
+  installerHeader: build/installerHeader.bmp
+  # 2052 = 简体中文
+  installerLanguages:
+    - zh_CN
+  language: '2052'
+  deleteAppDataOnUninstall: false
+  # 许可页（MUI_PAGE_LICENSE）：展示「权利归 XBAOS + 源代码依 Apache 2.0 开源」
+  # 的授权摘要。license.txt 必须带 UTF-8 BOM，否则 NSIS 的 Unicode 安装器会按
+  # ANSI 码页读，中文全是乱码（builder 只对「按语言分文件」的那条路径自动补
+  # BOM，单文件这条不管 —— 因此该文件用 utf-8-sig 生成并保持 BOM）。
+  license: build/license.txt
+
+# 只保留简体中文与英文两套 Chromium 语言包，省掉 60 多个用不上的
+electronLanguages:
+  - zh-CN
+  - en-US
+
+# 关键：换成不含专有编解码器的 ffmpeg。
+# Electron 自带的 ffmpeg.dll 含 H.264 / AAC 解码器，属于需要专利授权的部分；
+# 本应用从设计上就不解码这些格式（音频走 dr_libs / stb_vorbis / libopus），
+# 所以必须把这份库也换掉，避免「只是随包携带」也构成风险。
+downloadAlternateFFmpeg: true
+
+# 不产出调试符号，减小体积
+includePdb: false
+
+# 不自动发布
+publish: null

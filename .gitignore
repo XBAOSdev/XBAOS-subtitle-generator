@@ -1,0 +1,65 @@
+# ===== 依赖 =====
+node_modules/
+.pnpm-store/
+
+# ===== 构建产物 =====
+dist/
+# dist-test / dist-test2 等临时打包目录：里面是完整 win-unpacked（含 exe 与 Chromium 资源），
+# 单个就有数百 MB，误提交会直接超过 GitHub 100MB 单文件上限
+dist-*/
+dist-electron/
+release/
+out/
+
+# ===== 缓存 =====
+.vite/
+*.tsbuildinfo
+.cache/
+
+# ===== 模型（第三方权重，体积大，一律不入库）=====
+# **不要只按扩展名拦**（早先写的是 models/*.bin）：改名成 .bi、.gguf、无后缀都会漏掉，
+# 而一个 465MB 的文件就足以让整次 push 被 GitHub 拒掉（单文件硬上限 100MB）。
+# 整个目录整体忽略，才是挡得住的写法。模型可从模型页下载，或用 engine/fetch-deps.sh 获取。
+models/
+*.gguf
+*.onnx
+
+# ===== 编译/打包出的二进制（双保险）=====
+# 源码里不该出现这些；散落一个就足以撑爆仓库
+*.exe
+*.dll
+*.dylib
+*.so
+*.lib
+*.node
+*.blockmap
+*.obj
+*.pdb
+
+# ===== 引擎（whisper.cpp 独立进程）=====
+engine/build/
+engine/out/
+# 第三方源码：用 engine/fetch-deps.sh 获取，不入库
+engine/third_party/
+# 测试用音频：脚本生成，不入库
+engine/test-data/
+
+# ===== 编辑器与系统 =====
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# ===== 内部文档（不公开）=====
+# 方案、复盘、开发日志、待办与协议草案：内部资料，不随源码开源。
+# 面向使用者的说明写在 README.md；开发说明见 docs/README-dev.md（仅本机）
+PLAN.md
+docs/
+
+# ===== 本地工作目录（AI 记忆、代码备份、探针截图）=====
+.workbuddy/
+
+# ===== 日志 =====
+*.log
+npm-debug.log*
