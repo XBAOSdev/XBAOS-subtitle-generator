@@ -1832,6 +1832,59 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
       readSource('build/license.txt').includes('不属于本软件的权利范围'),
     '模型是 MIT、著作权属原作者，我方不能主张',
   )
+
+  /* ---- 「联网面」文案守门（2026-10-16）
+   *
+   * 软件**不是**完全离线：检查更新默认开启，下载模型要访问模型仓库；AI 校对与 AI 翻译
+   * 还要把内容交给用户自选的第三方在线服务。可「全程离线」「软件本身不联网」这类
+   * 绝对句一度散落在 README、官网首屏、官网 AI 展示块、THIRD-PARTY 的取舍理由里 ——
+   * 全是会被现实打脸的承诺，本轮由用户自己指出来。
+   *
+   * 禁的是**绝对句**，不是「离线」这个词：
+   * 「关掉自动检查、模型就位之后可以完全离线使用」是有条件的事实陈述，仍然允许。
+   */
+  const ABSOLUTE_OFFLINE_CLAIMS = [
+    '全程离线',
+    '全程不联网',
+    '不需要联网',
+    '零网络请求',
+    '软件本身不联网',
+    '本软件不联网',
+    '不依赖任何在线服务',
+    // THIRD-PARTY 里那句「与应用『全过程本地完成、不上传音频』的承诺冲突」就是这一句：
+    // 它把「不上传」说成了覆盖整个软件的原则承诺，而软件确实会联网
+    '全过程本地完成',
+  ]
+  const networkCopySurfaces = [
+    'README.md',
+    'src/views/HomeView.vue',
+    'src/views/EditorView.vue',
+    'src/views/AssistView.vue',
+    'src/views/AboutView.vue',
+    'src/components/dialogs/FormatHelpDialog.vue',
+    'licenses/THIRD-PARTY.md',
+    'build/license.txt',
+    'NOTICE',
+  ]
+  for (const rel of networkCopySurfaces) {
+    const hits = ABSOLUTE_OFFLINE_CLAIMS.filter((claim) => readSource(rel).includes(claim))
+    check(
+      `「${rel}」没有「全程离线 / 软件不联网」这类绝对句`,
+      hits.length === 0,
+      `命中：${hits.join(' / ')}`,
+    )
+  }
+  const readmeCopy = readSource('README.md')
+  check(
+    'README 如实写明会联网的两处，并点出检查更新默认开启',
+    readmeCopy.includes('检查更新') && readmeCopy.includes('下载模型') && readmeCopy.includes('默认开启'),
+    '只写「不上传」不够：检查更新默认开启、下载模型会访问仓库，都得说清楚',
+  )
+  check(
+    'README 说明 AI 功能的内容会离开本机',
+    readmeCopy.includes('第三方在线 AI 服务') && readmeCopy.includes('离开本机'),
+    '只讲「剪贴板中转」会让读者以为内容从没出过本机',
+  )
 }
 
 /* ---- 架构不变量：时间轴（泳道 / 缩放 / 拖拽边界） ----
@@ -2191,9 +2244,16 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '应同时读 window.xbaos?.appVersion 与 __APP_VERSION__',
   )
   check(
-    'package.json 版本号是三段语义化版本（更新检查要靠 semver 比较）',
-    /^\d+\.\d+\.\d+$/.test(pkgVersion),
+    'package.json 版本号是合法语义化版本（更新检查要靠 semver 比较）',
+    // 允许预发布后缀：测试版就是 1.0.0-beta，得能如实写在这里。
+    // 判定复用 update.js 的规则，避免「守门认为合法、运行时认为非法」两套标准。
+    isValidVersion(pkgVersion),
     pkgVersion,
+  )
+  check(
+    '测试版带预发布标识时仍然能通过更新比较',
+    compareVersions(pkgVersion, pkgVersion) === 0 && isValidVersion(pkgVersion),
+    `当前 package.json 版本：${pkgVersion}`,
   )
 }
 
@@ -2240,9 +2300,29 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   check('版本比较：段数不同补零后相等', compareVersions('1.2', '1.2.0') === 0)
   check('版本比较：按数字而不是字典序', compareVersions('0.10.0', '0.9.9') === 1, '0.10 > 0.9')
   check('版本比较：低位更大', compareVersions('1.0.1', '1.1.0') === -1)
-  check('版本号合法性：拒绝 v 前缀与后缀', !isValidVersion('v1.0.0') && !isValidVersion('1.0.0-beta'))
+  check('版本号合法性：拒绝 v 前缀与构建元数据', !isValidVersion('v1.0.0') && !isValidVersion('1.0.0+build'))
   check('版本号合法性：接受两段到四段', isValidVersion('1.0') && isValidVersion('1.2.3.4'))
   check('版本号合法性：拒绝非字符串', !isValidVersion(123 as unknown as string))
+  check(
+    '版本号合法性：接受预发布标识（测试版要能如实写进 package.json）',
+    isValidVersion('1.0.0-beta') && isValidVersion('1.0.0-beta.2') && isValidVersion('1.0.0-rc.1'),
+    '不接受的话 app.getVersion() 一读回来就会被判非法，更新检查直接坏掉',
+  )
+  check('版本号合法性：拒绝空预发布标识', !isValidVersion('1.0.0-') && !isValidVersion('1.0.0-.'))
+
+  // ---- 预发布标识的比较（semver 规则）
+  check('预发布小于同版本正式版', compareVersions('1.0.0-beta', '1.0.0') === -1)
+  check('正式版大于同版本预发布', compareVersions('1.0.0', '1.0.0-beta') === 1)
+  check(
+    '预发布之间按字母序',
+    compareVersions('1.0.0-alpha', '1.0.0-beta') === -1 &&
+      compareVersions('1.0.0-beta', '1.0.0-rc') === -1,
+  )
+  check('预发布里数字段小于字母段', compareVersions('1.0.0-1', '1.0.0-alpha') === -1)
+  check('预发布段数少的更小', compareVersions('1.0.0-beta', '1.0.0-beta.1') === -1)
+  check('预发布的数字段按数值比而不是字典序', compareVersions('1.0.0-beta.2', '1.0.0-beta.10') === -1)
+  check('预发布标识相同则相等', compareVersions('1.0.0-beta', '1.0.0-beta') === 0)
+  check('数字段的优先级高于预发布标识', compareVersions('1.0.1-beta', '1.0.0') === 1, '1.0.1 > 1.0.0')
 
   // ---- 清单校验
   check('清单校验：正常清单通过', parseManifest(manifest, 'subtitle-generator').ok)
@@ -2291,6 +2371,18 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
       '清单地址与 branding 同步改了（改域名时两处一起改）',
       !manifestLine.includes('update.xbaos.com.cn') &&
         !src('src/branding.ts').includes('update.xbaos.com.cn'),
+    )
+    /*
+     * 更新弹窗的按钮必须用清单里的 `download.url`，不能退化成「打开官网首页」——
+     * 官网靠那个地址上的 `?download=1` 判断要不要自动拉起下载弹窗，
+     * 一旦改回无参的 `openTarget()`，参数就静默失效、用户落在首页找不到按钮。
+     */
+    const dialogSrc = src('src/components/dialogs/UpdateDialog.vue')
+    check(
+      '更新弹窗的下载按钮走清单里的 download.url',
+      /update\.openTarget\(target\)/.test(dialogSrc) &&
+        /const target = update\.downloadUrl \|\| update\.targetUrl/.test(dialogSrc),
+      '退化成 openTarget() 的话，官网的 ?download=1 参数永远传不出去',
     )
   }
 

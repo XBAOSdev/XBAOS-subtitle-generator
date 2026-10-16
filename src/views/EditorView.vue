@@ -215,7 +215,7 @@ function gotoSegment(id: string, start: number): void {
 /**
  * AI 校对：把「提示词 + 当前条目」交给辅助窗口。
  *
- * 走剪贴板中转：软件本身不联网，提示词由用户手工粘到网页版 AI 助手，
+ * 走剪贴板中转：软件不代用户发起请求，提示词由用户手工粘到网页版 AI 助手，
  * 结果再由用户复制回来。所以这里只负责准备数据并开窗。
  */
 /**
@@ -574,7 +574,7 @@ async function saveInPlace(): Promise<void> {
         :disabled="!canAiReview"
         :title="
           canAiReview
-            ? '交给网页版 AI 助手校对。经剪贴板中转，本软件不联网'
+            ? '交给网页版 AI 助手校对。经剪贴板中转，软件不代你发送'
             : '当前没有可校对的字幕'
         "
         @click="openAiReview"
@@ -588,7 +588,7 @@ async function saveInPlace(): Promise<void> {
         :disabled="!canAiTranslate"
         :title="
           canAiTranslate
-            ? '交给网页版 AI 助手翻译成其他语言。经剪贴板中转，本软件不联网'
+            ? '交给网页版 AI 助手翻译成其他语言。经剪贴板中转，软件不代你发送'
             : '当前没有可翻译的字幕'
         "
         @click="openAiTranslate"

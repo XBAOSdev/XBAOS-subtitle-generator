@@ -226,7 +226,7 @@ async function start(event?: MouseEvent): Promise<void> {
       <div class="view__head-inner">
         <h1 class="view__title">导入音频</h1>
         <p class="view__desc">
-          识别与导出全部在本机完成，不联网、不上传。识别完成后先进入预览，确认无误再导出。
+          识别与导出全部在本机完成，不会上传任何文件。识别完成后先进入预览，确认无误再导出。
         </p>
       </div>
     </header>

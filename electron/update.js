@@ -28,29 +28,82 @@ export const MANIFEST_URL = 'https://subtitle.xbaos.com.cn/data/subtitle.json'
 export const DEFAULT_TIMEOUT_MS = 8000
 
 /**
- * 版本号是否合法。接受 2~4 段数字（`0.1.0` / `1.2` / `1.2.3.4`），
- * 不接受 `v1.0`、`1.0-beta`、`1.0.0+build` 这类形式 ——
+ * 版本号是否合法。
+ *
+ * 主体是 2~4 段数字（`0.1.0` / `1.2` / `1.2.3.4`），后面允许跟一个
+ * **预发布标识**（`1.0.0-beta`、`1.0.0-beta.2`、`1.0.0-rc.1`）——
+ * 测试版要能如实写进 package.json 与版本清单，否则测试者报上来的版本号
+ * 会和正式版混在一起分不清。
+ *
+ * 仍然不接受：`v1.0`（前缀）、`1.0.0+build`（构建元数据）、非字符串。
  * 与其猜用户的意图，不如直接判非法让清单作者改。
  */
 export function isValidVersion(value) {
-  return typeof value === 'string' && /^\d+(\.\d+){1,3}$/.test(value.trim())
+  if (typeof value !== 'string') return false
+  return /^\d+(\.\d+){1,3}(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(value.trim())
+}
+
+/** 拆成「数字段」与「预发布标识」两部分 */
+function parseVersion(value) {
+  const text = String(value).trim()
+  const dash = text.indexOf('-')
+  const core = dash === -1 ? text : text.slice(0, dash)
+  const pre = dash === -1 ? '' : text.slice(dash + 1)
+  return {
+    nums: core.split('.').map((part) => Number.parseInt(part, 10) || 0),
+    pre: pre ? pre.split('.') : [],
+  }
 }
 
 /**
- * 逐段按数字比较版本号。
- * @returns {number} a < b 返回 -1，相等 0，a > b 返回 1
+ * 预发布标识的比较，规则同 semver：
+ *   - 没有预发布标识的**大于**有标识的：1.0.0 > 1.0.0-beta
+ *   - 逐段比：纯数字段按数值比，且**数字段小于字母段**（1.0.0-1 < 1.0.0-alpha）
+ *   - 字母段按 ASCII 字典序（1.0.0-alpha < 1.0.0-beta < 1.0.0-rc）
+ *   - 前面全一样时，段数少的更小（1.0.0-beta < 1.0.0-beta.1）
  */
-export function compareVersions(a, b) {
-  const pa = String(a).trim().split('.')
-  const pb = String(b).trim().split('.')
-  const n = Math.max(pa.length, pb.length)
+function comparePrerelease(a, b) {
+  if (a.length === 0 && b.length === 0) return 0
+  if (a.length === 0) return 1
+  if (b.length === 0) return -1
+
+  const n = Math.max(a.length, b.length)
   for (let i = 0; i < n; i++) {
-    // 段数不同时短的一侧补 0：1.2 与 1.2.0 视为相同
-    const x = Number.parseInt(pa[i] ?? '0', 10) || 0
-    const y = Number.parseInt(pb[i] ?? '0', 10) || 0
+    const x = a[i]
+    const y = b[i]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+
+    const xNum = /^\d+$/.test(x)
+    const yNum = /^\d+$/.test(y)
+    if (xNum && yNum) {
+      const diff = Number(x) - Number(y)
+      if (diff !== 0) return diff < 0 ? -1 : 1
+      continue
+    }
+    if (xNum !== yNum) return xNum ? -1 : 1
     if (x !== y) return x < y ? -1 : 1
   }
   return 0
+}
+
+/**
+ * 逐段按数字比较版本号，数字段相同时再按 semver 规则比预发布标识。
+ * @returns {number} a < b 返回 -1，相等 0，a > b 返回 1
+ */
+export function compareVersions(a, b) {
+  const pa = parseVersion(a)
+  const pb = parseVersion(b)
+
+  const n = Math.max(pa.nums.length, pb.nums.length)
+  for (let i = 0; i < n; i++) {
+    // 段数不同时短的一侧补 0：1.2 与 1.2.0 视为相同
+    const x = pa.nums[i] ?? 0
+    const y = pb.nums[i] ?? 0
+    if (x !== y) return x < y ? -1 : 1
+  }
+
+  return comparePrerelease(pa.pre, pb.pre)
 }
 
 /**

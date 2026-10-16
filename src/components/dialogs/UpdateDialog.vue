@@ -27,10 +27,20 @@ function later(): void {
   close()
 }
 
+/**
+ * 打开下载入口。
+ *
+ * 优先用清单里的 `download.url`，而不是官网首页 —— 那边可以带一个参数
+ * （当前是 `?download=1`），官网读到后会在页面加载完直接拉起下载弹窗，
+ * 用户少点一次、也不会落在首页找不到按钮。清单没给这个字段时才退回官网首页。
+ *
+ * 两个地址都要过 `allowedExternalUrl` 白名单，只有自家域名能打开。
+ */
 async function goDownload(): Promise<void> {
-  const ok = await update.openTarget()
+  const target = update.downloadUrl || update.targetUrl
+  const ok = await update.openTarget(target)
   if (!ok) {
-    ui.notify('error', '打不开官网', '请手动在浏览器里访问 ' + update.targetUrl)
+    ui.notify('error', '打不开下载页', '请手动在浏览器里访问 ' + target)
     return
   }
   update.dismiss()
