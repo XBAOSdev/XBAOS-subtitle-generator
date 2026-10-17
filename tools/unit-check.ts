@@ -1859,6 +1859,61 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '用户协议、安装器许可页、NOTICE、第三方清单四处都要写明「多数 MIT、部分中文微调版 Apache-2.0」',
   )
 
+  /* ---- 演示数据必须自报 demo 标记（2026-10-17 修）
+   *
+   * `AudioPlayer.vue` 的 `loadAt()` 靠 `viewFile.demo` 区分两种「没有 blobUrl」：
+   * 演示数据（正常，播放交给定时器）与导入的字幕文件（真没音频轨，提示无法试听）。
+   * 这个字段曾经只在 `types/index.ts` 里**声明**过、全库没有一处赋值 ——
+   * 判据恒为 undefined，于是 `?demo=1` 里一点播放就被当成无音频段落：
+   * 播放头不动、还弹「这一段没有音频轨（例如导入的字幕文件），无法试听」。
+   *
+   * probe 的 `demo-playback` 场景跑的是同一条链（真实点击 + 读时间码），
+   * 这里再加一道**静态**守门：它不需要 dev server，跑 unit 就能拦住
+   * 「字段又没人赋值」这类回归。
+   */
+  check(
+    '演示数据自报 demo 标记',
+    readSource('src/stores/project.ts').includes('file.demo = true') &&
+      readSource('src/mock/mockData.ts').includes('demo: true'),
+    'loadDemo 与 makeAudioFile 造出来的条目都要带 demo: true，否则播放器会当成无音频段落',
+  )
+
+  /* ---- 媒体表必须有显式版本号，且组件侧真的去读它（2026-10-17 修）
+   *
+   * 用户报「导入自己的音频：识别正常，但波形空白 + 播放无声 + 提示没有音轨」。
+   * 根因不在读字节、Blob、解码、播放任何一环（这些探针全都验过是好的），
+   * 而是 **`media` 这张 Map 的内容变动没被 Vue 感知**：
+   * `loadMedia()` 把 `blobUrl`/`peaks` 写进条目后，
+   *   ① `AudioPlayer` 的 `singleUrl` computed 永远停在第一次算出的 `null`
+   *      → 判「没有音轨」、`<audio>` 从不设 src，所以**没声音**；
+   *   ② 时间轴读`peaksOf()` 也拿不到新值，且没有任何东西被触发重绘 → **波形空白**。
+   * 对Map 做一次同值`set` 立刻就好 —— 说明读得到、就是没人被通知。
+   *
+   * 反例验过：把下面两处`mediaVersion` 接线拆掉，探针 `media-ui-flow` 立刻
+   * 6条FAIL，提示语原样变回「这一段没有音频轨（例如导入的字幕文件），无法试听」。
+   */
+  const projectSrc = readSource('src/stores/project.ts')
+  const playerSrc = readSource('src/components/AudioPlayer.vue')
+  const trackSrc = readSource('src/components/TimelineTrack.vue')
+  check(
+    '媒体表有显式版本号，且写入口都会touch',
+    projectSrc.includes('const mediaVersion = ref(0)') &&
+      projectSrc.includes('function touchMedia()') &&
+      // 新建条目、blob 就绪、peaks 到位、移除、清空—— 每一处内容变动都要 touch
+      (projectSrc.match(/touchMedia\(\)/g) ?? []).length >= 5,
+    'media 是 ref(new Map)，内容变动不会被 Vue 当成响应式变更；必须靠 mediaVersion 显式广播',
+  )
+  check(
+    '播放器读媒体表时会建立依赖（不能只靠 Map 查找）',
+    playerSrc.includes('void project.mediaVersion'),
+    'singleUrl / partAudioUrl 必须读 mediaVersion，否则地址永远缓存首次算出的 null',
+  )
+  check(
+    '时间轴重绘波形会听媒体表版本号',
+    /watch\(\(\) => \[project\.mediaVersion/.test(trackSrc),
+    'peaks 是异步写进去的，只靠 peaksOf() 的返回值当依赖，peaks 到位那刻没人被通知重绘',
+  )
+
   /* ---- 「联网面」文案守门（2026-10-16）
    *
    * 软件**不是**完全离线：检查更新默认开启，下载模型要访问模型仓库；AI 校对与 AI 翻译

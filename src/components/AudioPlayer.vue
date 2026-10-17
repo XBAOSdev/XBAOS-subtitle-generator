@@ -19,6 +19,17 @@ const isMerged = computed(() => project.isMerge && !!project.mergedFile)
 
 const hasAudio = computed(() => (viewFile.value?.durationSec ?? 0) > 0)
 
+/**
+ * 当前这条是不是**演示数据**（浏览器预览 / `?demo=1` 造出来的条目，没有真实音频）。
+ *
+ * ⚠ 不能用 `!audioUrl` 代替：`audioUrl` 为空有四种完全不同的原因 ——
+ *   演示数据、导入的字幕文件、真实音频还在解码（blobUrl 尚未生成）、合并模式。
+ *   早先底部那句说明直接挂在 `!audioUrl` 上，于是**导入一个字幕文件**也会被
+ *   告知「演示数据没有真实音频，播放由模拟进度驱动」，用户会以为软件把演示
+ *   数据当成正式内容了。
+ */
+const isDemo = computed(() => viewFile.value?.demo === true)
+
 /** 播放器当前该盯着的字幕条目（有选中就认选中的，否则认游标压着的那条） */
 const currentSegment = computed(() => {
   const segments = viewFile.value?.segments ?? []
@@ -53,6 +64,9 @@ const partIndex = computed(() => partIndexOfTime(editor.playheadSec))
  * 是 `v-if` 渲染的 —— 元素当场被卸载，正在播的声音直接消失。
  */
 function partAudioUrl(index: number): string | null {
+  // 显式读一次 mediaVersion 建立依赖：media 这张 Map 的**内容**变动
+  // 不会被 Vue 的插桩当成响应式变更（实测见 store 里 mediaVersion 的注释）。
+  void project.mediaVersion
   const part = project.mergedParts[index]
   if (!part) return null
   return project.media.get(part.fileId)?.blobUrl ?? null
@@ -60,6 +74,7 @@ function partAudioUrl(index: number): string | null {
 
 /** 独立模式下的音频地址 */
 const singleUrl = computed(() => {
+  void project.mediaVersion
   const id = project.viewFileId
   return id ? (project.media.get(id)?.blobUrl ?? null) : null
 })
@@ -69,6 +84,19 @@ const audioUrl = computed(() => (isMerged.value ? partAudioUrl(partIndex.value) 
 
 /** 当前这一段没有音频（例如导入的字幕文件） */
 const spanHasNoAudio = ref(false)
+
+/**
+ * 底部黄字提示的内容。
+ *
+ * 「没有音频轨」与「读不到音频文件」必须分开说：地址为空的成因有两种都落到
+ * `spanHasNoAudio`，但前者是正常现象（字幕文件本来就没音频），后者是故障
+ * （路径失效 / 权限 / 文件被占用），只报真实原因用户才知道去查什么 ——
+ * 以前两种情况共用同一句「这一段没有音频轨」，读文件失败被完全掩盖。
+ */
+const noAudioHint = computed(() => {
+  const error = project.mediaErrorOf(project.viewFileId)
+  return error ? `读不到这个文件的音频：${error}` : '这一段没有音频轨（例如导入的字幕文件），无法试听。'
+})
 
 /* ------------------------------------------------------------- 播放实现 */
 /*
@@ -265,8 +293,11 @@ async function loadAt(globalSec: number): Promise<void> {
         url = partAudioUrl(idx)
       }
       if (!url) {
+        /* 没有音频 ≠ 不能走时间轴。这里**只给提示、不掐播放**：
+           以前 `if (wantPlay) stopPlayback()` 会让「点播放」立刻弹回，看着像按钮坏了。
+           交给下面的定时器推播放头，用户仍能沿时间轴翻字幕，只是听不到声音；
+           真正的解码失败由 `onAudioError` 单独处理（那条才会真的停播并弹 toast）。 */
         spanHasNoAudio.value = true
-        if (wantPlay) stopPlayback()
         return
       }
       spanHasNoAudio.value = false
@@ -281,8 +312,8 @@ async function loadAt(globalSec: number): Promise<void> {
     await project.ensureMedia(id)
     const url = singleUrl.value
     if (!url) {
+      /* 同上：导入的字幕文件没有音频轨，但播放头照走，别让播放键「点了没反应」。 */
       spanHasNoAudio.value = true
-      if (wantPlay) stopPlayback()
       return
     }
     spanHasNoAudio.value = false
@@ -839,14 +870,12 @@ function detachSpeedListeners(): void {
     </div>
 
     <p v-if="buffering" class="player__hint">正在缓冲这一段音频…</p>
-    <p v-else-if="spanHasNoAudio" class="player__hint player__hint--warn">
-      这一段没有音频轨（例如导入的字幕文件），无法试听。
-    </p>
+    <p v-else-if="spanHasNoAudio" class="player__hint player__hint--warn">{{ noAudioHint }}</p>
     <p v-if="isMerged" class="player__note">
       合并时间轴由 {{ project.supportedFiles.length }} 段音频依次拼接，试听会自动接续播放各段
       （段与段之间有 8ms 淡化，消掉拼接处的爆音）；刚切到某一段时需要先解码，可能略有延迟。
     </p>
-    <p v-else-if="!audioUrl" class="player__note">
+    <p v-else-if="isDemo" class="player__note">
       演示数据没有真实音频，播放由模拟进度驱动；导入真实文件后将播放原声。
     </p>
 

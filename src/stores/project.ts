@@ -95,6 +95,14 @@ interface FileMedia {
   /** Blob URL，交给 <audio> 播放真实音频 */
   blobUrl: string | null
   loading: boolean
+  /**
+   * 上一次读取 / 解码失败的**真实原因**。
+   *
+   * 读文件失败（路径失效、权限、文件被占用）与「这一段本来就没有音频轨」
+   * 是两回事，但界面上曾经共享同一句提示 —— 用户只会说「检测不到音轨」，
+   * 完全看不出是文件读不到。失败原因必须记下来，让播放器据实说话。
+   */
+  error: string | null
   /** 合并产物才有的分段表：用于按段加载音频与拼接波形 */
   parts?: MergedPart[]
 }
@@ -130,6 +138,26 @@ export const useProjectStore = defineStore('project', () => {
    * 不放进 AudioFile 本体 —— 这份数据大，且不参与序列化。
    */
   const media = ref(new Map<string, FileMedia>())
+
+  /**
+   * 媒体表的内容版本号。
+   *
+   * ⚠ **不能再指望 Vue 对 `media` 这张 Map 的插桩。**实测（探针 media-ui-flow）：
+   * `loadMedia()` 把 `blobUrl` / `peaks` 写进条目之后，
+   * ① `AudioPlayer` 的 `singleUrl` computed 永远停在第一次算出的 `null`
+   *    → 界面判定「这一段没有音轨」，`<audio>` 的 src 从来没被设过；
+   * ② 时间轴读 `peaksOf()` 也拿不到新值，且**没有任何东西被触发重绘**
+   *    → 波形要么画不出来、要么画成空白。
+   * 对 Map 做一次同值 `set` 立刻就好了 —— 说明读得到、就是没人被通知。
+   *
+   * 所以这里给一张自己记账的版本号：媒体表任何一处变动都 `touchMedia()`，
+   * 需要它的 computed / watcher 读一下 `mediaVersion` 就会重新求值。
+   * 这是显式依赖，不依赖框架对集合类型插桩的细节。
+   */
+  const mediaVersion = ref(0)
+  function touchMedia(): void {
+    mediaVersion.value += 1
+  }
 
   /**
    * 导出过的字幕落点。
@@ -476,12 +504,15 @@ export const useProjectStore = defineStore('project', () => {
         },
         blobUrl: null,
         loading: i < parts.length - 1,
+        error: null,
         parts,
       })
+      touchMedia()
     }
 
     if (!hasAny) {
-      media.value.set(MERGED_FILE_ID, { peaks: null, blobUrl: null, loading: false, parts })
+      media.value.set(MERGED_FILE_ID, { peaks: null, blobUrl: null, loading: false, error: null, parts })
+      touchMedia()
     }
   }
 
@@ -714,6 +745,7 @@ export const useProjectStore = defineStore('project', () => {
     const media1 = media.value.get(id)
     if (media1?.blobUrl) URL.revokeObjectURL(media1.blobUrl)
     media.value.delete(id)
+    touchMedia()
     // 文件都移出队列了，它的导出落点也没有意义了
     exportRecords.value.delete(id)
     savedSignatures.value.delete(id)
@@ -738,6 +770,7 @@ export const useProjectStore = defineStore('project', () => {
       if (m.blobUrl) URL.revokeObjectURL(m.blobUrl)
     }
     media.value.clear()
+    touchMedia()
     files.value = []
     activeFileId.value = null
     progress.value = 0
@@ -767,6 +800,15 @@ export const useProjectStore = defineStore('project', () => {
     finalStatus.clear()
     const list = clone(mockFiles)
     for (const file of list) {
+      /* 演示数据必须**自己声明**是演示数据。
+       *
+       * 播放器 `AudioPlayer.vue` 的 `loadAt()` 靠这个字段区分两种「没有 blobUrl」：
+       * 演示数据（正常，播放交给定时器）与导入的字幕文件（真没音频，提示无法试听）。
+       * 这个字段曾经只在类型定义里出现过、**全库没有一处赋值** —— 判据恒为
+       * undefined，于是演示数据一点播放就被当成无音频段落：置 spanHasNoAudio
+       * 并 stopPlayback()，表现为「播放头不动 + 弹『这一段没有音频轨』」。
+       */
+      file.demo = true
       finalStatus.set(file.id, file.status)
       if (file.status !== 'unsupported') {
         file.status = applyResult ? (finalStatus.get(file.id) ?? 'pending') : 'queued'
@@ -781,15 +823,24 @@ export const useProjectStore = defineStore('project', () => {
   function mediaOf(fileId: string): FileMedia {
     let m = media.value.get(fileId)
     if (!m) {
-      m = { peaks: null, blobUrl: null, loading: false }
+      m = { peaks: null, blobUrl: null, loading: false, error: null }
       media.value.set(fileId, m)
+      touchMedia()
     }
     return m
   }
 
   function peaksOf(fileId: string | null): AudioPeaks | null {
     if (!fileId) return null
+    void mediaVersion.value // 建立依赖：媒体表一变，这里重新求值
     return media.value.get(fileId)?.peaks ?? null
+  }
+
+  /** 读不到音频的真实原因（读取 / 解码失败时非空），给播放器提示用 */
+  function mediaErrorOf(fileId: string | null): string | null {
+    if (!fileId) return null
+    void mediaVersion.value
+    return media.value.get(fileId)?.error ?? null
   }
 
 /**
@@ -810,13 +861,18 @@ const MIME_BY_EXT: Record<string, string> = {
 }
 
   /**
-   * 确保一个文件的波形与可播放地址已就绪。
+   * 正在进行的媒体加载任务。
    *
-   * 读文件字节后用 AudioContext 解码：Chromium 原生支持 WAV / MP3 /
-   * FLAC / OGG / Opus，正好覆盖软件承诺的全部格式，引擎侧不用重复
-   * 输出波形数据。解码出峰值后立刻丢掉 PCM（内存大头），
-   * 只保留原始压缩字节做的 Blob 交给 <audio> 播放。
+   * **并发调用者必须共享同一个 Promise，不能各自为政。**早期版本用
+   * `if (m.loading) return` 直接放走后来的调用者 —— 而真实链路上两个调用方
+   * 几乎同时到达：`TimelineTrack` 的 `watch(viewFileId)` 先发起读取，
+   * 用户紧接着点「播放」，`AudioPlayer.loadAt()` 再进来一次，拿到的却是
+   * 「还没就绪」的空地址，误报「这一段没有音频轨」并且不再设置 `<audio>`
+   * 的 src。任务 A 稍后把 blobUrl 备好了，也没有任何代码再触发装载 ——
+   * 表现就是「导入自己的音频，检测不到音轨，没声音」。
    */
+  const mediaJobs = new Map<string, Promise<void>>()
+
   async function ensureMedia(fileId: string): Promise<void> {
     const file = files.value.find((f) => f.id === fileId)
     if (!file || file.demo || !window.xbaos) return
@@ -824,17 +880,43 @@ const MIME_BY_EXT: Record<string, string> = {
     if (!isSupported(file.ext)) return
 
     const m = mediaOf(fileId)
-    if (m.loading || m.peaks) return
+    if (m.peaks) return
+    const running = mediaJobs.get(fileId)
+    if (running) return running
+
+    const job = loadMedia(file, m).finally(() => mediaJobs.delete(fileId))
+    mediaJobs.set(fileId, job)
+    return job
+  }
+
+  /**
+   * 真正的读取与解码。**失败不抛给调用者**：调用者（loadAt）只看 blobUrl
+   * 有没有就绪，失败原因记进 `m.error` 让界面据实提示，读取失败时下次
+   * 播放会自然重试（peaks 仍为 null，guard 放行）。
+   *
+   * 读文件字节后用 AudioContext 解码：Chromium 原生支持 WAV / MP3 /
+   * FLAC / OGG / Opus，正好覆盖软件承诺的全部格式，引擎侧不用重复
+   * 输出波形数据。解码出峰值后立刻丢掉 PCM（内存大头），
+   * 只保留原始压缩字节做的 Blob 交给 <audio> 播放。
+   */
+  async function loadMedia(file: AudioFile, m: FileMedia): Promise<void> {
+    const bridge = window.xbaos
+    // ensureMedia 的 guard 已保证桥存在，这里再兜一层纯粹为类型收窄
+    if (!bridge) return
     m.loading = true
+    m.error = null
+    touchMedia()
 
     try {
-      const bytes = await window.xbaos.fs.readArrayBuffer(file.path)
+      const bytes = await bridge.fs.readArrayBuffer(file.path)
 
       // Blob 要复制一份：decodeAudioData 会把传进去的 buffer 转移走（detach）
       const forAudio = bytes.slice(0)
       m.blobUrl = URL.createObjectURL(
         new Blob([forAudio], { type: MIME_BY_EXT[file.ext] ?? '' }),
       )
+      // 地址一就位就通知：播放器不必等波形解完就能出声
+      touchMedia()
 
       const ctx = new AudioContext()
       try {
@@ -860,14 +942,19 @@ const MIME_BY_EXT: Record<string, string> = {
 
         m.peaks = { peaksPerSecond: rate, data, durationSec: buf.duration }
         if (file.durationSec === null) file.durationSec = Number(buf.duration.toFixed(2))
+        // 波形到位：时间轴靠这一次通知重画
+        touchMedia()
       } finally {
         void ctx.close()
       }
     } catch (err) {
-      console.warn('[media] 音频解码失败', file.name, err)
-      // 解码失败也能播：只给 blobUrl，不给波形
+      const reason = err instanceof Error ? err.message : String(err)
+      m.error = reason
+      console.warn('[media] 音频读取/解码失败', file.name, err)
+      // 读得到字节时解码失败也能播：只给 blobUrl，不给波形
     } finally {
       m.loading = false
+      touchMedia()
     }
   }
 
@@ -1380,5 +1467,7 @@ const MIME_BY_EXT: Record<string, string> = {
     receiveDroppedFiles,
     ensureMedia,
     peaksOf,
+    mediaErrorOf,
+    mediaVersion,
   }
 })

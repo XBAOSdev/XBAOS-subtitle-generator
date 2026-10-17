@@ -25,6 +25,15 @@ const BASE = `http://127.0.0.1:${process.env.XBAOS_DEV_PORT || 5173}`
 const OUT_DIR = path.resolve('.workbuddy/shots')
 const PROFILE = path.resolve('.workbuddy/shots/probe-profile')
 
+/**
+ * 产品版本号。
+ *
+ * `package.json` 的 `version` 是**单一真相源**（`vite.config.ts` 把 `__APP_VERSION__`
+ * 注入构建期常量），所以探针也必须从这里读，不能自己写死一份 —— 写死过 `0.1.0`，
+ * 版本一升「弹窗副标题写明当前与最新版本」就白白失败。
+ */
+const APP_VERSION = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8')).version
+
 mkdirSync(OUT_DIR, { recursive: true })
 
 const results = []
@@ -970,6 +979,56 @@ const scenarios = {
     }
 
     await cdp.send('Emulation.clearDeviceMetricsOverride')
+  },
+
+  /**
+   * 演示数据（?demo=1）点播放。
+   *
+   * 演示数据没有真实音频，播放本该由定时器推着播放头走 —— 但曾出现
+   * 「一点播放就弹出『这一段没有音频轨』」：`loadAt()` 里判断演示数据的
+   * 那句 `if (viewFile.value?.demo)` 依赖一个**从来没人写过**的字段，
+   * 于是每次 playhead 变化都当成「无音频段落」，置 `spanHasNoAudio` 并停播。
+   *
+   * 两条断言缺一不可：进度要真的动，提示不能出现。
+   */
+  async 'demo-playback'(cdp) {
+    await goto(cdp, BASE + '/?demo=1&view=editor')
+
+    const before = await cdp.evaluate(`(() => {
+      const cur = document.querySelector('.player__current')
+      return cur ? cur.textContent.trim() : null
+    })()`)
+    if (!before) throw new Error('找不到播放器时间码')
+
+    const box = await cdp.evaluate(`(() => {
+      const btn = document.querySelector('.player__btn--main')
+      if (!btn) return null
+      const r = btn.getBoundingClientRect()
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), disabled: btn.disabled }
+    })()`)
+    if (!box) throw new Error('找不到主播放键')
+    check('演示数据下主播放键可用', box.disabled === false, 'disabled=' + box.disabled)
+
+    await cdp.click(box.x, box.y)
+    await sleep(800)
+
+    const after = await cdp.evaluate(`(() => {
+      const cur = document.querySelector('.player__current')
+      const warn = document.querySelector('.player__hint--warn')
+      return {
+        time: cur ? cur.textContent.trim() : null,
+        warn: warn ? warn.textContent.trim().replace(/\\s+/g, ' ') : '',
+        playing: !!document.querySelector('.player__btn--main[title="暂停"]'),
+      }
+    })()`)
+
+    check('演示数据下播放头会前进', !!after.time && after.time !== before, before + ' → ' + after.time)
+    check('演示数据下进入播放态', after.playing === true, 'playing=' + after.playing)
+    check(
+      '演示数据下不报「没有音频轨」',
+      !after.warn.includes('没有音频轨'),
+      after.warn || '（无提示）',
+    )
   },
 
   /**
@@ -2857,7 +2916,7 @@ const scenarios = {
             isElectron: true,
             info: () =>
               Promise.resolve({
-                version: '0.1.0',
+                version: ${JSON.stringify(APP_VERSION)},
                 platform: 'win32',
                 arch: 'x64',
                 isPackaged: true,
@@ -3102,7 +3161,11 @@ const scenarios = {
       const d1 = await dialog()
       check('点击左下角提示后打开更新弹窗', !!d1, d1 ? '' : '弹窗没出现')
       if (d1) {
-        check('弹窗副标题写明当前与最新版本', d1.subtitle.includes('0.1.0') && d1.subtitle.includes('0.2.0'), d1.subtitle)
+        check(
+          '弹窗副标题写明当前与最新版本',
+          d1.subtitle.includes(APP_VERSION) && d1.subtitle.includes('0.2.0'),
+          d1.subtitle,
+        )
         check('弹窗显示最新版本号', d1.version.includes('v0.2.0'), d1.version)
         check('弹窗显示发布日期', d1.version.includes('2026-11-01'), d1.version)
         check('弹窗显示本次发布标题', d1.title === '性能与体验更新', d1.title)
@@ -3642,6 +3705,21 @@ const scenarios = {
       return [f.id, f.segments.length]
     `)
     check('注入可控的演示条目', Array.isArray(seed) && seed[1] === 6, JSON.stringify(seed))
+
+    /*
+     * 改完 `durationSec` 必须**切一次文件再切回来**。
+     *
+     * 时间轴的时长不是直接读 `file.durationSec`：`currentDuration()` 第一顺位取的是
+     * 演示波形里的时长，而演示波形是 `watch(viewFileId)` 在**换文件那一刻**按当时的
+     * durationSec 造出来的。只改 durationSec 不会重造波形 —— 时间轴仍按 mock 原来的
+     * 106.77 秒铺满。症状极具欺骗性：条目渲染、泳道分层、选中全对，只有坐标换算偏
+     * ——「点 72% 处」落到 77 秒、拖到 24 秒却停在 85.5 秒、往右夹取停在 106.77。
+     * （这个洞是在演示数据真出波形之后才暴露的：以前波形为空，时长退回
+     *  `viewFile.durationSec`，恰好就是 30。）
+     */
+    await store(`project.setActiveFile(project.files[1].id); return true`)
+    await sleep(250)
+    await store(`project.setActiveFile(${JSON.stringify(seed[0])}); return true`)
     await sleep(350)
 
     /** 读每条字幕条在屏幕上的位置与截断情况 */
@@ -3750,9 +3828,11 @@ const scenarios = {
     })()`)
     await cdp.click(blank.x, blank.y)
     const afterBlank = await store(`return { head: Math.round(editor.playheadSec * 10) / 10, sel: [...editor.selectedIds].sort() }`)
+    /* 断言精确值（0.72 × 30 = 21.6）而不是「大于 20 秒」：时长一旦不是 30，
+     * 这里就会变成 77 秒，而后面的坐标换算会跟着全偏 —— 旧写法 `> 20` 恰好放过了它。 */
     check(
       '点非字幕区域移动播放头，且不改变已有选中',
-      afterBlank.head > 20 && afterBlank.sel.length === 2,
+      Math.abs(afterBlank.head - 21.6) < 0.5 && afterBlank.sel.length === 2,
       JSON.stringify(afterBlank),
     )
 
@@ -3783,23 +3863,46 @@ const scenarios = {
     )
 
     // 普通滚轮：横向平移（放大之后才有得平移）
-    const panBefore = await cdp.evaluate(
-      `Math.round(document.querySelector('.tl-clip[data-seg-id="e"]').getBoundingClientRect().left)`,
-    )
+    /* 不能拿固定某一条做参照：时间轴的 `bars` 会把视窗外的条目直接跳过
+     * （`x > width + 12` 就 continue），放大之后必然有条目掉出去，
+     * 读到 null 会连累整场中断。所以取「平移前后**都还在**的那些条目」
+     * 比较位移 —— 只要有一条动了，就说明整条时间轴平移了
+     * （同一个 `x(t)` 映射，所有条目位移量相同）。
+     */
+    const clipLefts = () =>
+      cdp.evaluate(`(() => {
+        const out = {}
+        document.querySelectorAll('.tl-clip').forEach((el) => {
+          out[el.dataset.segId] = Math.round(el.getBoundingClientRect().left)
+        })
+        return out
+      })()`)
+
+    const leftsBefore = await clipLefts()
     await cdp.evaluate(`(() => {
       const stage = document.querySelector('.timeline__stage')
       const r = stage.getBoundingClientRect()
       stage.dispatchEvent(new WheelEvent('wheel', {
-        deltaY: 240, bubbles: true, cancelable: true,
+        /* 60 = 鼠标一格滚轮的量级（产品里 onWheel 直接拿 deltaY 当像素用，
+           所以位移应当**恰好**等于这里给的值，断言能看得很死）。 */
+        deltaY: 60, bubbles: true, cancelable: true,
         clientX: r.left + 60, clientY: r.top + r.height / 2,
       }))
       return true
     })()`)
     await sleep(200)
-    const panAfter = await cdp.evaluate(
-      `Math.round(document.querySelector('.tl-clip[data-seg-id="e"]').getBoundingClientRect().left)`,
+    const leftsAfter = await clipLefts()
+
+    const shared = Object.keys(leftsBefore).filter((id) => id in leftsAfter)
+    const deltas = shared.map((id) => leftsAfter[id] - leftsBefore[id])
+    const movedLeft = deltas.some((d) => d < 0)
+    check(
+      '普通滚轮让时间轴左右平移',
+      shared.length > 0 && movedLeft,
+      shared.length > 0
+        ? `共有条目 ${shared.join(',')} 位移 ${deltas.join(',')}`
+        : '平移前后没有共同可见的条目',
     )
-    check('普通滚轮让时间轴左右平移', panAfter < panBefore, `${panBefore} -> ${panAfter}`)
 
     // 回到适应宽度，后面的坐标换算才好算
     const fitBtn = await centerOf(

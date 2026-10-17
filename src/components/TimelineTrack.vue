@@ -757,7 +757,14 @@ watch(duration, () => {
   scheduleDraw()
 })
 
-watch(() => [project.peaksOf(project.viewFileId), settings.themeMode, project.isMerge], scheduleDraw)
+/**
+ * 波形到达就重画。
+ *
+ * `mediaVersion` 必须显式列进来：peaks 是**异步**写进 `project.media`这张 Map 的，
+ * 而 Map 的内容变动不可靠地触发 Vue 依赖（详见 store 里 mediaVersion 的注释）。
+ * 只靠 `project.peaksOf()` 的返回值当依赖，peaks 到位那一刻可能根本没人被通知。
+ */
+watch(() => [project.mediaVersion, project.peaksOf(project.viewFileId), settings.themeMode, project.isMerge], scheduleDraw)
 
 /** 时间码变化后泳道可能重排，波形不必重画，但条的位置要跟着动 */
 watch(

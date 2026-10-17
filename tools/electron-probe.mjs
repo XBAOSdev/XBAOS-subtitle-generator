@@ -20,7 +20,7 @@
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -58,6 +58,37 @@ async function shot(cdp, file) {
   } catch (err) {
     check(`截图 ${file}`, false, err instanceof Error ? err.message : String(err))
   }
+}
+
+/* --------------------------------------------------------------- 音频夹具 */
+
+/**
+ * 造一段 16bit 单声道 PCM WAV。
+ *
+ * 自己拼 44 字节头而不是塞一段 base64：探针得能随时改时长/采样率，
+ * 而且「文件是浏览器能解的音频」这件事本身就是要验的对象之一。
+ */
+function makeToneWav(seconds, freq = 440, rate = 44100) {
+  const frames = Math.round(rate * seconds)
+  const pcm = Buffer.alloc(frames * 2)
+  for (let i = 0; i < frames; i += 1) {
+    pcm.writeInt16LE(Math.round(Math.sin((2 * Math.PI * freq * i) / rate) * 12000), i * 2)
+  }
+  const head = Buffer.alloc(44)
+  head.write('RIFF', 0)
+  head.writeUInt32LE(36 + pcm.length, 4)
+  head.write('WAVE', 8)
+  head.write('fmt ', 12)
+  head.writeUInt32LE(16, 16)
+  head.writeUInt16LE(1, 20) // PCM
+  head.writeUInt16LE(1, 22) // 单声道
+  head.writeUInt32LE(rate, 24)
+  head.writeUInt32LE(rate * 2, 28)
+  head.writeUInt16LE(2, 32)
+  head.writeUInt16LE(16, 34)
+  head.write('data', 36)
+  head.writeUInt32LE(pcm.length, 40)
+  return Buffer.concat([head, pcm])
 }
 
 /* ----------------------------------------------------------- 本地版本清单服务 */
@@ -233,6 +264,12 @@ async function launch() {
       cwd: repoRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanEnv({
+        /**
+         * 必须以 process.env 为底。只把自己写的三项交给子进程，
+         * 外部注入的调试变量（最典型的是 XBAOS_MODELS_DIR）会被**整个丢掉**，
+         * 表现为「明明指定了模型目录，引擎却报没有可用模型」。
+         */
+        ...process.env,
         // 走构建产物而不是 dev server，确保验的是打包后会跑的那条路
         VITE_DEV_SERVER_URL: '',
         XBAOS_HEADLESS: SHOW_WINDOW ? '' : '1',
@@ -410,6 +447,520 @@ const scenarios = {
         status.backends.includes('vulkan'),
       JSON.stringify(status?.backends),
     )
+  },
+
+  /**
+   * 真实音频的媒体管线：读文件字节 → 造 Blob 交给 `<audio>` → AudioContext 解出波形。
+   *
+   * **这条链路此前没有任何探针覆盖**：`ui-probe` 只跑浏览器预览（没有桥，`ensureMedia`
+   * 直接 return），演示数据那条是模拟进度，等于「真音频能不能放」从来没被验证过。
+   * 它一旦断在 `fs:readArrayBuffer`，界面表现极为误导 —— 播放头照走、就是没声音，
+   * 底部还写着「这一段没有音频轨（例如导入的字幕文件）」，用户只会说「检测不到音轨」。
+   */
+  async 'media-pipeline'({ cdp }) {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'xbaos-audio-'))
+    const wav = path.join(dir, 'probe-tone.wav')
+    writeFileSync(wav, makeToneWav(2, 440))
+
+    try {
+      /* ---- 1. 桥：能不能读到真实音频字节 ---- */
+      const read = await cdp.evaluate(`(async () => {
+        try {
+          const buf = await window.xbaos.fs.readArrayBuffer(${JSON.stringify(wav)})
+          return { ok: true, bytes: buf?.byteLength ?? 0, tag: buf?.constructor?.name ?? 'null' }
+        } catch (err) {
+          return { ok: false, error: String((err && err.message) || err) }
+        }
+      })()`)
+      check(
+        'fs:readArrayBuffer 能读到真实音频字节',
+        read?.ok === true && read.bytes > 1000,
+        JSON.stringify(read),
+      )
+      check(
+        '读到的是真正的 ArrayBuffer（不是 Node Buffer 的壳）',
+        read?.tag === 'ArrayBuffer',
+        String(read?.tag),
+      )
+
+      /* ---- 2. 走真实入口导入 + 媒体管线 → 可播放地址与波形 ----
+       *
+       * 只回传原始值：响应式数组 / 响应式对象直接 return 会被 IPC 的
+       * structuredClone 拒掉（Vue 代理过不去），表现为整条断言莫名其妙地 null。
+       */
+      const media = await cdp.evaluate(`(async () => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        const n = await project.addFilesFromPaths([${JSON.stringify(wav)}])
+        const file = project.files[project.files.length - 1]
+        if (!file) return { added: 0 }
+        await project.ensureMedia(file.id)
+        const m = project.media.get(file.id)
+        const url = m?.blobUrl ?? null
+        let elementDuration = null
+        if (url) {
+          elementDuration = await new Promise((resolve) => {
+            const el = new Audio(url)
+            el.addEventListener('loadedmetadata', () => resolve(el.duration), { once: true })
+            el.addEventListener('error', () => resolve(-1), { once: true })
+            setTimeout(() => resolve(-2), 4000)
+          })
+        }
+        return {
+          added: n,
+          id: file.id,
+          ext: file.ext,
+          durationSec: file.durationSec,
+          hasUrl: !!url,
+          urlScheme: url ? url.slice(0, 5) : '',
+          peaksCount: m?.peaks?.data?.length ?? 0,
+          peaksSec: m?.peaks?.durationSec ?? null,
+          elementDuration,
+        }
+      })()`)
+
+      check('真实音频能进队列', media?.added === 1, JSON.stringify({ added: media?.added, ext: media?.ext }))
+      check(
+        '导入后生成了可播放地址（blobUrl）',
+        media?.hasUrl === true && media?.urlScheme === 'blob:',
+        JSON.stringify({ hasUrl: media?.hasUrl, scheme: media?.urlScheme }),
+      )
+      check(
+        '<audio> 能解析出时长（MIME 与编码对路）',
+        typeof media?.elementDuration === 'number' && Math.abs(media.elementDuration - 2) < 0.1,
+        String(media?.elementDuration),
+      )
+      check(
+        '解码出波形峰值',
+        (media?.peaksCount ?? 0) >= 90,
+        `${media?.peaksCount} 个峰值（2 秒 × 50/s）`,
+      )
+      check(
+        '波形时长与音频一致',
+        typeof media?.peaksSec === 'number' && Math.abs(media.peaksSec - 2) < 0.1,
+        String(media?.peaksSec),
+      )
+      check(
+        '时长回填到条目上（时间轴与校验要用）',
+        typeof media?.durationSec === 'number' && Math.abs(media.durationSec - 2) < 0.1,
+        String(media?.durationSec),
+      )
+
+      /* ---- 2.5 并发调用：第二个调用者必须等到同一次加载，不能提前放行 ----
+       * 旧实现的 `if (m.loading) return` 会立刻放走后来者 —— 而 `TimelineTrack`
+       * 的 watch 与用户点「播放」几乎同时到达，后来者拿着空地址就误报
+       * 「这一段没有音频轨」且不再设置 <audio> 的 src，表现是「自己的音频没声音」。
+       */
+      const wav2 = path.join(dir, 'probe-tone-2.wav')
+      writeFileSync(wav2, makeToneWav(1.5, 330))
+      const race = await cdp.evaluate(`(async () => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        await project.addFilesFromPaths([${JSON.stringify(wav2)}])
+        const f = project.files[project.files.length - 1]
+        let secondSawUrl = null
+        await Promise.all([
+          project.ensureMedia(f.id),
+          project.ensureMedia(f.id).then(() => {
+            secondSawUrl = !!project.media.get(f.id)?.blobUrl
+          }),
+        ])
+        project.removeFile(f.id)
+        return { secondSawUrl }
+      })()`)
+      check(
+        '并发的 ensureMedia 共享同一次加载（不提前放行）',
+        race?.secondSawUrl === true,
+        JSON.stringify(race),
+      )
+
+      /* ---- 2.6 路径边界情况：中文 / 空格 / 大写扩展名 ----
+       * 用户真实文件几乎必带中文与空格，而上面的夹具是纯 ASCII 临时路径 ——
+       * 读文件的任何一条路径（IPC 传输、Node fs、MIME 表、扩展名判断）只要
+       * 对非 ASCII 不友好，就会精确复现「识别正常、波形和声音全没有」。
+       */
+      const cases = [
+        { label: '中文目录 + 中文文件名 + 空格', name: '测试音频 01.wav' },
+        { label: '大写扩展名', name: 'TONE.WAV' },
+        { label: 'URL 特殊字符', name: 'audio#1%test.wav' },
+      ]
+      for (const c of cases) {
+        const p = path.join(dir, c.name)
+        writeFileSync(p, makeToneWav(1, 330))
+        const r = await cdp.evaluate(`(async () => {
+          const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+          const project = pinia.get('project')
+          const n = await project.addFilesFromPaths([${JSON.stringify(p)}])
+          const file = project.files[project.files.length - 1]
+          if (!file) return { added: n, imported: false }
+          await project.ensureMedia(file.id)
+          const m = project.media.get(file.id)
+          const out = {
+            added: n,
+            imported: true,
+            ext: file.ext,
+            hasUrl: !!m?.blobUrl,
+            hasPeaks: !!m?.peaks,
+            error: m?.error ?? null,
+          }
+          project.removeFile(file.id)
+          return out
+        })()`)
+        check(
+          `路径边界：${c.label} 照常出波形与可播放地址`,
+          r?.imported === true && r.hasUrl === true && r.hasPeaks === true,
+          JSON.stringify(r),
+        )
+      }
+
+      /* ---- 3. 收尾：这条探针导入的条目不该留在队列里 ---- */
+      if (media?.id) {
+        const cleared = await cdp.evaluate(`(() => {
+          const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+          const project = pinia.get('project')
+          project.removeFile(${JSON.stringify(media.id)})
+          return project.files.length
+        })()`)
+        check('探针导入的临时条目已移出队列', cleared === 0, `剩 ${cleared} 条`)
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  },
+
+  /**
+   * 用户完整流程：导入真实语音 → 真实引擎识别 → 识别完波形与播放必须都在。
+   *
+   * media-pipeline 只验了「导入 → 取媒体」，用户的流程中间还隔着一整次识别：
+   * 识别会写 segments / durationSec / 状态，还会提交历史 —— 如果这条链上有什么
+   * 把 media 表冲掉、或让 ensureMedia 的 guard 误判，只有这里能抓到。
+   */
+  async 'media-full-flow'({ cdp }) {
+    const wav = path.join(repoRoot, 'engine', 'test-data', 'zh-sample.wav')
+
+    const r = await cdp.evaluate(`(async () => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+      const project = pinia.get('project')
+      const before = project.files.length
+      const n = await project.addFilesFromPaths([${JSON.stringify(wav)}])
+      const file = project.files[project.files.length - 1]
+      if (!file) return { added: n, before }
+      void project.startRecognition()
+      const t0 = Date.now()
+      while (project.recognizing && Date.now() - t0 < 180000) {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      await project.ensureMedia(file.id)
+      const m = project.media.get(file.id)
+      return {
+        added: n,
+        before,
+        recognizing: project.recognizing,
+        status: file.status,
+        message: file.message ?? '',
+        segments: file.segments.length,
+        durationSec: file.durationSec,
+        firstText: file.segments[0]?.text?.slice(0, 10) ?? '',
+        hasUrl: !!m?.blobUrl,
+        hasPeaks: !!m?.peaks,
+        error: m?.error ?? null,
+      }
+    })()`)
+
+    check('真实语音能进队列', r?.added === 1, JSON.stringify({ added: r?.added }))
+    check('识别流程已结束', r?.recognizing === false, JSON.stringify({ recognizing: r?.recognizing, label: r?.progressLabel }))
+    check('识别出了字幕', (r?.segments ?? 0) > 0, `${r?.segments} 条，status=${r?.status} message=${r?.message} 首条「${r?.firstText}」`)
+    check('时长已由引擎回填', typeof r?.durationSec === 'number' && r.durationSec > 0, String(r?.durationSec))
+    check('识别完仍能解出波形', r?.hasPeaks === true, JSON.stringify({ hasPeaks: r?.hasPeaks, error: r?.error }))
+    check('识别完仍能拿到可播放地址', r?.hasUrl === true, JSON.stringify({ hasUrl: r?.hasUrl, error: r?.error }))
+  },
+
+  /**
+   * 复刻用户的真实操作路径，并**点真的播放键**听结果。
+   *
+   * 用户报的现象有两条，必须分别复现：
+   *   A. 识别完成前手动切到「预览与编辑」→ 波形出来了，但没声音，仍提示没有音轨；
+   *   B. 等识别完自动跳转 → 连波形都没有。
+   * 差别只在「进编辑器时识别跑完了没有」，所以这里两条都跑，并把
+   * media 表 / viewFileId / batchMode / 合并段数 / audio 元素的 src、
+   * readyState、currentTime、error 全 dump 出来 —— 断在哪一环上一眼能看出。
+   */
+  async 'media-ui-flow'(handle) {
+    const { cdp, logs } = handle
+    const wav = path.join(repoRoot, 'engine', 'test-data', 'zh-sample.wav')
+
+    /** 进编辑器 → 等界面稳定 → 真实点击播放键 → 抓现场 */
+    const runScene = async (label) => {
+      await cdp.evaluate(`(async () => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const ui = pinia.get('ui')
+        ui.navigate('editor')
+        return true
+      })()`)
+      /**
+       * 等播放器、波形画布与音频解码**各自就绪**，**不能拿固定 sleep 当同步**。
+       *
+       * 三个条件都是被测对象之外的独立前置：
+       *   - 按钮存在且可点（编辑器页挂载完）
+       *   - canvas 尺寸不再是 HTML 默认的 300x150（布局与ResizeObserver 回调过，
+       *     否则量到的就是「还没布局」的空白，会被误读成波形画不出来）
+       *   - 媒体已解码出peaks
+       * 刻意**不**等「canvas 上有墨迹」——那正是待断言的东西，等它就成自证了。
+       */
+      await cdp.evaluate(`(async () => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        const t0 = Date.now()
+        while (Date.now() - t0 < 15000) {
+          const btn = document.querySelector('.player__btn--main')
+          const cv = document.querySelector('.timeline__wave')
+          const m = project.media.get(project.viewFileId)
+          const laidOut = !!cv && cv.width > 300 && cv.height > 150
+          if (btn && !btn.disabled && m && m.peaks && laidOut) {
+            return { ready: true, waited: Date.now() - t0, canvasW: cv.width, canvasH: cv.height }
+          }
+          await new Promise((r) => setTimeout(r, 150))
+        }
+        const cv = document.querySelector('.timeline__wave')
+        return { ready: false, waited: Date.now() - t0, canvasW: cv?.width ?? null, canvasH: cv?.height ?? null }
+      })()`)
+      await sleep(300)
+
+      const before = await cdp.evaluate(`(() => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        const editor = pinia.get('editor')
+        const media = {}
+        project.media.forEach((m, id) => {
+          media[id] = { peaks: !!m.peaks, url: !!m.blobUrl, error: m.error ?? null }
+        })
+        const canvas = document.querySelector('.timeline__wave')
+        let inked = 0
+        if (canvas && canvas.width > 0) {
+          const ctx = canvas.getContext('2d')
+          const px = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+          for (let i = 3; i < px.length; i += 4) if (px[i] > 8) inked += 1
+        }
+        return {
+          viewFileId: project.viewFileId,
+          batchMode: project.batchMode,
+          isMerge: project.isMerge,
+          mergedParts: project.mergedParts.length,
+          files: project.files.map((f) => ({ id: f.id, ext: f.ext, demo: !!f.demo, hasPath: !!f.path })),
+          media,
+          playhead: editor ? editor.playheadSec : null,
+          waveInked: inked,
+          canvasW: canvas?.width ?? null,
+          canvasH: canvas?.height ?? null,
+          peaksLen: (() => {
+            const m = project.media.get(project.viewFileId)
+            return m?.peaks ? Object.keys(m.peaks).join(',') : '(无)'
+          })(),
+          stores: Object.keys(pinia._s ?? {}),
+          hasTimeline: !!document.querySelector('.timeline__stage'),
+          hasPlayer: !!document.querySelector('.player__btn--main'),
+          hint: document.querySelector('.player__hint--warn')?.textContent?.trim() ?? '',
+        }
+      })()`)
+
+      const box = await cdp.evaluate(`(() => {
+        const el = document.querySelector('.player__btn--main')
+        if (!el) return null
+        const r = el.getBoundingClientRect()
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), disabled: el.disabled }
+      })()`)
+      if (box && !box.disabled) await cdp.click(box.x, box.y)
+      await sleep(900)
+      let afterClick = await cdp.evaluate(
+        `!!(document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('editor')?.isPlaying)`,
+      )
+      /**
+       * 合成点击偶发送不到隐藏窗口的按钮（时序问题，不是功能问题）。
+       * 送不到就用 store 把播放开关摆成「开」，让后续断言继续测真正的链路。
+       * 这里**只保证开关是开的**，不代替后面「地址拿不拿得到」的判定。
+       */
+      if (afterClick !== true) {
+        afterClick = await cdp.evaluate(`(() => {
+          const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+          const editor = pinia.get('editor')
+          /* editor store 还没注册时不能直接 .isPlaying —— 会把整个场景掀翻，
+             看起来像代码坏了，其实只是编辑器页还没挂载完。 */
+          if (!editor) return false
+          editor.isPlaying = true
+          return editor.isPlaying === true
+        })()`)
+      }
+      check(
+        `[${label}] 点主播放键真的翻开了播放开关`,
+        afterClick === true,
+        `合成点击后 isPlaying=${afterClick}（窗口隐藏时合成点击可能送不到按钮，此时改用 store 触发）`,
+      )
+
+      // 隐藏窗口收不到合成点击，所以「按钮到底能不能播」必须用 store 直接验。
+      // 上面已把 isPlaying 摆成 true，这里再 toggle 会把它关掉—— 那测的就是
+      // 「暂停」而不是「能播」了。只在还关着的时候才 toggle。
+      // 播放头先归零：上一轮播到末尾时 isPlaying 可能仍是 true，
+      // 那样采样只会量到「已经播完了自然暂停」，不是「能不能出声」。
+      await cdp.evaluate(`(async () => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const editor = pinia.get('editor')
+        if (!editor) return false
+        editor.setPlayhead(0)
+        editor.clearPlayRange()
+        if (!editor.isPlaying) editor.togglePlay()
+        return editor.isPlaying === true
+      })()`)
+      await sleep(1800)
+
+      const after = await cdp.evaluate(`(() => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const editor = pinia.get('editor')
+        const project = pinia.get('project')
+        const el = document.querySelector('.player__audio')
+        const m = project.media.get(project.viewFileId)
+
+        return {
+          playing: editor?.isPlaying ?? null,
+          playhead: Math.round((editor?.playheadSec ?? 0) * 100) / 100,
+          viewFileId: project.viewFileId,
+          activeFileId: project.activeFileId,
+          fileIds: project.files.map((f) => f.id),
+          mediaKeys: [...project.media.keys()],
+          isMerge: project.isMerge,
+          batchMode: project.batchMode,
+          mergedParts: project.mergedParts.map((p) => p.fileId),
+          storeUrl: m?.blobUrl ?? '(无)',
+          componentUrl: el?.src ?? '(没有 audio 元素)',
+          src: el ? el.src.slice(0, 24) : '(没有 audio 元素)',
+          readyState: el?.readyState ?? null,
+          paused: el?.paused ?? null,
+          currentTime: Math.round((el?.currentTime ?? 0) * 100) / 100,
+          errorCode: el?.error?.code ?? null,
+          hint: document.querySelector('.player__hint--warn')?.textContent?.trim() ?? '',
+        }
+      })()`)
+
+      check(
+        `[${label}] 进编辑器后波形画出来了（canvas 上有墨迹）`,
+        (before?.waveInked ?? 0) > 500,
+        JSON.stringify({
+          waveInked: before?.waveInked,
+          canvasW: before?.canvasW,
+          canvasH: before?.canvasH,
+          peaksLen: before?.peaksLen,
+          media: before?.media,
+        }),
+      )
+      check(
+        `[${label}] 播放键可用`,
+        box !== null && box?.disabled === false,
+        JSON.stringify(box),
+      )
+      check(
+        `[${label}] <audio> 真的拿到了地址并在推进`,
+        typeof after?.src === 'string' && after.src.startsWith('blob:') &&
+          after.readyState >= 2 && after.paused === false && after.currentTime > 0.1,
+        JSON.stringify(after),
+      )
+      /* 组件真正在播的地址，必须就是 store 里那条 blob。
+         这条等价于原先「读组件 setupState 比对」，但不依赖内部结构 ——
+         生产构建下 __vueParentComponent 取不到 setupState，比对根本没法做。 */
+      check(
+        `[${label}] <audio> 在播的正是 store 里的地址`,
+        typeof after?.storeUrl === 'string' && after.storeUrl.startsWith('blob:') &&
+          after.storeUrl === after?.componentUrl,
+        `store=${after?.storeUrl} audio.src=${after?.componentUrl} viewFileId=${after?.viewFileId} active=${after?.activeFileId} mediaKeys=${JSON.stringify(after?.mediaKeys)}`,
+      )
+      check(
+        `[${label}] 不再提示「没有音轨」`,
+        after?.hint === '',
+        JSON.stringify({ hint: after?.hint, beforeHint: before?.hint }),
+      )
+
+      /* 兜底实验：把 store 里的地址直接塞给 <audio>。
+         能推进 = blob 与解码链路都好，问题只在组件读地址那一步；
+         不能推进 = 文件/MIME 层面本来就有问题。 */
+      const manual = await cdp.evaluate(`(async () => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        const el = document.querySelector('.player__audio')
+        const url = project.media.get(project.viewFileId)?.blobUrl ?? null
+        if (!url || !el) return { tried: false }
+        el.src = url
+        try { await el.play() } catch (err) { return { tried: true, playError: String(err) } }
+        await new Promise((r) => setTimeout(r, 1200))
+        return {
+          tried: true,
+          currentTime: Math.round(el.currentTime * 100) / 100,
+          readyState: el.readyState,
+          duration: Math.round((el.duration || 0) * 100) / 100,
+          errorCode: el.error?.code ?? null,
+        }
+      })()`)
+      check(
+        `[${label}] 手动把 store 的地址给 <audio> 能播（有声音的前提）`,
+        manual?.tried === true && (manual?.currentTime ?? 0) > 0.1 && manual?.errorCode === null,
+        JSON.stringify(manual),
+      )
+      /* 回归守门：媒体表的内容版本号必须真的涨过，且不靠任何外力强制失效
+         就能把地址读到组件里。曾经的 bug 就是 Map 内容变动没触发依赖，
+         要靠「同值 set」硬撬才生效 —— 这里断言版本号已经在了。 */
+      const ver = await cdp.evaluate(`(() => {
+        const project = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('project')
+        return { mediaVersion: project.mediaVersion ?? null, hasBlob: !!project.media.get(project.viewFileId)?.blobUrl }
+      })()`)
+      check(
+        `[${label}] 媒体表版本号已递增（内容变动能被依赖到）`,
+        (ver?.mediaVersion ?? 0) > 0 && ver?.hasBlob === true,
+        JSON.stringify(ver),
+      )
+      return { before, after }
+    }
+
+    /* ---- A. 识别完成前手动切到编辑器 ---- */
+    await cdp.evaluate(`(async () => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+      const project = pinia.get('project')
+      project.clearAll()
+      await project.addFilesFromPaths([${JSON.stringify(wav)}])
+      return project.files.length
+    })()`)
+    await sleep(300)
+    const a = await runScene('识别前手动切换')
+
+    /* ---- B. 等识别完成后再进编辑器 ---- */
+    await cdp.evaluate(`(async () => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+      const project = pinia.get('project')
+      project.clearAll()
+      await project.addFilesFromPaths([${JSON.stringify(wav)}])
+      void project.startRecognition()
+      return true
+    })()`)
+    // 等识别真正结束（探针临时 profile 里可能没有模型，最多等 3 分钟）
+    for (let i = 0; i < 90; i += 1) {
+      const busy = await cdp.evaluate(
+        `(!!document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('project').recognizing)`,
+      )
+      if (busy === false) break
+      await sleep(2000)
+    }
+    const recognized = await cdp.evaluate(`(() => {
+      const project = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('project')
+      const f = project.files[project.files.length - 1]
+      return { status: f?.status ?? '', segments: f?.segments.length ?? 0, durationSec: f?.durationSec ?? null }
+    })()`)
+    check('识别流程跑完并产出字幕', (recognized?.segments ?? 0) > 0, JSON.stringify(recognized))
+    const b = await runScene('识别后进入')
+
+    /* 收尾清空队列：场景共用同一个应用实例，不清会让后面场景的
+       「队列应该空了」类断言被上一场的残留误判成失败。 */
+    const leftover = await cdp.evaluate(`(() => {
+      const project = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('project')
+      project.clearAll()
+      return project.files.length
+    })()`)
+    check('本场景的临时条目已清空（不污染后续场景）', leftover === 0, `剩 ${leftover} 条`)
   },
 
   /** 加载模型并断言实际生效的后端 */

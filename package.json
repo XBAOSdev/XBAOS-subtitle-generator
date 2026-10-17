@@ -1,6 +1,6 @@
 {
   "name": "xbaos-subtitle-generator",
-  "version": "1.0.0-beta",
+  "version": "1.0.1-beta",
   "private": true,
   "description": "XBAOS 字幕生成器 本地离线的音频转字幕工具",
   "author": "XBAOS",

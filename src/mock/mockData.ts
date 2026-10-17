@@ -277,6 +277,10 @@ export function makeAudioFile(name: string, sizeBytes: number, dir: string): Aud
     dir,
     ext,
     sizeBytes,
+    /* 浏览器预览里拖进来的文件拿不到真实内容，造出来的条目**必须自报是演示数据** ——
+       播放器的 `loadAt()` 靠它区分「没有 blobUrl 属正常」与「这一段真没音频轨」。
+       漏了它，预览里拖文件后点播放会被判成无音频段落并停播。 */
+    demo: true,
     durationSec: Number((lastEnd(segments, 0) + 1.1).toFixed(2)),
     status: 'queued',
     segments,
