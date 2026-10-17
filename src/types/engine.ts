@@ -326,7 +326,7 @@ export interface XbaosBridge {
     persist: (mode: 'auto' | 'light' | 'dark') => void
   }
 
-  /** 标题栏毛玻璃（Mica）。浏览器预览模式下整个桥不存在 */
+  /** 标题栏毛玻璃（Acrylic，不是 Mica）。浏览器预览模式下整个桥不存在 */
   glass: {
     /** 主进程按「用户偏好 + 系统是否支持」预算出的首屏状态 */
     initial: boolean

@@ -46,6 +46,7 @@ const LIBS = [
   { name: 'Pinia', license: 'MIT License' },
   { name: 'whisper.cpp', license: 'MIT License' },
   { name: 'OpenAI Whisper 模型权重', license: 'MIT License' },
+  { name: 'BELLE 中文微调模型权重', license: 'Apache License 2.0' },
   { name: 'dr_libs（WAV / MP3 / FLAC 解码）', license: 'MIT-0 或 Public Domain' },
   { name: 'stb_vorbis（OGG Vorbis 解码）', license: 'MIT-0 或 Public Domain' },
   { name: 'libopus / libogg', license: 'BSD 3-Clause License' },

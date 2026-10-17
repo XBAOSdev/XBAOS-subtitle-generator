@@ -16,6 +16,15 @@ interface ModelItem {
   params: string
   sizeLabel: string
   quality: string
+  /**
+   * 许可证**逐个模型写**，不能共用一份。
+   *
+   * whisper.cpp 与 OpenAI 官方权重是 MIT，但社区中文微调版沿用自己的许可：
+   * Belle-whisper-large-v3-turbo-zh 在 Hugging Face 上标的是 Apache-2.0。
+   * 这里若统一写死 MIT，界面就对外发布了一条错误的许可信息 —— 有人照着
+   * 「MIT」去做二次分发，会漏掉 Apache-2.0 的署名与变更声明义务。
+   */
+  license: string
   note: string
 }
 
@@ -30,6 +39,7 @@ const MODELS: ModelItem[] = [
     params: '244M',
     sizeLabel: '约 480MB',
     quality: '可用',
+    license: 'MIT',
     note: '推荐。体积与准确度较平衡，首次使用建议先装这个',
   },
   {
@@ -38,6 +48,7 @@ const MODELS: ModelItem[] = [
     params: '74M',
     sizeLabel: '约 140MB',
     quality: '一般',
+    license: 'MIT',
     note: '速度最快，适合先看整体效果',
   },
   {
@@ -46,6 +57,7 @@ const MODELS: ModelItem[] = [
     params: '809M',
     sizeLabel: '约 1.6GB',
     quality: '很好',
+    license: 'MIT',
     note: '速度与准确度较平衡',
   },
   {
@@ -54,6 +66,7 @@ const MODELS: ModelItem[] = [
     params: '809M',
     sizeLabel: '约 1.6GB',
     quality: '最佳',
+    license: 'Apache-2.0',
     note: '中文语料微调，中文口播与访谈首选',
   },
 ]
@@ -344,7 +357,7 @@ function goModelsDirSetting(): void {
               </div>
               <div>
                 <dt>许可证</dt>
-                <dd class="mono">MIT</dd>
+                <dd class="mono">{{ item.license }}</dd>
               </div>
             </dl>
           </div>
@@ -663,6 +676,9 @@ function goModelsDirSetting(): void {
   margin: 1px 0 0;
   font-size: var(--font-size-xs);
   color: var(--color-text-primary);
+  /* 许可证有的写 MIT、有的写 Apache-2.0，宽度不一。不锁 nowrap 的话
+     「Apache-2.0」会在连字符处被折成两行，规格行高度跟着参差。 */
+  white-space: nowrap;
 }
 
 .model__actions {

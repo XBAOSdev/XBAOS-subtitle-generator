@@ -30,7 +30,7 @@ export interface SettingsSnapshot {
   /** 主题 */
   themeMode: ThemeMode
   /**
-   * 标题栏毛玻璃（Mica 材质）。默认开启；Win11 22H2 以下与浏览器预览
+   * 标题栏毛玻璃（Acrylic 材质，不是 Mica）。默认开启；Win11 22H2 以下与浏览器预览
    * 等不支持的环境上主进程会判掉，界面自动回退纯色，无副作用。
    */
   glassEnabled: boolean

@@ -33,9 +33,19 @@ https://www.xbaos.com.cn/
 --------------------
 
 本项目**不分发**语音识别模型文件。软件使用的 ggml 格式 Whisper 模型由使用者
-自行获取并放入模型文件夹，采用 MIT 许可发布（权重来自 ggerganov/whisper.cpp，
-原始模型源自 OpenAI），版权归其各自权利人所有。它不属于本软件的权利范围，
-也不在 Apache License 2.0 的授权范围内。
+自行获取，版权归其各自权利人所有。它不属于本软件的权利范围，也不在
+Apache License 2.0 的授权范围内。
+
+各模型的许可由各自的权利人单独确定，并非统一一种：
+
+  - Whisper 官方权重（ggerganov/whisper.cpp 分发，原始模型源自 OpenAI）
+    采用 MIT 许可。
+
+  - Belle-whisper-large-v3-turbo-zh（BELLE-2 组织发布的中文微调版）
+    采用 Apache License 2.0。再分发或修改时需要保留版权与许可声明，
+    并说明所做的修改。
+
+使用或再分发某个模型前，请以该模型随附的许可条款为准。
 
 
 四、第三方组件

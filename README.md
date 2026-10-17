@@ -208,7 +208,8 @@ tools/                     开发与验证脚本（不进产物）
 **不属于**源代码，不在 Apache License 2.0 的授权范围内，权利归 XBAOS 所有。
 详见 [NOTICE](./NOTICE)。基于本仓库源代码构建衍生版本时，请替换上述品牌标识与美术资源。
 
-识别模型由使用者自行获取（来自 `ggerganov/whisper.cpp` 的 ggml 格式权重，MIT 许可），
+识别模型由使用者自行获取（`ggerganov/whisper.cpp` 的 ggml 格式权重，原始模型源自 OpenAI），
+其许可由各自权利人单独确定：Whisper 官方权重为 MIT，Belle 中文微调版为 Apache-2.0。
 版权归其各自权利人所有，也不在本软件的授权范围内。
 
 第三方组件的许可原文在 [licenses/](./licenses) 目录，清单见 [licenses/THIRD-PARTY.md](./licenses/THIRD-PARTY.md)。

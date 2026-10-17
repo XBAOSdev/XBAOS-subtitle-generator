@@ -1071,9 +1071,9 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const readSource = (rel: string): string =>
     readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
   const mainJs = readSource('electron/main.js')
-  // 不支持的环境必须提前判掉：Mica 选项在 Win10 上要么抛错要么没效果
+  // 不支持的环境必须提前判掉：材质选项在 Win10 上要么抛错要么没效果
   check('主进程按 Win11 22H2 (build 22621) 判支持', mainJs.includes('22621'))
-  check('Mica 开启时窗口底色全透明', mainJs.includes("'#00000000'"))
+  check('毛玻璃开启时窗口底色全透明', mainJs.includes("'#00000000'"))
   check('主题与毛玻璃共用副本文件且先读后并', mainJs.includes('writeThemeState'))
   const css = readSource('src/styles/global.css')
   check('玻璃透明化规则挂在 html.glass 上', css.includes('html.glass .app'))
@@ -1830,7 +1830,33 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '安装器许可页不再主张模型权利',
     !readSource('build/license.txt').includes('模型文件等全部组成部分') &&
       readSource('build/license.txt').includes('不属于本软件的权利范围'),
-    '模型是 MIT、著作权属原作者，我方不能主张',
+    '模型许可由各自权利人确定、著作权属原作者，我方不能主张',
+  )
+
+  /* 许可证**不能写死**（2026-10-17 修）。
+   *
+   * 四张模型卡曾经共用一段模板、统一渲染「MIT」—— 单看每张卡都对，实际是一条
+   * 错误的法律信息：whisper 官方权重确实是 MIT，但 Belle-whisper-large-v3-turbo-zh
+   * 是 BELLE-2 组织的中文微调版，Hugging Face 上标的是 Apache-2.0。
+   * 有人照着界面上的「MIT」去做二次分发，就会漏掉 Apache-2.0 的署名与变更声明义务。
+   *
+   * 守两道：① 模板里必须是 `{{ item.license }}` 而不是字面量；
+   *        ② 对外文本不能只说「MIT」一种许可。 */
+  check(
+    '模型卡的许可证按模型取字段，没有写死一个值',
+    readSource('src/views/ModelView.vue').includes('{{ item.license }}') &&
+      !/<dt>许可证<\/dt>[\s\S]{0,120}?<dd[^>]*>MIT<\/dd>/.test(
+        readSource('src/views/ModelView.vue'),
+      ),
+    '四张卡的许可不同（Whisper 官方 MIT / BELLE 中文微调 Apache-2.0），写死会对外发布错误的许可信息',
+  )
+  check(
+    '模型许可的对外表述区分了 MIT 与 Apache-2.0',
+    readSource('src/legal/index.ts').includes('Apache License 2.0') &&
+      readSource('build/license.txt').includes('Apache License 2.0') &&
+      readSource('NOTICE').includes('Apache License 2.0') &&
+      readSource('licenses/THIRD-PARTY.md').includes('Apache License 2.0'),
+    '用户协议、安装器许可页、NOTICE、第三方清单四处都要写明「多数 MIT、部分中文微调版 Apache-2.0」',
   )
 
   /* ---- 「联网面」文案守门（2026-10-16）
