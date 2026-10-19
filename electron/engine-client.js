@@ -45,8 +45,23 @@ export class EngineCanceledError extends Error {
   }
 }
 
-/** 这条响应是「终态」，收到就该把请求结算掉 */
-const TERMINAL_TYPES = new Set(['pong', 'loaded', 'done', 'canceled', 'error'])
+/**
+ * 这条响应是「终态」，收到就该把请求结算掉。
+ *
+ * `unloaded` 与 `aborting` 必须在内：引擎的 `cmdUnload` 回 `unloaded`、
+ * `cmdAbort` 回 `aborting`，漏掉它们请求就永远等不到结算 —— 表现为
+ * `engine:unload` / `engine:abort` 两个 IPC 直接挂死（各自只在特定路径触发，
+ * 所以一直没被发现）。
+ */
+const TERMINAL_TYPES = new Set([
+  'pong',
+  'loaded',
+  'unloaded',
+  'done',
+  'canceled',
+  'aborting',
+  'error',
+])
 
 export class EngineClient extends EventEmitter {
   /** @type {import('node:child_process').ChildProcess | null} */
@@ -64,14 +79,56 @@ export class EngineClient extends EventEmitter {
   #disposed = false
   #logLines = 0
 
-  constructor(exe, args = []) {
+  /**
+   * 是否在子进程里禁用 Vulkan 后端。
+   *
+   * 为什么需要它：引擎打包的是 Vulkan 构建，而 ggml 的 backend registry
+   * 在构造时**无条件**注册 Vulkan（`ggml-backend-reg.cpp` 的 `#ifdef GGML_USE_VULKAN`），
+   * 跟 `cparams.use_gpu` 毫无关系。也就是说界面上选「仅 CPU」并不能阻止它去
+   * 创建 Vulkan 实例、把系统里注册的隐式层全灌进来。只有这个环境变量能真正跳过。
+   */
+  #disableVulkan = false
+
+  /** 最后一次进程退出现场，供崩溃诊断使用 */
+  #lastExit = null
+
+  constructor(exe, args = [], options = {}) {
     super()
     this.#exe = exe
     this.#spawnArgs = args
+    this.#disableVulkan = options.disableVulkan === true
   }
 
   get exe() {
     return this.#exe
+  }
+
+  /** 当前是否已禁用 Vulkan 后端。修改请走 setDisableVulkan() */
+  get disableVulkan() {
+    return this.#disableVulkan
+  }
+
+  /** 最后一次进程退出现场 `{ code, signal, crashed, at }`；还没退出过为 null */
+  get lastExit() {
+    return this.#lastExit
+  }
+
+  /**
+   * 切换 Vulkan 开关。
+   *
+   * 环境变量只能在 spawn 那一刻传进去，进程跑起来就改不了了 ——
+   * 所以进程在跑时必须先停掉。否则标志改了、实际跑的仍是旧进程，
+   * 调用方会以为已经生效。
+   */
+  async setDisableVulkan(value) {
+    const next = value === true
+    if (this.#disableVulkan === next) return
+    const wasRunning = this.running
+    this.#disableVulkan = next
+    if (wasRunning) {
+      this.emit('log', 'info', next ? '已禁用 Vulkan 后端，重启引擎' : '已恢复 Vulkan 后端，重启引擎')
+      await this.stop()
+    }
   }
 
   get running() {
@@ -94,17 +151,25 @@ export class EngineClient extends EventEmitter {
     if (this.#starting) return this.#starting
     if (this.#disposed) throw new Error('引擎客户端已关闭')
 
-    this.#starting = new Promise((resolve, reject) => {
+    const starting = new Promise((resolve, reject) => {
       let proc
       try {
+        /*
+         * 环境变量必须从 process.env 展开后再覆盖。
+         * 只传自己写的那几项会把外部注入的变量整个丢掉 —— 最典型的是
+         * XBAOS_MODELS_DIR，表现为「明明指定了模型目录，引擎却说没有模型」。
+         */
+        const env = { ...process.env }
+        if (this.#disableVulkan) env.GGML_DISABLE_VULKAN = '1'
+
         // windowsHide 避免打包后弹黑框；shell 必须关掉，参数里有含空格的路径
         proc = spawn(this.#exe, this.#spawnArgs, {
           stdio: ['pipe', 'pipe', 'pipe'],
           windowsHide: true,
           shell: false,
+          env,
         })
       } catch (err) {
-        this.#starting = null
         reject(err)
         return
       }
@@ -112,6 +177,9 @@ export class EngineClient extends EventEmitter {
       this.#proc = proc
       this.#stdoutBuf = ''
       this.#stderrBuf = ''
+      // 每次新进程都要重新计数，否则第二次识别的日志会被「已省略」吞掉
+      this.#logLines = 0
+      this.#lastExit = null
 
       proc.stdout.setEncoding('utf8')
       proc.stdout.on('data', (chunk) => this.#onStdout(chunk))
@@ -120,36 +188,54 @@ export class EngineClient extends EventEmitter {
       proc.stderr.on('data', (chunk) => this.#onStderr(chunk))
 
       proc.on('error', (err) => {
-        this.#starting = null
         this.emit('log', 'error', `引擎进程启动失败: ${err.message}`)
         this.#failAllPending(new EngineCrashError(`引擎进程启动失败: ${err.message}`, null, null))
         reject(err)
       })
 
-      proc.on('exit', (code, signal) => this.#onExit(code, signal))
+      proc.on('exit', (code, signal) => this.#onExit(proc, code, signal))
 
       // 进程起来了就先单步 resolve —— 真正的握手交给 ping，
       // 免得把「可执行文件能跑」和「引擎协议正常」混成一件事
-      this.#starting = null
       this.emit('log', 'info', `引擎进程已启动 pid=${proc.pid}`)
       resolve(this)
     })
 
-    return this.#starting
+    /*
+     * 存的是内部这个 Promise；结算后由 finally 只清「自己这一份」。
+     * 原来在 executor 里 `this.#starting = null` 会让函数返回 null ——
+     * 并发保护实际上从来没生效过（靠 running 兜的）。
+     */
+    this.#starting = starting
+    starting
+      .catch(() => {})
+      .finally(() => {
+        if (this.#starting === starting) this.#starting = null
+      })
+    return starting
   }
 
-  #onExit(code, signal) {
-    const wasRunning = this.#proc !== null
+  #onExit(proc, code, signal) {
+    /*
+     * 只处理「当前进程」的退出。
+     *
+     * stop() 超时强杀时，旧进程的 exit 回调可能在新进程已经启动**之后**才到；
+     * 那时不校验就会把新进程的引用清成 null，之后每个请求都报
+     * 「引擎进程不可用」—— 这个竞态在切换推理后端（要重启引擎）时必然踩到。
+     */
+    if (this.#proc !== proc) return
+
     this.#proc = null
 
-    // 正常关闭：pending 已经空了，什么都不用做
-    const crashed = wasRunning && this.#pending.size > 0
+    // 走到这里说明退出的确实是当前进程；还有未结算的请求就是崩了
+    const crashed = this.#pending.size > 0
+    this.#lastExit = { code, signal, crashed, at: Date.now() }
     if (crashed) {
       this.emit('log', 'error', `引擎进程异常退出 code=${code} signal=${signal}`)
       this.#failAllPending(
         new EngineCrashError(`识别引擎意外退出（代码 ${code ?? '无'}）`, code, signal),
       )
-    } else if (wasRunning) {
+    } else {
       this.emit('log', 'info', `引擎进程已退出 code=${code}`)
     }
 

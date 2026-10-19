@@ -150,6 +150,21 @@ export function markTranslationsStale(seg: SubtitleSegment): SubtitleSegment {
   return addStale(seg, otherSlotsWithText(seg, SOURCE_SLOT))
 }
 
+/**
+ * 把 `origin` 对齐到当前文本，用于**新生成的识别结果**落库之前。
+ *
+ * `origin` 的定义是「这一条第一次呈现给用户时的文本」（见 `types/index.ts`）。
+ * 识别管线里繁转简、标点后处理、按规格折行都会改写 `text` 却不动 `origin`，
+ * 于是用户刚识别完、一个字都没改，屏幕上就已经有一半条目顶着「已改动」的
+ * 小圆点 —— 这个圆点本该只表示「人改过」。
+ *
+ * 只给识别管线用：用户手动跑「标点规范 / 重新折行」时**不能**这么做，
+ * 那会把他之前的编辑痕迹一起抹掉（那些场景下圆点是对的）。
+ */
+export function alignOrigin(segments: SubtitleSegment[]): SubtitleSegment[] {
+  return segments.map((s) => (s.text === s.origin ? s : { ...s, origin: s.text }))
+}
+
 function round(v: number): number {
   return Number(v.toFixed(3))
 }

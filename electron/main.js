@@ -15,8 +15,10 @@ import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 
-import { EngineClient, EngineCanceledError } from './engine-client.js'
+import { EngineClient, EngineCanceledError, EngineCrashError } from './engine-client.js'
 import { ModelDownloader, MODEL_CATALOG } from './model-download.js'
 import { MANIFEST_URL, allowedExternalUrl, checkForUpdate, isAllowedExternalHost } from './update.js'
 import {
@@ -229,6 +231,203 @@ function resolveModelPath(requested) {
   return pickInstalledModel()?.path ?? null
 }
 
+// ---------------------------------------------------------------- 引擎诊断
+//
+// 这一组只在引擎出问题时才有用，但缺了它就没有任何现场可查：
+// 之前 stderr 只 send('engine:log') 给渲染层，而 src/ 里没有任何监听方、
+// 也不落盘 —— 用户报「点识别就崩」时，连崩溃前最后一行都拿不到。
+
+const execFileAsync = promisify(execFile)
+
+/** 引擎日志、崩溃现场、诊断包都放这里 */
+function logsDir() {
+  return path.join(app.getPath('userData'), 'logs')
+}
+
+function dateStamp(withTime = false) {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  const day = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+  if (!withTime) return day
+  return `${day}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+let logsDirReady = false
+function ensureLogsDir() {
+  if (logsDirReady) return Promise.resolve()
+  return fs
+    .mkdir(logsDir(), { recursive: true })
+    .then(() => {
+      logsDirReady = true
+    })
+    .catch(() => {
+      /* 日志目录建不出来不能影响识别 */
+    })
+}
+
+/** 引擎日志按天落盘 */
+function writeEngineLog(level, text) {
+  ensureLogsDir()
+    .then(() =>
+      fs.appendFile(
+        path.join(logsDir(), `engine-${dateStamp()}.log`),
+        `[${new Date().toISOString()}] [${level}] ${text}\n`,
+      ),
+    )
+    .catch(() => {
+      /* 同上，静默 */
+    })
+}
+
+/**
+ * 最近若干条引擎日志的内存副本。
+ * 崩溃后进程已经没了，日志文件里的最后一行可能还没 flush，
+ * 这份副本用来拼崩溃现场和诊断包。
+ */
+const engineLogTail = []
+const ENGINE_LOG_TAIL_MAX = 300
+
+function rememberEngineLog(level, text) {
+  engineLogTail.push({ at: new Date().toISOString(), level, text })
+  if (engineLogTail.length > ENGINE_LOG_TAIL_MAX) {
+    engineLogTail.splice(0, engineLogTail.length - ENGINE_LOG_TAIL_MAX)
+  }
+}
+
+/**
+ * 为什么要把「Vulkan 是否被禁用」存到磁盘。
+ *
+ * 用户的机器上只要有一个坏掉的 Vulkan 隐式层，引擎每次加载模型都会
+ * 0xC0000005。识别失败后我们确实能自动降级，但如果不记住，用户下次
+ * 打开软件又要再崩一次才降 —— 那是能避免的重复伤害。
+ */
+function engineStatePath() {
+  return path.join(app.getPath('userData'), 'engine-state.json')
+}
+
+function readVulkanDisabled() {
+  try {
+    return JSON.parse(readFileSync(engineStatePath(), 'utf8'))?.vulkanDisabled === true
+  } catch {
+    return false
+  }
+}
+
+function writeVulkanDisabled(value) {
+  fs.mkdir(path.dirname(engineStatePath()), { recursive: true })
+    .then(() => fs.writeFile(engineStatePath(), JSON.stringify({ vulkanDisabled: value === true }, null, 2)))
+    .catch(() => {
+      /* 记不住就算了，下次照常再试 */
+    })
+}
+
+/**
+ * 系统环境变量里是否已经要求禁用 Vulkan。
+ *
+ * 用户按排查建议手动设过 `GGML_DISABLE_VULKAN` 时会走到这里 —— 注意 ggml 只判断
+ * `getenv(...) == nullptr`，所以**空字符串也算禁用**，这里必须跟它保持一致，
+ * 否则界面会显示「自动（GPU）」而引擎实际在跑 CPU。
+ */
+function envDisablesVulkan() {
+  return typeof process.env.GGML_DISABLE_VULKAN === 'string'
+}
+
+/**
+ * 读 Vulkan 全局层的注册表项 —— 这是崩溃的**第一嫌疑清单**。
+ *
+ * 录屏、帧数、游戏加速、显卡厂商的覆盖层，都是往 ImplicitLayers 里塞一个
+ * DLL，而这个 DLL 会在任何 Vulkan 应用创建实例时被无条件加载。它是静态
+ * 环境信息，主进程在引擎死掉之后照样能读，不需要崩溃的进程配合。
+ *
+ * 用 reg.exe 而不是读注册表 API：Electron 没有内置注册表访问，而这里
+ * 只在崩溃/导出诊断时跑一次，多进程开销无所谓。
+ */
+async function readVulkanLayers() {
+  const targets = [
+    ['HKLM', 'SOFTWARE\\Khronos\\Vulkan\\ImplicitLayers'],
+    ['HKCU', 'SOFTWARE\\Khronos\\Vulkan\\ImplicitLayers'],
+    ['HKLM', 'SOFTWARE\\Khronos\\Vulkan\\Drivers'],
+    ['HKCU', 'SOFTWARE\\Khronos\\Vulkan\\Drivers'],
+  ]
+
+  // 并发读：崩溃现场要尽快落盘，四个键串行等下去最坏能拖十几秒
+  const entries = await Promise.all(
+    targets.map(async ([hive, key]) => {
+      const full = `${hive}\\${key}`
+      try {
+        const { stdout } = await execFileAsync('reg', ['query', full], {
+          windowsHide: true,
+          timeout: 4000,
+        })
+        return [
+          full,
+          stdout
+            .trim()
+            .split(/\r?\n/)
+            .map((s) => s.trimEnd())
+            .filter(Boolean),
+        ]
+      } catch (err) {
+        // 键不存在是常态（干净机器上就没有）；某些受限环境里 reg.exe 本身会被拦，
+        // 那也只影响这一节内容，不能让整个诊断包失败
+        return [full, [`(未找到或读取失败：${err.code ?? err.message})`]]
+      }
+    }),
+  )
+
+  return Object.fromEntries(entries)
+}
+
+/** 把 Windows 退出码翻译成人话，省得每次都要去查 */
+function describeExitCode(code) {
+  if (code === 0) return '正常退出'
+  if (code === 3221225477) return '0xC0000005 访问违例（原生崩溃）'
+  if (code === 3221225781) return '0xC0000135 缺少依赖 DLL'
+  if (code === 3221225595) return '0xC000007B 映像格式不匹配（位数或 DLL 损坏）'
+  if (typeof code === 'number') return `0x${(code >>> 0).toString(16).toUpperCase()}`
+  return '(无退出码)'
+}
+
+function hostSummary() {
+  const cpus = os.cpus()
+  return [
+    `平台：${process.platform} ${os.release()} (${os.arch()})`,
+    `CPU：${cpus?.[0]?.model?.trim() ?? '(未知)'} × ${cpus?.length ?? 0}`,
+    `内存：${(os.totalmem() / 1024 ** 3).toFixed(1)} GB`,
+  ]
+}
+
+/** 崩溃时立刻落一份现场，下一次用户再反馈就有据可查 */
+async function writeCrashReport(client, info) {
+  try {
+    await ensureLogsDir()
+    const layers = await readVulkanLayers()
+    const lines = [
+      'XBAOS 字幕生成器 引擎崩溃现场',
+      `时间：${new Date().toLocaleString()}`,
+      `版本：${app.getVersion()}`,
+      `退出码：${info?.code ?? '(无)'} —— ${describeExitCode(info?.code)}`,
+      `信号：${info?.signal ?? '(无)'}`,
+      `引擎：${client?.exe ?? '(未知)'}`,
+      `Vulkan 已禁用：${client?.disableVulkan ? '是' : '否'}`,
+      ...hostSummary(),
+      '',
+      '--- Vulkan 全局层（第一嫌疑清单）---',
+      ...Object.entries(layers).flatMap(([k, v]) => [k, ...v.map((s) => `  ${s}`), '']),
+      '--- 引擎日志尾部 ---',
+      ...engineLogTail.map((l) => `${l.at} [${l.level}] ${l.text}`),
+      '',
+    ]
+    const file = path.join(logsDir(), `crash-${dateStamp(true)}.txt`)
+    await fs.writeFile(file, lines.join('\n'), 'utf8')
+    console.warn(`[engine] 崩溃现场已写入 ${file}`)
+    return file
+  } catch (err) {
+    console.error(`[engine] 写崩溃现场失败：${err.message}`)
+    return null
+  }
+}
+
 function ensureEngine() {
   if (engine) return engine
 
@@ -240,8 +439,10 @@ function ensureEngine() {
     )
   }
 
-  engine = new EngineClient(exe)
+  engine = new EngineClient(exe, [], { disableVulkan: readVulkanDisabled() || envDisablesVulkan() })
   engine.on('log', (level, text) => {
+    rememberEngineLog(level, text)
+    writeEngineLog(level, text)
     if (level === 'error' || level === 'warn') console.error(`[engine:${level}] ${text}`)
     else if (isDev) console.log(`[engine:${level}] ${text}`)
     mainWindow?.webContents.send('engine:log', { level, text })
@@ -251,10 +452,45 @@ function ensureEngine() {
   })
   engine.on('exit', (info) => {
     mainWindow?.webContents.send('engine:exit', info)
+    // 崩溃就立刻留现场：日志尾巴 + Vulkan 层清单，事后不用再求用户配合
+    if (info?.crashed) {
+      writeCrashReport(engine, info).then((file) => {
+        if (file) mainWindow?.webContents.send('engine:crash', { code: info.code, report: file })
+      })
+    }
   })
 
   console.log(`[engine] 使用 ${exe}（来源 ${source}）`)
   return engine
+}
+
+/**
+ * 把界面上的「推理后端」意图落到引擎进程上。
+ *
+ * ⚠ `backend: 'cpu'` 只传参数是**不够的**。引擎里那个判断只影响 whisper 的
+ * `use_gpu`，而 ggml 的 Vulkan 后端是在注册表构造时无条件初始化的
+ * （`ggml-backend-reg.cpp` 的 `#ifdef GGML_USE_VULKAN`），跟 use_gpu 无关。
+ * 要真正避开 Vulkan，只能在 spawn 时给 `GGML_DISABLE_VULKAN=1`；那是环境
+ * 变量，进程跑起来就改不了，所以这里可能需要重启引擎。
+ *
+ * 显式选 vulkan/gpu 时反过来做：把上次崩溃记下的禁用清掉，给用户一次机会。
+ */
+async function applyBackendIntent(client, backend) {
+  if (backend === 'cpu') {
+    if (!client.disableVulkan) await client.setDisableVulkan(true)
+    return 'cpu'
+  }
+  if (backend === 'vulkan' || backend === 'gpu') {
+    // 系统环境变量是外部强制的全局覆盖，界面改不动它
+    if (envDisablesVulkan()) return 'cpu'
+    if (client.disableVulkan) {
+      await client.setDisableVulkan(false)
+      writeVulkanDisabled(false)
+    }
+    return 'vulkan'
+  }
+  // auto：尊重上次降级的结果，不主动再撞一次
+  return client.disableVulkan ? 'cpu' : 'auto'
 }
 
 // ---------------------------------------------------------------- 外观偏好
@@ -1452,7 +1688,14 @@ function registerIpc() {
     const client = ensureEngine()
     try {
       const pong = await client.ping()
-      return { ok: true, ...pong, backend: client.backend, modelLoaded: client.modelLoaded }
+      // Vulkan 被禁用时引擎仍可能报 gpu（whisper 对 use_gpu 是静默忽略的），
+      // 这里按实际情况纠正，免得界面显示一个用不了的后端
+      return {
+        ok: true,
+        ...pong,
+        backend: client.disableVulkan ? 'cpu' : client.backend,
+        modelLoaded: client.modelLoaded,
+      }
     } catch (err) {
       return { ok: false, error: err.message }
     }
@@ -1470,8 +1713,16 @@ function registerIpc() {
       )
     }
 
-    const result = await client.load({ model, backend: opts.backend || 'auto' })
-    return { ok: true, ...result, model, backend: client.backend }
+    // 后端意图必须在 load 之前落地：Vulkan 初始化就发生在加载模型这一步
+    const backend = await applyBackendIntent(client, opts.backend)
+
+    const result = await client.load({ model, backend })
+    return {
+      ok: true,
+      ...result,
+      model,
+      backend: client.disableVulkan ? 'cpu' : client.backend,
+    }
   })
 
   ipcMain.handle('engine:unload', async () => {
@@ -1494,18 +1745,22 @@ function registerIpc() {
     const client = ensureEngine()
     const taskId = opts.taskId || `t${Date.now()}`
 
-    // 没加载模型就先加载，省得渲染进程每次都自己判断
-    if (!client.modelLoaded) {
-      const model = resolveModelPath(opts.model)
-      if (!model) throw new Error('没有可用的识别模型，请在「模型管理」页先放置一个模型')
-      await client.load({ model, backend: opts.backend || 'auto' })
-    }
+    // 后端意图先落地：选「仅 CPU」时这里可能重启引擎（环境变量改不了运行中的进程）
+    const backend = await applyBackendIntent(client, opts.backend)
 
-    activeTask = { id: taskId, canceled: false }
-    const startedAt = Date.now()
+    /**
+     * 跑一遍「必要时加载模型 + 识别」。
+     * 抽成函数是为了崩溃降级之后能原样再走一次。
+     */
+    const runOnce = async (backendForLoad) => {
+      // 没加载模型就先加载，省得渲染进程每次都自己判断
+      if (!client.modelLoaded) {
+        const model = resolveModelPath(opts.model)
+        if (!model) throw new Error('没有可用的识别模型，请在「模型管理」页先放置一个模型')
+        await client.load({ model, backend: backendForLoad })
+      }
 
-    try {
-      const done = await client.transcribe(
+      return client.transcribe(
         {
           audio: opts.audio,
           language: opts.language,
@@ -1525,6 +1780,43 @@ function registerIpc() {
           }
         },
       )
+    }
+
+    activeTask = { id: taskId, canceled: false }
+    const startedAt = Date.now()
+
+    try {
+      let done
+      try {
+        done = await runOnce(backend)
+      } catch (err) {
+        /*
+         * 引擎意外退出时的自动降级重试。
+         *
+         * 发行版打的是 Vulkan 构建，而 ggml 的后端注册表**在构造时就无条件**
+         * 初始化 Vulkan（`ggml-backend-reg.cpp` 的 `#ifdef GGML_USE_VULKAN`）——
+         * 机器上任何一个坏掉的隐式层（录屏 / 帧数 / 游戏加速 / 显卡覆盖层）都能让
+         * 它在加载模型时直接 0xC0000005。引擎自己那圈 try/catch 只接 C++ 异常、
+         * 接不住访问违例，所以 `main.cpp` 里「GPU 失败回退 CPU」的代码永远走不到。
+         * 只能由我们在进程外兜：换个环境变量重开一个进程，再试一次。
+         *
+         * 只降级一次 —— CPU 也崩就是别的问题，无限重试只会把用户困在原地。
+         */
+        if (!(err instanceof EngineCrashError) || client.disableVulkan) throw err
+
+        send('engine:stream', {
+          taskId,
+          msg: {
+            type: 'fallback',
+            from: 'vulkan',
+            to: 'cpu',
+            reason: '识别引擎异常退出，已自动改用 CPU 重试',
+          },
+        })
+        await client.setDisableVulkan(true)
+        writeVulkanDisabled(true)
+        done = await runOnce('cpu')
+      }
 
       return {
         ok: true,
@@ -1546,6 +1838,47 @@ function registerIpc() {
     const client = ensureEngine()
     await client.abort()
     return { ok: true }
+  })
+
+  /**
+   * 导出诊断信息。
+   *
+   * 用户是经 B 站私信反馈的，让他自己开事件查看器翻崩溃日志不现实。
+   * 这里把能自动收的东西一次性塞进文件：系统与显卡无关的环境摘要、
+   * 引擎状态与最近一次退出码、**Vulkan 全局层清单**、引擎日志尾部。
+   * 他只要点一下按钮，把生成的文件发过来就行。
+   */
+  ipcMain.handle('diag:export', async () => {
+    const client = engine
+    try {
+      await ensureLogsDir()
+      const layers = await readVulkanLayers()
+      const lastExit = client?.lastExit
+      const lines = [
+        'XBAOS 字幕生成器 诊断信息',
+        `时间：${new Date().toLocaleString()}`,
+        `版本：${app.getVersion()}`,
+        ...hostSummary(),
+        `引擎：${client?.exe ?? '(未启动)'}`,
+        `引擎状态：${client?.running ? '运行中' : '未运行'}`,
+        `Vulkan 已禁用：${client?.disableVulkan ? '是' : '否'}`,
+        `最近一次退出：${
+          lastExit ? `code=${lastExit.code} —— ${describeExitCode(lastExit.code)}` : '(无)'
+        }`,
+        '',
+        '--- Vulkan 全局层（出问题时第一嫌疑清单）---',
+        ...Object.entries(layers).flatMap(([k, v]) => [k, ...v.map((s) => `  ${s}`), '']),
+        '--- 引擎日志尾部 ---',
+        ...engineLogTail.map((l) => `${l.at} [${l.level}] ${l.text}`),
+        '',
+      ]
+      const file = path.join(logsDir(), `diag-${dateStamp(true)}.txt`)
+      await fs.writeFile(file, lines.join('\n'), 'utf8')
+      shell.showItemInFolder(file)
+      return { ok: true, file }
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) }
+    }
   })
 }
 

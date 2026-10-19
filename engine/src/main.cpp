@@ -335,7 +335,8 @@ void cmdPing(const mj::Value &req, int64_t id) {
 
     w.key("backends").beginArray().value("cpu");
 #if XBAOS_HAS_VULKAN
-    w.value("vulkan");
+    // 运行期被禁用时不要报 vulkan —— 否则界面会显示一个根本用不了的能力
+    if (std::getenv("GGML_DISABLE_VULKAN") == nullptr) w.value("vulkan");
 #endif
     w.endArray();
 
@@ -373,6 +374,30 @@ void cmdLoad(const mj::Value &req, int64_t id) {
             w.key("from").value(requested);
             w.key("to").value("cpu");
             w.key("reason").value("这个版本没有编译 Vulkan 后端，只能用 CPU");
+            w.endObject();
+            emit(w.take());
+        }
+    }
+#else
+    /*
+     * 编译了 Vulkan 不等于这次真的能用。
+     *
+     * GGML_DISABLE_VULKAN 会让 ggml 的后端注册表整个跳过 Vulkan，而 whisper 对
+     * use_gpu=true 是**静默忽略**的 —— 它照样初始化成功，只是实际跑在 CPU 上。
+     * 不在这里纠正，我们就会把跑 CPU 的识别上报成 gpu，用户看到
+     * 「在用显卡」而其实没有。
+     */
+    if (wantGpu && std::getenv("GGML_DISABLE_VULKAN") != nullptr) {
+        const bool explicitGpu = (requested == "vulkan" || requested == "gpu");
+        wantGpu = false;
+        if (explicitGpu) {
+            mj::Writer w;
+            w.beginObject();
+            if (id >= 0) w.key("id").value(id);
+            w.key("type").value("fallback");
+            w.key("from").value(requested);
+            w.key("to").value("cpu");
+            w.key("reason").value("Vulkan 已被禁用（GGML_DISABLE_VULKAN），只能用 CPU");
             w.endObject();
             emit(w.take());
         }

@@ -7,6 +7,7 @@ import {
   MIN_SEGMENT_SEC,
   SOURCE_SLOT,
   addStale,
+  alignOrigin,
   clearStale,
   enforceMonotonicCues,
   insertRangeAt,
@@ -1050,6 +1051,37 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const withTr = { ...seg(0, 8, '这条字幕被折行了所以译文需要确认'), translations: { en: 'translated text' } }
   const flagged = applyLineWrap([withTr], { ...SPEC, maxCharsPerLine: 6 })
   check('折行后译文标红待确认', (flagged.segments[0].staleSlots ?? []).includes('en'), JSON.stringify(flagged.segments[0]))
+}
+
+/* ---- 识别结果基线对齐（alignOrigin） ---- */
+{
+  const SPEC = { maxCharsPerLine: 16, maxCharsPerLineEn: 42, maxLinesPerSegment: 1 }
+
+  // 干净条目必须原样通过：返回新对象会让整张表无谓重渲染
+  const short = seg(0, 2, '大家好')
+  const clean = alignOrigin([short])
+  check('对齐基线：干净条目引用不变', clean[0] === short)
+
+  // 繁转简改写 text 却不动 origin —— 这就是「刚识别完就有小圆点」的来源
+  const traditional = { ...seg(0, 3, '我用瀏覽器看網站'), origin: '我用瀏覽器看網站' }
+  const converted = applyPunctuation([traditional], { zh: 'keep', en: 'keep' }).segments
+  check('繁转简会让 text 偏离 origin', converted[0].text !== converted[0].origin, JSON.stringify(converted[0]))
+  check('对齐后繁转简条目变干净', alignOrigin(converted)[0].text === alignOrigin(converted)[0].origin)
+
+  // 折行同理：derived 条目保留了折行前的 origin
+  const wrapped = applyLineWrap([seg(0, 10, '很多人觉得打开这个模式就等于在互联网上穿上了隐身衣')], SPEC).segments
+  check('折行会让 text 偏离 origin', wrapped.some((s) => s.text !== s.origin))
+  const aligned = alignOrigin(wrapped)
+  check('对齐基线：折行条目全部变干净', aligned.every((s) => s.text === s.origin))
+  check(
+    '对齐基线：只改 origin 不动 text',
+    aligned.map((s) => s.text).join('|') === wrapped.map((s) => s.text).join('|'),
+  )
+
+  // 守门：识别管线必须真的在落库前调用它，手动工具则不许（会抹掉已有的编辑痕迹）
+  const readSource = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  check('识别结果落库前对齐基线', readSource('src/stores/project.ts').includes('alignOrigin(wrapped.segments)'))
+  check('手动工具不重设基线', !readSource('src/components/ToolPanel.vue').includes('alignOrigin'))
 }
 
 /* ---- 实验功能隐藏守门（源码扫描） ---- */

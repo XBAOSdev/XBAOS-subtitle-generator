@@ -35,11 +35,36 @@ const BACKEND_OPTIONS = [
   {
     value: 'auto',
     label: '自动',
-    hint: '检测到支持 Vulkan 的显卡时启用加速，初始化失败会自动回退到 CPU',
+    hint: '检测到支持 Vulkan 的显卡时启用加速；显卡后端出问题会自动改用 CPU 重试',
   },
-  { value: 'cpu', label: '仅 CPU', hint: '兼容性最好，速度取决于处理器性能' },
+  {
+    value: 'cpu',
+    label: '仅 CPU',
+    hint: '完全不加载显卡后端，兼容性最好，速度取决于处理器性能',
+  },
   { value: 'vulkan', label: '强制 Vulkan', hint: '需要显卡驱动支持，若不可用会导致识别失败' },
 ] as const
+
+/** 诊断导出：把现场收成一个文件，用户直接发过来就行 */
+const diagBusy = ref(false)
+const diagNote = ref('')
+
+async function exportDiag() {
+  if (!bridge?.diag) {
+    diagNote.value = '当前环境不支持导出'
+    return
+  }
+  diagBusy.value = true
+  diagNote.value = ''
+  try {
+    const res = await bridge.diag.export()
+    diagNote.value = res.ok ? '已生成，文件已在资源管理器中打开' : `导出失败：${res.message ?? '未知原因'}`
+  } catch (err) {
+    diagNote.value = `导出失败：${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    diagBusy.value = false
+  }
+}
 
 const SHORTCUTS: { keys: string[]; label: string }[] = [
   { keys: ['F2'], label: '编辑当前字幕文本' },
@@ -586,6 +611,26 @@ function reset(): void {
           </div>
         </section>
 
+        <!-- 诊断 -->
+        <section class="block">
+          <div class="block__head">
+            <Icon name="info" :size="14" />
+            <span class="block__title">诊断信息</span>
+          </div>
+          <div class="block__body">
+            <p class="field__hint">
+              识别出错或引擎异常退出时，导出一份诊断文件发给开发者即可排查。文件包含系统与显卡环境、
+              引擎状态、最近一次退出码、Vulkan 层清单与引擎日志，<b>不含音频内容，也不含字幕文本</b>。
+            </p>
+            <div class="diag">
+              <button class="btn" type="button" :disabled="diagBusy" @click="exportDiag">
+                {{ diagBusy ? '正在收集…' : '导出诊断信息' }}
+              </button>
+              <span v-if="diagNote" class="diag__note">{{ diagNote }}</span>
+            </div>
+          </div>
+        </section>
+
         <div class="reset-row">
           <button class="btn btn--danger" type="button" @click="reset">恢复所有默认设置</button>
         </div>
@@ -810,6 +855,24 @@ function reset(): void {
 .shortcuts__label {
   font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
+}
+
+.diag {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* 中文按钮在 flex 行里 min-content 只有一字宽，会被长说明压成竖排 —— 钉死不许收缩 */
+.diag > .btn {
+  flex-shrink: 0;
+}
+
+.diag__note {
+  min-width: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
 }
 
 .reset-row {

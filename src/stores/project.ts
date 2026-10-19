@@ -26,7 +26,7 @@ import {
   type ParsedCue,
 } from '@/utils/llmResult'
 import { validateSegment, countIssues } from '@/utils/validate'
-import { enforceMonotonicCues, hasText, segmentsSignature } from '@/utils/segmentOps'
+import { alignOrigin, enforceMonotonicCues, hasText, segmentsSignature } from '@/utils/segmentOps'
 import { MAX_LANES, overflowLaneIds } from '@/utils/timelineLayout'
 import { useUiStore } from '@/stores/ui'
 import { useSettingsStore } from '@/stores/settings'
@@ -1267,9 +1267,17 @@ const MIME_BY_EXT: Record<string, string> = {
           maxLinesPerSegment: settings.maxLinesPerSegment,
         })
 
+        /*
+         * 到这里为止，用户一个字都还没碰过，所以「第一次呈现给用户时的文本」
+         * 就是 `wrapped` 里的这个结果。上面各步（繁转简、标点后处理、按规格
+         * 折行）都会改写 text 却不同步 origin，若不在这里对齐一次，识别一完成
+         * 就有一批条目顶着「已改动」的小圆点 —— 那个圆点本该只表示人改过。
+         */
+        const baseline = alignOrigin(wrapped.segments)
+
         // 用历史提交的方式写入，识别结果本身也可以整体撤销
         history.commit(file.id, file.segments, '识别结果', () => {
-          file.segments = wrapped.segments
+          file.segments = baseline
           file.durationSec = lastResult?.duration ?? file.durationSec
           file.status = 'pending'
           file.message = undefined

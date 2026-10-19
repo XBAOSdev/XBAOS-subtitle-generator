@@ -505,6 +505,17 @@ export interface XbaosBridge {
     onLog: (cb: (payload: EngineLogEvent) => void) => () => void
     onExit: (cb: (payload: EngineExitEvent) => void) => () => void
   }
+
+  /**
+   * 诊断信息导出。
+   *
+   * 用户经 B 站私信反馈时，没法要求他去翻事件查看器。主进程把环境摘要、
+   * 引擎状态、最近退出码、**Vulkan 全局层清单**和引擎日志尾部收成一个文件，
+   * 用户只要把文件发过来。
+   */
+  diag: {
+    export: () => Promise<{ ok: boolean; file?: string; message?: string }>
+  }
 }
 
 /** 一个待校对的文件 */

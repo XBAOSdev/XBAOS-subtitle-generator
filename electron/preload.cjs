@@ -252,4 +252,12 @@ contextBridge.exposeInMainWorld('xbaos', {
     /** 引擎进程退出（异常退出时界面要提示可重试） */
     onExit: (cb) => subscribe('engine:exit', cb),
   },
+
+  // ---- 诊断
+  //
+  // 用户报错时没法要求他去翻事件查看器，这里一键把现场收成文件：
+  // 环境摘要、引擎状态与最近退出码、Vulkan 全局层清单、引擎日志尾部。
+  diag: {
+    export: () => ipcRenderer.invoke('diag:export'),
+  },
 })

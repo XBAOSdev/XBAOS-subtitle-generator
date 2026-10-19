@@ -17,7 +17,7 @@
  * 截图放在 .workbuddy/shots/。
  */
 
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -673,6 +673,131 @@ const scenarios = {
     check('时长已由引擎回填', typeof r?.durationSec === 'number' && r.durationSec > 0, String(r?.durationSec))
     check('识别完仍能解出波形', r?.hasPeaks === true, JSON.stringify({ hasPeaks: r?.hasPeaks, error: r?.error }))
     check('识别完仍能拿到可播放地址', r?.hasUrl === true, JSON.stringify({ hasUrl: r?.hasUrl, error: r?.error }))
+  },
+
+  /**
+   * 「仅 CPU」必须**真的**把 Vulkan 关掉。
+   *
+   * 只传 `backend: 'cpu'` 是不够的：引擎里那个判断只影响 whisper 的 `use_gpu`，
+   * 而 ggml 的后端注册表是在构造时无条件初始化 Vulkan 的，跟 use_gpu 无关。
+   * 真正生效靠的是 spawn 时的 `GGML_DISABLE_VULKAN=1` —— 这条链断在哪一环，
+   * 这里就红哪一条：
+   *   IPC → applyBackendIntent → EngineClient.setDisableVulkan → spawn env
+   */
+  async 'engine-backend'({ cdp }) {
+    const cpu = await cdp.evaluate(`(async () => {
+      window.__elogs = []
+      window.__offLog = window.xbaos.engine.onLog((p) => window.__elogs.push(p.text))
+      const res = await window.xbaos.engine.load({ backend: 'cpu' })
+      await new Promise((r) => setTimeout(r, 500))
+      return { res, logs: window.__elogs.slice(0, 500) }
+    })()`)
+
+    const cpuLogs = cpu?.logs ?? []
+    check('「仅 CPU」能加载成功', cpu?.res?.ok === true, JSON.stringify(cpu?.res)?.slice(0, 300))
+    check('上报的后端是 CPU', cpu?.res?.backend === 'cpu', String(cpu?.res?.backend))
+    check(
+      '引擎进程收到了 GGML_DISABLE_VULKAN',
+      cpuLogs.some((t) => t.includes('Vulkan backend disabled')),
+      cpuLogs.filter((t) => /vulkan/i.test(t)).slice(0, 3).join(' | ') || '(没有任何 vulkan 相关日志)',
+    )
+    check(
+      '没有去枚举 Vulkan 设备',
+      !cpuLogs.some((t) => t.includes('Vulkan devices')),
+      cpuLogs.filter((t) => t.includes('Vulkan devices')).slice(0, 2).join(' | ') || '(干净)',
+    )
+
+    /* 反向：切回 Vulkan 要能恢复。没有 Vulkan 的机器上引擎会自己回退 CPU，
+       所以这里只断言「不再处于禁用状态」，不硬性要求拿到 gpu。 */
+    const back = await cdp.evaluate(`(async () => {
+      window.__elogs = []
+      const res = await window.xbaos.engine.load({ backend: 'vulkan' })
+      await new Promise((r) => setTimeout(r, 500))
+      return { res, logs: window.__elogs.slice(0, 500) }
+    })()`)
+    const backLogs = back?.logs ?? []
+    check(
+      '切回 Vulkan 后不再禁用后端',
+      back?.res?.ok === true && !backLogs.some((t) => t.includes('Vulkan backend disabled')),
+      JSON.stringify({ ok: back?.res?.ok, backend: back?.res?.backend }),
+    )
+
+    await cdp.evaluate(`(async () => {
+      window.__offLog?.()
+      try { await window.xbaos.engine.unload() } catch {}
+      return true
+    })()`)
+  },
+
+  /**
+   * 崩溃之后能不能自己爬起来。
+   *
+   * 用户报的就是「点开始识别 → 引擎意外退出（3221225477）」。这次修复的核心
+   * 不是「别崩」，而是**崩了也别把错误直接甩给用户**：主进程捕获崩溃后换个
+   * 环境变量重开一个进程再试一次。这里直接强杀引擎来模拟原生崩溃，看它能不能
+   * 自己恢复 —— 断言写在「用户视角的结果」上，不是写在内部实现上。
+   */
+  async 'engine-crash-retry'({ cdp }) {
+    const wav = path.join(repoRoot, 'engine', 'test-data', 'zh-sample.wav')
+
+    // 先按 GPU 模式加载：崩溃只可能发生在这条路径上
+    const prepared = await cdp.evaluate(`(async () => {
+      window.__events = []
+      window.__offStream = window.xbaos.engine.onStream((p) => window.__events.push(p.msg))
+      const res = await window.xbaos.engine.load({ backend: 'vulkan' })
+      return { ok: res?.ok, backend: res?.backend }
+    })()`)
+    check('识别前已按 GPU 模式加载', prepared?.ok === true, JSON.stringify(prepared))
+
+    // 发起识别但不等待 —— 崩溃必须发生在识别途中
+    await cdp.evaluate(`(() => {
+      window.__rtDone = false
+      window.__rtResult = null
+      window.__rt = window.xbaos.engine
+        .transcribe({ audio: ${JSON.stringify(wav)}, language: 'zh', vad: true })
+        .then((r) => { window.__rtResult = { ok: true, raw: JSON.stringify(r).slice(0, 300) } })
+        .catch((e) => { window.__rtResult = { ok: false, error: String(e) } })
+        .finally(() => { window.__rtDone = true })
+      return true
+    })()`)
+    await sleep(700)
+
+    // 模拟原生崩溃（0xC0000005 在外部看起来就是进程没了）
+    try {
+      execFileSync('taskkill', ['/F', '/IM', 'xbaos-engine.exe'], { stdio: 'ignore' })
+    } catch {
+      /* 进程可能已经不在了 */
+    }
+
+    const r = await cdp.evaluate(`(async () => {
+      const t0 = Date.now()
+      while (!window.__rtDone && Date.now() - t0 < 120000) {
+        await new Promise((res) => setTimeout(res, 250))
+      }
+      return {
+        done: window.__rtDone,
+        result: window.__rtResult ?? null,
+        fallbacks: (window.__events ?? []).filter((m) => m && m.type === 'fallback'),
+        waited: Date.now() - t0,
+      }
+    })()`)
+
+    check(
+      '崩溃后识别自动重试并成功（没把错误甩给用户）',
+      r?.result?.ok === true,
+      JSON.stringify(r?.result)?.slice(0, 300),
+    )
+    check(
+      '界面收到了「已改用 CPU 重试」的说明',
+      (r?.fallbacks ?? []).some((m) => String(m?.reason ?? '').includes('CPU')),
+      JSON.stringify(r?.fallbacks ?? []).slice(0, 300),
+    )
+
+    await cdp.evaluate(`(async () => {
+      window.__offStream?.()
+      try { await window.xbaos.engine.unload() } catch {}
+      return true
+    })()`)
   },
 
   /**
