@@ -23,6 +23,7 @@ import { vadPreset } from '@/data/vadPresets'
 import {
   applyTranslation as applyTranslationTo,
   cuesToSegments,
+  mergeCuesIntoSelection,
   type ParsedCue,
 } from '@/utils/llmResult'
 import { validateSegment, countIssues } from '@/utils/validate'
@@ -561,7 +562,7 @@ export const useProjectStore = defineStore('project', () => {
    *
    * @returns 是否成功写回
    */
-  function applyAiReview(fileId: string, cues: ParsedCue[]): boolean {
+  function applyAiReview(fileId: string, cues: ParsedCue[], ids?: string[]): boolean {
     if (cues.length === 0) return false
 
     const file =
@@ -569,15 +570,40 @@ export const useProjectStore = defineStore('project', () => {
       (mergedFile.value && mergedFile.value.id === fileId ? mergedFile.value : null)
     if (!file) return false
 
+    /*
+     * 分段校对：`ids` 是这次交给 AI 的那一段条目。
+     *
+     * 必须逐个校验它们在这个文件里还存在 —— 工程可能已经被改过（删了条目、
+     * 清空重识别）。对不上的时候宁可什么都不做，也不能把结果按位置贴到
+     * 别的条目上：那样错误读起来完全通顺，用户根本发现不了。
+     */
+    const scope = Array.isArray(ids) && ids.length > 0 ? ids : null
+    if (scope) {
+      const known = new Set(file.segments.map((s) => s.id))
+      if (!scope.every((id) => known.has(id))) return false
+    }
+
     const history = useHistoryStore()
     const ui = useUiStore()
-    const next = cuesToSegments(cues, file.segments)
+    // 范围外的条数要在写回**之前**算：commit 的回调是同步执行的，写完再数就变了
+    const rest = scope ? file.segments.length - scope.length : 0
+    const next = scope
+      ? mergeCuesIntoSelection(file.segments, cues, scope)
+      : cuesToSegments(cues, file.segments)
 
     history.commit(file.id, file.segments, 'AI 校对', () => {
       file.segments = next
     })
 
-    ui.notify('success', 'AI 校对结果已应用', `${file.name}：${next.length} 条，可用 Ctrl+Z 撤回`)
+    if (scope) {
+      ui.notify(
+        'success',
+        'AI 校对结果已应用',
+        `${file.name}：这一段 ${scope.length} 条整理为 ${cues.length} 条，其余 ${rest} 条保持不变，可用 Ctrl+Z 撤回`,
+      )
+    } else {
+      ui.notify('success', 'AI 校对结果已应用', `${file.name}：${next.length} 条，可用 Ctrl+Z 撤回`)
+    }
     return true
   }
 
@@ -593,20 +619,30 @@ export const useProjectStore = defineStore('project', () => {
    *
    * @returns 是否成功写回
    */
-  function applyTranslation(fileId: string, lang: string, lines: string[]): boolean {
+  function applyTranslation(fileId: string, lang: string, lines: string[], ids?: string[]): boolean {
     if (!lang || lines.length === 0) return false
 
     const file =
       files.value.find((f) => f.id === fileId) ??
       (mergedFile.value && mergedFile.value.id === fileId ? mergedFile.value : null)
     if (!file) return false
-    // 条数必须一一对应。译文是按序号贴的，差一条就会从那里开始整体错位
-    if (file.segments.length !== lines.length) return false
+
+    // 分段翻译：`ids` 是这次交给 AI 的那一段，条数必须与译文完全一致，
+    // 并且每个 id 都得还在（工程可能已被改过）。对不上就不写，绝不按位置猜。
+    const scope = Array.isArray(ids) && ids.length > 0 ? ids : null
+    if (scope) {
+      if (scope.length !== lines.length) return false
+      const known = new Set(file.segments.map((s) => s.id))
+      if (!scope.every((id) => known.has(id))) return false
+    } else if (file.segments.length !== lines.length) {
+      // 整份翻译：条数必须一一对应，差一条就会从那里开始整体错位
+      return false
+    }
 
     const history = useHistoryStore()
     const ui = useUiStore()
     const settings = useSettingsStore()
-    const next = applyTranslationTo(file.segments, lang, lines)
+    const next = applyTranslationTo(file.segments, lang, lines, scope ?? undefined)
 
     history.commit(file.id, file.segments, '载入译文', () => {
       file.segments = next
@@ -614,7 +650,13 @@ export const useProjectStore = defineStore('project', () => {
 
     // 记下当前工作语言：译文行与「仅译文」视图都按它取内容
     settings.translationLang = lang
-    ui.notify('success', `已载入 ${next.length} 条译文`, `${file.name}：${lang}，可用 Ctrl+Z 撤回`)
+    ui.notify(
+      'success',
+      `已载入 ${scope ? scope.length : next.length} 条译文`,
+      scope
+        ? `${file.name}：${lang}，只写了这一段，其余条目的译文未改动，可用 Ctrl+Z 撤回`
+        : `${file.name}：${lang}，可用 Ctrl+Z 撤回`,
+    )
     return true
   }
 

@@ -14,6 +14,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import type { AssistReviewPayload, AssistReviewTarget } from '@/types/engine'
+import type { SubtitleSegment } from '@/types'
 import {
   parseModelOutput,
   parseTranslation,
@@ -134,14 +135,12 @@ function countOf(r: FileResult): number {
 /**
  * 译文列表用的「原文 ↔ 译文」配对。
  *
- * 对照关系是位置关系：提示词里发出去的就是**有内容的条目**（`hasText` 过滤后），
+ * 对照关系是位置关系：提示词里发出去的就是**所选范围内的有内容条目**，
  * 译文又按序号一一贴回，所以两边按下标对齐是稳的。
  */
 function pairsOf(r: FileResult): { src: string; tr: string }[] {
   const target = targets.value.find((t) => t.fileId === r.fileId)
-  const src = (target?.segments ?? [])
-    .filter(hasText)
-    .map((s) => s.text.replace(/\s*\n\s*/g, ' ').trim())
+  const src = (target ? pickedOf(target) : []).map((s) => s.text.replace(/\s*\n\s*/g, ' ').trim())
   return r.lines.map((tr, i) => ({ src: src[i] ?? '', tr }))
 }
 /** 单文件时的前后对照概览 */
@@ -163,6 +162,89 @@ const selectedTargets = computed(() =>
 const isAllSelected = computed(
   () => targets.value.length > 0 && selectedIds.value.length === targets.value.length,
 )
+
+/* ------------------------------------------------------------- 处理范围 */
+
+/**
+ * 一个文件里**真正会发给 AI** 的字幕。
+ *
+ * 必须与提示词构建器的 `usable()` 用同一个判据（`hasText`）：那边剔掉的空条目，
+ * 这边要是算进范围里，序号就会整体错位一格 —— 而这类错位读起来完全通顺，
+ * 极难发现。所以「范围」的下标一律建立在这个列表上。
+ */
+function usableOf(t: AssistReviewTarget): SubtitleSegment[] {
+  return t.segments.filter(hasText)
+}
+
+/** 每个文件选中的区间（下标基于 usableOf 的结果，闭区间） */
+const ranges = ref<Record<string, { from: number; to: number }>>({})
+
+function rangeOf(t: AssistReviewTarget): { from: number; to: number } {
+  const n = usableOf(t).length
+  if (n === 0) return { from: 0, to: 0 }
+  const r = ranges.value[t.fileId]
+  if (!r) return { from: 0, to: n - 1 }
+  // 数据可能被主窗口刷新过（主窗口改了内容再打开辅助窗口），存量下标要夹一次，
+  // 否则 slice 会静默返回空数组，表现为「提示词里一条字幕都没有」
+  return { from: Math.max(0, Math.min(r.from, n - 1)), to: Math.max(0, Math.min(r.to, n - 1)) }
+}
+
+function pickedOf(t: AssistReviewTarget): SubtitleSegment[] {
+  const { from, to } = rangeOf(t)
+  return usableOf(t).slice(from, to + 1)
+}
+
+/** 这个文件是不是「全部条目都要处理」—— 全量走原来的整份重建路径，行为保持不变 */
+function isFullRange(t: AssistReviewTarget): boolean {
+  return pickedOf(t).length >= usableOf(t).length
+}
+
+function setRange(fileId: string, from: number, to: number): void {
+  const t = targets.value.find((x) => x.fileId === fileId)
+  if (!t) return
+  const n = usableOf(t).length
+  if (n === 0) return
+  const lo = Math.max(0, Math.min(from, n - 1))
+  // 起点越过终点时把另一端一起带走，不留下 from > to 这种空区间
+  const hi = Math.max(lo, Math.min(to, n - 1))
+  ranges.value = { ...ranges.value, [fileId]: { from: lo, to: hi } }
+}
+
+function resetRanges(): void {
+  const next: Record<string, { from: number; to: number }> = {}
+  for (const t of targets.value) {
+    next[t.fileId] = { from: 0, to: Math.max(0, usableOf(t).length - 1) }
+  }
+  ranges.value = next
+}
+
+/** 下拉里那一行文字：序号 + 前十几个字，够认出是哪一条即可 */
+function previewOf(seg: SubtitleSegment): string {
+  const flat = seg.text.replace(/\s+/g, ' ').trim()
+  return flat.length > 14 ? `${flat.slice(0, 14)}…` : flat
+}
+
+/** 选了部分范围的文件名，用于第 3 步说明「这次只覆盖哪一段」 */
+const scopedTargets = computed(() => selectedTargets.value.filter((t) => !isFullRange(t)))
+
+/** 有没有文件值得显示范围控件（至少两条字幕才谈得上分批） */
+const rangeEditable = computed(() => selectedTargets.value.some((t) => usableOf(t).length > 1))
+
+function onRangeFrom(t: AssistReviewTarget, e: Event): void {
+  setRange(t.fileId, Number((e.target as HTMLSelectElement).value), rangeOf(t).to)
+}
+
+function onRangeTo(t: AssistReviewTarget, e: Event): void {
+  setRange(t.fileId, rangeOf(t).from, Number((e.target as HTMLSelectElement).value))
+}
+
+/** 第 3 步那句「本次只覆盖 …」的文字 */
+const scopeSummary = computed(() =>
+  scopedTargets.value
+    .map((t) => `${t.fileName} 第 ${rangeOf(t).from + 1}–${rangeOf(t).to + 1} 条`)
+    .join('；'),
+)
+
 
 /** 当前处于第几步（0 起）。步骤条用它算高亮与打勾 */
 const stepIndex = computed(() => (step.value === 'copy' ? 0 : step.value === 'paste' ? 1 : 2))
@@ -186,6 +268,8 @@ const scriptSimilarity = computed<number | null>(() => {
   if (list.length === 0) return null
   let best = 0
   for (const t of list) {
+    // 用**整个文件**的文本比对，不看处理范围：这一步回答的是「有没有选错文件」，
+    // 范围再小也不该让一份正确的稿子被误判成「对不上」
     const text = t.segments.map((s) => s.text).join('')
     best = Math.max(best, containmentSimilarity(text, script))
   }
@@ -223,7 +307,11 @@ function collectTerms(list: AssistReviewTarget[]): string[] {
   const out = splitTerms(config.promptTerms)
   if (config.lexiconIds.length > 0) {
     const text = list
-      .map((t) => t.segments.map((s) => s.text).join(''))
+      .map((t) =>
+        pickedOf(t)
+          .map((s) => s.text)
+          .join(''),
+      )
       .join('\n')
     for (const word of pickPresentTerms(text, config.lexiconIds)) {
       if (!out.includes(word)) out.push(word)
@@ -241,7 +329,9 @@ const promptResult = computed(() => {
   const mapped = list.map((t) => ({
     fileName: t.fileName,
     durationSec: t.durationSec,
-    segments: t.segments,
+    // 只发所选范围内的条目 —— 这是「分批校对」能成立的前提：
+    // 提示词里没有的条目，AI 也不可能返回，取回时自然只覆盖这一段
+    segments: pickedOf(t),
   }))
 
   if (isTranslate.value) {
@@ -355,6 +445,7 @@ async function loadPayload(): Promise<void> {
     payload.value = params.has('task') ? { ...base, task: 'translate' } : base
   }
   selectedIds.value = payload.value ? payload.value.targets.map((t) => t.fileId) : []
+  resetRanges()
 }
 
 /* ------------------------------------------------------------ 第 1 步 */
@@ -430,9 +521,12 @@ async function readClipboard(): Promise<void> {
         note('请先选择目标语言。', 'error')
         return
       }
-      // 期望条数必须与提示词里实际发出去的行数一致 —— 提示词会剔掉空条目
-      // （`usable()`），这里就得同样剔掉，否则空条目会让条数校验凭空多算。
-      const out = parseTranslation(text, list.map((t) => t.segments.filter(hasText).length))
+      // 期望条数必须与提示词里实际发出去的行数一致 —— 提示词只含所选范围内的
+      // 有内容条目，这里就得按同一个范围数，否则条数校验会凭空多算。
+      const out = parseTranslation(
+        text,
+        list.map((t) => pickedOf(t).length),
+      )
       if (!out.ok) {
         parseError.value = out.message ?? '译文的格式不对'
         note(parseError.value, 'error')
@@ -460,7 +554,7 @@ async function readClipboard(): Promise<void> {
         note(outcome.error, 'error')
         return
       }
-      summary.value = summarizeReview(outcome.cues, list[0].segments)
+      summary.value = summarizeReview(outcome.cues, pickedOf(list[0]))
       note(`读取成功：解析出 ${outcome.cues.length} 条字幕。请核对下方变化。`, 'success')
       return
     }
@@ -492,7 +586,7 @@ async function readClipboard(): Promise<void> {
         outcome,
         lines: [],
         // 每个文件单独算对照，展开时才有内容可看
-        summary: outcome.error ? null : summarizeReview(outcome.cues, list[i].segments),
+        summary: outcome.error ? null : summarizeReview(outcome.cues, pickedOf(list[i])),
       }
     })
 
@@ -515,6 +609,17 @@ function confirmApply(): void {
     note('浏览器预览模式无法写回编辑器，请在桌面应用中使用', 'error')
     return
   }
+
+  /** 选中范围里那些条目的 id（顺序即提示词里的顺序） */
+  const idsOf = (fileId: string): string[] => {
+    const t = targets.value.find((x) => x.fileId === fileId)
+    return t ? pickedOf(t).map((s) => s.id) : []
+  }
+  const fullOf = (fileId: string): boolean => {
+    const t = targets.value.find((x) => x.fileId === fileId)
+    return !t || isFullRange(t)
+  }
+
   // 翻译：提交译文（按序号），主窗口据此「只换文本、不动时间码」
   if (isTranslate.value) {
     const ok = results.value.filter((r) => r.lines.length > 0)
@@ -526,7 +631,10 @@ function confirmApply(): void {
       api.submit({
         task: 'translate',
         lang: targetLangCode.value,
-        results: toPlain(ok.map((r) => ({ fileId: r.fileId, lines: r.lines }))),
+        // 带上 id：只给这一段写译文，范围外条目的译文原样留着
+        results: toPlain(
+          ok.map((r) => ({ fileId: r.fileId, lines: r.lines, ids: idsOf(r.fileId) })),
+        ),
       })
     } catch (err) {
       note(`提交失败：${String((err as Error)?.message ?? err)}`, 'error')
@@ -546,7 +654,15 @@ function confirmApply(): void {
   // `An object could not be cloned.`，表现为「确认后没有任何反应」
   try {
     api.submit({
-      results: toPlain(ok.map((r) => ({ fileId: r.fileId, cues: r.outcome.cues }))),
+      results: toPlain(
+        ok.map((r) => ({
+          fileId: r.fileId,
+          cues: r.outcome.cues,
+          // 只有「选了部分范围」才带 id：全量时保持原来的整份重建语义，
+          // 免得把既有行为（按位置复用 id）也一起改掉
+          ids: fullOf(r.fileId) ? undefined : idsOf(r.fileId),
+        })),
+      ),
     })
   } catch (err) {
     note(`提交失败：${String((err as Error)?.message ?? err)}`, 'error')
@@ -771,6 +887,51 @@ onBeforeUnmount(() => {
             </p>
           </div>
 
+          <!-- 处理范围：默认「全部」。长字幕分批校对时只发这一段，取回也只覆盖这一段 -->
+          <div v-if="rangeEditable" class="block">
+            <div class="block__head">
+              <span class="block__title"><Icon name="list" :size="14" /> 处理范围</span>
+              <button class="link" type="button" @click="resetRanges">恢复全部</button>
+            </div>
+            <p class="block__hint">
+              条目太多、AI 一次吃不下时可以分批：提示词只带这一段，取回时也只覆盖这一段，
+              其余字幕保持原样。
+            </p>
+            <ul class="range">
+              <li v-for="t in selectedTargets" :key="t.fileId" class="range__row">
+                <span class="range__name">{{ t.fileName }}</span>
+                <div class="range__ctl">
+                  <select
+                    class="select range__sel"
+                    :value="rangeOf(t).from"
+                    :disabled="usableOf(t).length < 2"
+                    :aria-label="`${t.fileName} 起始条目`"
+                    @change="onRangeFrom(t, $event)"
+                  >
+                    <option v-for="(s, i) in usableOf(t)" :key="s.id" :value="i">
+                      第 {{ i + 1 }} 条 {{ previewOf(s) }}
+                    </option>
+                  </select>
+                  <span class="range__sep">至</span>
+                  <select
+                    class="select range__sel"
+                    :value="rangeOf(t).to"
+                    :disabled="usableOf(t).length < 2"
+                    :aria-label="`${t.fileName} 结束条目`"
+                    @change="onRangeTo(t, $event)"
+                  >
+                    <option v-for="(s, i) in usableOf(t)" :key="s.id" :value="i">
+                      第 {{ i + 1 }} 条 {{ previewOf(s) }}
+                    </option>
+                  </select>
+                </div>
+                <span class="range__count" :class="{ 'is-scoped': !isFullRange(t) }">
+                  {{ pickedOf(t).length }} / {{ usableOf(t).length }} 条
+                </span>
+              </li>
+            </ul>
+          </div>
+
           <!-- 原文案参考（可选）。翻译用不到它 —— 那是「按同一份稿子校正」的辅助输入，
                对「换一种语言重写」没有参考价值，留着只会让人以为要填 -->
           <div v-if="!isTranslate" class="block">
@@ -913,6 +1074,13 @@ onBeforeUnmount(() => {
               确认已复制 AI 输出的字幕，然后点击下方按钮。软件会读取并解析剪贴板内容，
               核对无误后才覆盖。
             </template>
+          </p>
+
+          <p v-if="scopedTargets.length > 0" class="scope">
+            <Icon name="info" :size="13" />
+            <span>
+              本次只覆盖 {{ scopeSummary }}，这些条目之外的字幕不会被改动。
+            </span>
           </p>
 
           <!-- 单文件：前后对照概览 -->
@@ -1437,11 +1605,92 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
+/* 处理范围：一行一个文件，两端各一个下拉 */
+.range {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.range__row {
+  display: grid;
+  /* 第一行：文件名 + 条数；第二行：两个下拉占满，避免中文选项被挤成竖排 */
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  font-size: var(--font-size-xs);
+}
+
+.range__name {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-primary);
+}
+
+.range__ctl {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+/* 下拉会被 flex 压到 min-content，中文选项一压就只剩一个字宽 —— 给它一个下限 */
+.range__sel {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 26px;
+  font-size: var(--font-size-xs);
+}
+
+.range__sep {
+  flex: none;
+  color: var(--color-text-tertiary);
+}
+
+.range__count {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  flex: none;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 选了部分范围时把条数点亮，免得用户以为还是全量 */
+.range__count.is-scoped {
+  color: var(--color-text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+/* 第 3 步顶部那句「本次只覆盖 …」 */
+.scope {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-subtle);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-base);
+}
+
+.scope svg {
+  flex: none;
+  margin-top: 2px;
+}
+
 /**
  * 多文件的结果清单里，行本身就是按钮（点了展开看内容），
  * 要把 button 的默认外观整个抹掉；第 1 步那些 <label> 行不受影响。
- */
-button.pick__row {
+ */button.pick__row {
   width: 100%;
   border: 0;
   background: transparent;

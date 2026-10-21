@@ -205,8 +205,8 @@ function onAssistResult(payload: AssistSubmitPayload): void {
   let applied = 0
   for (const item of results) {
     if (translating) {
-      if (project.applyTranslation(item.fileId, payload.lang ?? '', item.lines ?? [])) applied += 1
-    } else if (project.applyAiReview(item.fileId, item.cues ?? [])) {
+      if (project.applyTranslation(item.fileId, payload.lang ?? '', item.lines ?? [], item.ids)) applied += 1
+    } else if (project.applyAiReview(item.fileId, item.cues ?? [], item.ids)) {
       applied += 1
     }
   }

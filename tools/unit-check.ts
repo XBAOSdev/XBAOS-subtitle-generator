@@ -39,6 +39,7 @@ import { srtTime, serializeSrt, serializeAss, composeForExport, bundleLangTag, s
 import { planExport, pickTranslationLang, translationLangsOf, type PlanSource } from '../src/utils/exportPlan'
 import { parseSubtitle } from '../src/utils/subtitleParse'
 import { buildPrompt, pickPresentTerms, promptCharCost, splitTerms } from '../src/utils/prompt'
+import { decodeTextAuto, encodeSubtitle } from '../electron/encoding.js'
 import { LEXICONS } from '../src/data/lexicons'
 import {
   containmentSimilarity,
@@ -63,6 +64,7 @@ import {
 import {
   applyTranslation,
   cuesToSegments,
+  mergeCuesIntoSelection,
   parseModelOutput,
   parseTranslation,
   splitByFileMarks,
@@ -1082,6 +1084,107 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const readSource = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
   check('识别结果落库前对齐基线', readSource('src/stores/project.ts').includes('alignOrigin(wrapped.segments)'))
   check('手动工具不重设基线', !readSource('src/components/ToolPanel.vue').includes('alignOrigin'))
+}
+
+/* ---- 字幕文件编码探测（electron/encoding.js） ---- */
+{
+  const text = '1\n00:00:00,000 --> 00:00:02,000\n你用浏览器的无痕浏览\n'
+
+  const utf8 = decodeTextAuto(new Uint8Array(Buffer.from(text, 'utf8')))
+  check('编码探测：UTF-8 原样读回', utf8.text === text && utf8.encoding === 'utf-8', utf8.encoding)
+
+  const bom = decodeTextAuto(encodeSubtitle(text, 'utf-8-bom'))
+  check('编码探测：UTF-8 BOM 被剥掉', bom.text === text && bom.encoding === 'utf-8-bom')
+
+  const gbk = decodeTextAuto(encodeSubtitle(text, 'gbk'))
+  check('编码探测：GBK 往返一致', gbk.text === text && gbk.encoding === 'gbk', gbk.encoding)
+
+  const withBom16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')])
+  const r16 = decodeTextAuto(new Uint8Array(withBom16))
+  check('编码探测：UTF-16LE 带 BOM', r16.text === text && r16.encoding === 'utf-8-bom')
+
+  // 无 BOM 的 UTF-16：按 UTF-8 读会出现 U+FFFD，按 GBK 读是满屏乱码 —— 必须先认出来
+  const latin = '1\r\n00:00:00,000 --> 00:00:02,000\r\nHello there\r\n'
+  const noBom = decodeTextAuto(new Uint8Array(Buffer.from(latin, 'utf16le')))
+  check('编码探测：无 BOM 的 UTF-16LE 读得回来', noBom.text === latin && noBom.encoding === 'utf-8-bom', JSON.stringify(noBom.text.slice(0, 12)))
+
+  // 反例：普通 UTF-8 不能被误判成 UTF-16（误判的后果比漏判更糟，整份文件全乱）
+  check('编码探测：普通 UTF-8 不误判为 UTF-16', decodeTextAuto(new Uint8Array(Buffer.from(text, 'utf8'))).encoding === 'utf-8')
+
+  // GBK 里没有的字用问号占位，不能抛错、更不能整份写失败
+  check('GBK 写回：生僻字降级为问号', new TextDecoder('gbk').decode(encodeSubtitle('\u{20000}', 'gbk')) === '?')
+}
+
+/* ---- 分段校对：只覆盖所选范围（mergeCuesIntoSelection） ---- */
+{
+  const base: SubtitleSegment[] = [
+    { id: 'a', start: 0, end: 2, text: '第一条原文', origin: '第一条原文', issues: [] },
+    { id: 'b', start: 2, end: 4, text: '第二条原文', origin: '第二条原文', issues: [] },
+    { id: 'c', start: 4, end: 6, text: '第三条原文', origin: '第三条原文', issues: [] },
+    { id: 'd', start: 6, end: 8, text: '第四条原文', origin: '第四条原文', issues: [] },
+    { id: 'e', start: 8, end: 10, text: '第五条原文', origin: '第五条原文', issues: [] },
+  ]
+
+  // 只校对中间三条：首尾两条必须一条不动（连对象引用都不换）
+  const mid = mergeCuesIntoSelection(
+    base,
+    [
+      { start: 2, end: 4, text: '第二条改写' },
+      { start: 4, end: 6, text: '第三条改写' },
+      { start: 6, end: 8, text: '第四条改写' },
+    ],
+    ['b', 'c', 'd'],
+  )
+  check('分段校对：条数不变', mid.length === 5, String(mid.length))
+  check(
+    '分段校对：范围外条目原样保留',
+    mid[0] === base[0] && mid[4] === base[4],
+    `${mid[0].text} / ${mid[4].text}`,
+  )
+  check(
+    '分段校对：范围内条目被替换',
+    mid[1].text === '第二条改写' && mid[3].text === '第四条改写',
+    mid.map((s) => s.text).join('|'),
+  )
+  check('分段校对：结果仍按时间排序', mid.every((s, i) => i === 0 || s.start >= mid[i - 1].start))
+
+  // 段内合并：AI 把三条并成两条，总条数应少一条，且不能把第四条挤掉
+  const merged = mergeCuesIntoSelection(
+    base,
+    [
+      { start: 2, end: 5, text: '第二三条合并' },
+      { start: 5, end: 8, text: '第四条改写' },
+    ],
+    ['b', 'c', 'd'],
+  )
+  check('分段校对：段内合并后条数正确', merged.length === 4, String(merged.length))
+  check(
+    '分段校对：合并后仍保留范围外的首尾条',
+    merged[0].text === '第一条原文' && merged[merged.length - 1].text === '第五条原文',
+    merged.map((s) => s.text).join('|'),
+  )
+
+  // 反例对照：不传 ids 就是「整份重建」，条数少就会被截断 —— 这正是用户踩到的坑
+  const wholesale = cuesToSegments([{ start: 2, end: 4, text: '只有一条' }], base)
+  check('整份重建：结果少时会把文件截断（旧语义，仅全量时可用）', wholesale.length === 1)
+
+  // 译文：按 id 只写这一段，其他条目的译文（含别的语言）必须留着
+  const withTr: SubtitleSegment[] = [
+    { id: 'a', start: 0, end: 2, text: '一', origin: '一', issues: [], translations: { en: 'one' } },
+    { id: 'b', start: 2, end: 4, text: '二', origin: '二', issues: [], translations: { en: 'two', ja: '二' } },
+    { id: 'c', start: 4, end: 6, text: '三', origin: '三', issues: [], translations: { en: 'three' } },
+  ]
+  const partial = applyTranslation(withTr, 'en', ['TWO'], ['b'])
+  check('分段翻译：只改这一段', partial[1].translations?.en === 'TWO', JSON.stringify(partial[1].translations))
+  check(
+    '分段翻译：其他条目的译文原样',
+    partial[0].translations?.en === 'one' && partial[2].translations?.en === 'three',
+  )
+  check('分段翻译：其他语言不受影响', partial[1].translations?.ja === '二', JSON.stringify(partial[1].translations))
+  check(
+    '分段翻译：未命中的 id 一个都不写',
+    applyTranslation(withTr, 'en', ['X'], ['nope']).every((s, i) => s.translations?.en === withTr[i].translations?.en),
+  )
 }
 
 /* ---- 实验功能隐藏守门（源码扫描） ---- */

@@ -580,6 +580,13 @@ export interface AssistSubmitPayload {
   /** 每个文件的结果，顺序与 payload.targets 中「被选中的」一致 */
   results: {
     fileId: string
+    /**
+     * 本次结果对应的字幕 id（顺序与提示词里的序号一致）。
+     *
+     * 只在**用户选了部分范围**时才带：主窗口据此只替换这一段，范围外的条目
+     * 一条都不动。缺省表示「整份重建」—— 那是范围=全部时的旧语义，保持不变。
+     */
+    ids?: string[]
     /** 校对结果：整条替换，时间码可重排 */
     cues?: { start: number; end: number; text: string }[]
     /** 翻译结果：按序号的译文，**不含时间码**，按位置贴回 */

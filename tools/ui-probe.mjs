@@ -253,6 +253,68 @@ const scenarios = {
       )
       check('文件默认全选', checkedCount === 2, String(checkedCount))
 
+      /*
+       * ---- 处理范围（分批校对）----
+       * 默认必须是「全部」：任何默认收窄都会让用户以为整份都校对过了。
+       * 收窄之后，提示词必须真的变短 —— 只看计数文字会漏掉「界面变了但提示词没变」
+       * 这种假的通过。
+       */
+      const rangeRows = await cdp.evaluate(
+        `[...document.querySelectorAll('.range__row')].map((r) => ({
+          sel: r.querySelectorAll('select').length,
+          count: (r.querySelector('.range__count')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+        }))`,
+      )
+      check('每个选中文件都有一行「处理范围」', rangeRows.length === 2, JSON.stringify(rangeRows))
+      check('处理范围是「起 / 止」两个下拉', rangeRows.every((r) => r.sel === 2), JSON.stringify(rangeRows))
+      check('处理范围默认覆盖全部条目', rangeRows[0]?.count === '2 / 2 条', rangeRows[0]?.count)
+
+      const fullChars = await cdp.evaluate(
+        `Number((document.querySelector('.prompt__meta')?.textContent ?? '0').replace(/[^0-9]/g, ''))`,
+      )
+
+      // 把结束条目收到第 1 条
+      await cdp.evaluate(`(() => {
+        const sel = document.querySelectorAll('.range__row')[0].querySelectorAll('select')[1]
+        sel.value = '0'
+        sel.dispatchEvent(new Event('change', { bubbles: true }))
+      })()`)
+      await waitFor(
+        cdp,
+        `document.querySelectorAll('.range__row')[0].querySelector('.range__count').textContent.trim().startsWith('1 ')`,
+        4000,
+        50,
+      )
+      const scopedRow = await cdp.evaluate(`(() => {
+        const row = document.querySelectorAll('.range__row')[0]
+        return {
+          count: (row.querySelector('.range__count')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+          chars: Number((document.querySelector('.prompt__meta')?.textContent ?? '0').replace(/[^0-9]/g, '')),
+        }
+      })()`)
+      check('收窄到 1 条后计数跟着变', scopedRow.count === '1 / 2 条', scopedRow.count)
+      check('收窄后提示词真的变短了（不是只有界面在变）', scopedRow.chars < fullChars, `${scopedRow.chars} vs ${fullChars}`)
+
+      // 点「恢复全部」回到全量
+      await cdp.evaluate(
+        `document.querySelector('.range__row').closest('.block').querySelector('.link').click()`,
+      )
+      await waitFor(
+        cdp,
+        `document.querySelectorAll('.range__row')[0].querySelector('.range__count').textContent.trim().startsWith('2 ')`,
+        4000,
+        50,
+      )
+      const restored = await cdp.evaluate(`(() => {
+        const row = document.querySelectorAll('.range__row')[0]
+        return {
+          count: (row.querySelector('.range__count')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+          chars: Number((document.querySelector('.prompt__meta')?.textContent ?? '0').replace(/[^0-9]/g, '')),
+        }
+      })()`)
+      check('「恢复全部」把范围还原', restored.count === '2 / 2 条', restored.count)
+      check('「恢复全部」后提示词长度复原', restored.chars === fullChars, `${restored.chars} vs ${fullChars}`)
+
       // 提示词按设置动态生成：默认设置是「去停顿标点」，就不能再要求 AI 补标点
       const promptText1 = await cdp.evaluate(`document.querySelector('.prompt__body')?.textContent ?? ''`)
       const noPunc = promptText1.includes('不要给字幕添加任何标点符号')

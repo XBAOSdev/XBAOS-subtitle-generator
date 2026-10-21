@@ -19,6 +19,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 import { EngineClient, EngineCanceledError, EngineCrashError } from './engine-client.js'
+import { decodeTextAuto, encodeSubtitle } from './encoding.js'
 import { ModelDownloader, MODEL_CATALOG } from './model-download.js'
 import { MANIFEST_URL, allowedExternalUrl, checkForUpdate, isAllowedExternalHost } from './update.js'
 import {
@@ -1271,27 +1272,11 @@ function registerIpc() {
    * 编码自适应的文本读取，给「导入字幕文件」用。
    *
    * 老播放器导出的 SRT 大量是 GBK，硬按 UTF-8 读会满屏乱码且不可逆。
-   * 判定顺序：BOM > UTF-8 严格校验（出现 U+FFFD 即不合格）> GBK。
+   * 判定顺序与写回编码都在 `electron/encoding.js`（那里有单测覆盖）。
    * 返回实际使用的编码，「覆盖保存」时原样写回，保证二次保存不换码。
    */
   ipcMain.handle('fs:readTextAuto', async (_event, target) => {
-    const buf = await fs.readFile(target)
-
-    if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
-      return { text: buf.subarray(3).toString('utf8'), encoding: 'utf-8-bom' }
-    }
-    if (buf.length >= 2 && ((buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff))) {
-      // UTF-16 源：统一转成带 BOM 的 UTF-8 保存，避免引入第三种写回编码
-      const le = buf[0] === 0xff
-      const body = le ? buf.subarray(2) : buf.subarray(2).swap16()
-      return { text: body.toString('utf16le'), encoding: 'utf-8-bom' }
-    }
-
-    const asUtf8 = buf.toString('utf8')
-    if (!asUtf8.includes('\uFFFD')) {
-      return { text: asUtf8, encoding: 'utf-8' }
-    }
-    return { text: new TextDecoder('gbk').decode(buf), encoding: 'gbk' }
+    return decodeTextAuto(await fs.readFile(target))
   })
 
   /**
@@ -1307,64 +1292,16 @@ function registerIpc() {
     return copy
   })
 
-  // ---------------------------------------------------------- GBK 编码
-  // Node 没有公开的 GBK 编码器（TextEncoder 只会 UTF-8），但 TextDecoder 能解。
-  // 首次导出 GBK 时把全部双字节码位解一遍建出反向表，之后走缓存。
-  // 建表约 2.4 万次解码，实测几十毫秒，只在第一次导出时发生。
-  let gbkTable = null
-
-  function encodeGbk(text) {
-    if (!gbkTable) {
-      const decoder = new TextDecoder('gbk')
-      gbkTable = new Map()
-      // 单字节区：ASCII 原样
-      for (let b = 0; b < 0x80; b++) {
-        const ch = decoder.decode(Uint8Array.of(b))
-        if (ch.length === 1 && ch !== '\uFFFD') gbkTable.set(ch, Uint8Array.of(b))
-      }
-      // 双字节区
-      for (let lead = 0x81; lead <= 0xfe; lead++) {
-        for (let trail = 0x40; trail <= 0xfe; trail++) {
-          if (trail === 0x7f) continue
-          const bytes = Uint8Array.of(lead, trail)
-          const ch = decoder.decode(bytes)
-          if (ch !== '\uFFFD' && !gbkTable.has(ch)) gbkTable.set(ch, bytes)
-        }
-      }
-    }
-
-    const out = []
-    for (const ch of text) {
-      if (ch < '\x80') {
-        out.push(ch.charCodeAt(0))
-        continue
-      }
-      const mapped = gbkTable.get(ch)
-      if (mapped) {
-        out.push(...mapped)
-      } else {
-        // GBK 里没有的字符（生僻字、emoji）用问号占位，别让整个导出失败
-        out.push(0x3f)
-      }
-    }
-    return Buffer.from(out)
-  }
-
   /**
    * 写字幕文件，带编码选择。目录不存在就建，避免用户手填了一个
    * 还不存在的路径时直接失败。返回真实写入的路径。
+   *
+   * 编码探测与编码实现都在 `electron/encoding.js`（那里可被单测覆盖）。
    */
   ipcMain.handle('fs:writeSubtitle', async (_event, target, content, encoding) => {
     const dir = path.dirname(target)
     await fs.mkdir(dir, { recursive: true })
-
-    if (encoding === 'gbk') {
-      await fs.writeFile(target, encodeGbk(content))
-    } else {
-      const bom = encoding === 'utf-8-bom' ? Buffer.from([0xef, 0xbb, 0xbf]) : null
-      const body = Buffer.from(content, 'utf8')
-      await fs.writeFile(target, bom ? Buffer.concat([bom, body]) : body)
-    }
+    await fs.writeFile(target, encodeSubtitle(content, encoding))
     return target
   })
 

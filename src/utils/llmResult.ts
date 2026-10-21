@@ -12,7 +12,7 @@
 
 import type { SubtitleSegment } from '@/types'
 import { uid } from '@/utils/id'
-import { clearStale, hasText } from '@/utils/segmentOps'
+import { clearStale, enforceMonotonicCues, hasText } from '@/utils/segmentOps'
 
 export interface ParsedCue {
   start: number
@@ -172,7 +172,41 @@ export function cuesToSegments(
   }))
 }
 
-/** 多文件输出的分隔行：`【文件 1/3】xxx.wav`。全角斜杠、多余空格都容忍 */
+/**
+ * 把校对结果合并回**指定的那一段**，范围外一条都不动。
+ *
+ * 与 `cuesToSegments`（整份重建）的分工必须说清楚，混用就是数据丢失：
+ *   - 整份重建只适用于「提示词里发了全部条目」。它按位置复用 id，AI 少返回几条
+ *     就等于把文件截断 —— 用户分段校对时踩到的正是这个。
+ *   - 分段校对时发出去的只是其中一段，AI 还可能合并或拆分条目，所以这里按
+ *     **id 集合** 定位被替换的条目，新的 cue 按时间码归位，其余原样保留。
+ *
+ * @param ids 本次交给 AI 的条目 id（顺序即提示词序号）。不在其中的条目不动
+ */
+export function mergeCuesIntoSelection(
+  segments: SubtitleSegment[],
+  cues: ParsedCue[],
+  ids: string[],
+): SubtitleSegment[] {
+  const replaced = new Set(ids)
+  const kept = segments.filter((s) => !replaced.has(s.id))
+  const built: SubtitleSegment[] = cues.map((cue) => ({
+    id: uid('seg'),
+    start: Number(cue.start.toFixed(3)),
+    end: Number(cue.end.toFixed(3)),
+    text: cue.text,
+    origin: cue.text,
+    issues: [],
+  }))
+  // 按时间码归位：合并/拆分后条数可能变，靠位置插回去一定会错位
+  const merged = [...kept, ...built].sort((a, b) => a.start - b.start || a.end - b.end)
+  // 段内重排后可能与相邻条重叠，用与识别管线相同的规则拉开
+  return enforceMonotonicCues(merged)
+}
+
+/**
+ * 多文件输出的分隔行：`【文件 1/3】xxx.wav`。全角斜杠、多余空格都容忍
+ */
 const FILE_MARK_RE = /^\s*【\s*文件\s*(\d+)\s*[/／]\s*(\d+)\s*】\s*(.*)$/
 
 export interface FileBlock {
@@ -397,7 +431,22 @@ export function applyTranslation(
   segments: SubtitleSegment[],
   lang: string,
   lines: string[],
+  ids?: string[],
 ): SubtitleSegment[] {
+  // 指定了 id 就只给这些条目写译文（分段翻译），其余条目的译文原样留着。
+  // 按位置贴回只适用于「整份翻译」—— 位置在分段场景下毫无意义。
+  if (ids && ids.length > 0) {
+    const byId = new Map(ids.map((id, i) => [id, lines[i] ?? '']))
+    return segments.map((s) => {
+      if (!byId.has(s.id)) return s
+      const next: SubtitleSegment = {
+        ...s,
+        translations: { ...(s.translations ?? {}), [lang]: byId.get(s.id) ?? '' },
+      }
+      return clearStale(next, lang)
+    })
+  }
+
   let cursor = 0
   return segments.map((s) => {
     if (!hasText(s)) return s
