@@ -168,8 +168,21 @@ inline VadResult detectSpeech(const std::vector<float> &samples, const VadOption
                 const double end = std::min(total_sec, begin + target_sec);
                 result.chunks.push_back({begin, end});
                 result.hard_cut.push_back(true);
-                if (end >= result.speech[i].end + pad) break;
-                begin = std::max(0.0, end - overlap_sec);
+                /*
+                 * 三种情况收尾，缺一不可。
+                 *
+                 * 前两条是正常结束：覆盖到语音段末尾（含余量），或者已经吃到音频结尾。
+                 * 第二条不能省 —— 语音一直持续到文件最后一帧时（录音在说话中途被切断、
+                 * 尾部静音不足 pad），`speech[i].end + pad` 会大于 `total_sec`，`end` 被
+                 * `min(total_sec, ...)` 夹住后永远达不到它，`begin` 又被算回同一个值，
+                 * 于是这个 while 永不退出，识别就卡死在这一块。
+                 *
+                 * 第三条是兜底：窗口算出来不再前进时收尾，避免任何浮点边界再把它变成死循环。
+                 */
+                if (end >= result.speech[i].end + pad || end >= total_sec) break;
+                const double next = std::max(0.0, end - overlap_sec);
+                if (next <= begin + 1e-6) break;
+                begin = next;
             }
             i++;
             continue;

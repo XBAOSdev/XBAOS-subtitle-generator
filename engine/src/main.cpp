@@ -116,6 +116,22 @@ int g_last_percent = -1;
 // 静音切分后每块单独调 whisper_full：whisper 的时间戳相对当前这块音频，
 // 必须补上块偏移；硬切产生的重叠部分还要做一次字符级去重。
 double g_chunk_offset = 0.0;
+/*
+ * 本块允许的最大绝对时间 = 下一块的起点（最后一块则是音频总时长）。
+ *
+ * 为什么需要它：whisper 在块末尾常把最后一段的 `t1` 预测到**块音频之外**
+ * （它在自己的窗口里已经看到了后面的内容）。块与块之间是按语音停顿切开的，
+ * 下一块的起点往往就落在被预测出去的那段时间里，于是两块的段在时间轴上重叠。
+ *
+ * 后果不是"稍微重叠"那么简单：渲染层的 `enforceMonotonicCues` 会把重叠的
+ * 后一段整体往后推，而这一推是**逐块累积**的 —— 实测每块 0.1~0.5 秒，
+ * 一小时的音频能累积成几十秒的系统性偏移，表现为"字幕越往后越对不上，
+ * 但最后一条的结束时间看着又差不多"。
+ *
+ * 夹到下一块起点是唯一不会丢内容的做法：被裁掉的那截本来就会由下一块
+ * 重新识别（块间有 0.3 秒余量或 1 秒重叠），而块内的时间轴保持完整。
+ */
+double g_chunk_limit = 0.0;
 bool g_chunk_hard_cut = false;
 int g_chunk_index = 0;
 int g_chunk_count = 1;
@@ -270,6 +286,20 @@ void onSegment(whisper_context *ctx, whisper_state *, int n_new, void *) {
         int64_t t1 = whisper_full_get_segment_t1(ctx, i);
         const float no_speech = whisper_full_get_segment_no_speech_prob(ctx, i);
 
+        /*
+         * 时间码先夹进本块的范围，再谈文本。
+         *
+         * 起点早于块起点：whisper 偶尔给出很小的负 t0，加上偏移会落到上一块里。
+         * 终点晚于下一块起点：块末尾的预测溢出，与下一块重叠 —— 渲染层会因此把
+         * 整块往后推，逐块累积成系统性偏移（详见 g_chunk_limit 的说明）。
+         * 整段都落在下一块范围内时直接丢弃：那段音频由下一块重新识别，留着只会重复。
+         */
+        double seg_start = (double)t0 / 100.0 + g_chunk_offset;
+        double seg_end = (double)t1 / 100.0 + g_chunk_offset;
+        if (seg_start < g_chunk_offset) seg_start = g_chunk_offset;
+        if (g_chunk_limit > 0.0 && seg_end > g_chunk_limit) seg_end = g_chunk_limit;
+        if (seg_end <= seg_start + 0.02) continue;
+
         std::string text = raw ? std::string(raw) : std::string();
 
         // 硬切重叠：本块第一段可能与上一块结尾重复，按字符对齐后裁掉
@@ -309,8 +339,14 @@ void onSegment(whisper_context *ctx, whisper_state *, int n_new, void *) {
         if (id >= 0) w.key("id").value(id);
         w.key("type").value("segment");
         w.key("i").value((int64_t)i);
-        w.key("start").value((double)t0 / 100.0 + offset);
-        w.key("end").value((double)t1 / 100.0 + offset);
+        w.key("start").value(seg_start);
+        w.key("end").value(seg_end);
+        // 诊断用：块偏移与块内相对时间。whisper 偶尔会把末段的 t1 推过本块音频长度
+        // （块边界处对下一句的预测），这两个字段让调用方能把「时间轴漂移」与
+        // 「块划分本身」区分开。界面不读它们。
+        w.key("offset").value(offset);
+        w.key("relStart").value((double)t0 / 100.0);
+        w.key("relEnd").value((double)t1 / 100.0);
         w.key("text").value(text);
         w.key("noSpeech").value((double)no_speech);
         w.key("avgLogprob").value((double)avg_logprob);
@@ -661,6 +697,7 @@ void cmdTranscribe(const mj::Value &req, int64_t id) {
     g_last_percent = -1;
     g_chunk_count = (int)plan.size();
     g_chunk_index = 0;
+    g_chunk_limit = 0.0;
     g_text_tail.clear();
     g_logprob_sum = 0.0;
     g_logprob_count = 0;
@@ -673,6 +710,9 @@ void cmdTranscribe(const mj::Value &req, int64_t id) {
         if (g_cancel.load()) break;
         g_chunk_index = (int)ci;
         g_chunk_offset = plan[ci].start;
+        // 本块的段最多只能延伸到下一块的起点，最后一块延伸到音频结尾。
+        // 超出这个界限的是 whisper 对块外的预测，留着就会与下一块重叠。
+        g_chunk_limit = (ci + 1 < plan.size()) ? plan[ci + 1].start : audio.duration;
         g_chunk_hard_cut = hard_cut[ci];
         g_chunk_first_segment = true;
 
@@ -728,6 +768,16 @@ void cmdTranscribe(const mj::Value &req, int64_t id) {
     // 分块与置信度统计：界面用来显示「跳过了几段静音」，
     // 多遍识别时也用它们给每一遍打分
     w.key("chunks").value((int64_t)plan.size());
+    // 诊断用：每个识别块的音频区间。时间轴对不上时据此判断是块划分、
+    // 块偏移还是 whisper 自身时间戳的问题。界面不读它。
+    w.key("chunkRanges").beginArray();
+    for (const xaudio::TimeRange &r : plan) {
+        w.beginObject();
+        w.key("start").value(r.start);
+        w.key("end").value(r.end);
+        w.endObject();
+    }
+    w.endArray();
     w.key("skipped").value((int64_t)skipped_silence);
     w.key("speechSeconds").value(speech_seconds);
     w.key("avgLogprob").value(avg_logprob);
