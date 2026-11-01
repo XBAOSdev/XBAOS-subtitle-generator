@@ -236,6 +236,34 @@ const reviewTargets = computed(() => {
 const canAiReview = computed(() => reviewTargets.value.length > 0)
 
 /**
+ * 「AI 校对」引导气泡要不要显示。
+ *
+ * 四个条件缺一不可：
+ *   - 设置里的总开关开着；
+ *   - 用户没点过「不再提示」（那是永久决定，写进设置）；
+ *   - 这一次运行里没被「×」关掉（只存内存，重开软件还会再提示一次）；
+ *   - 当前确实有字幕可校对 —— 没有字幕时按钮本身就是灰的，气泡指着它毫无意义。
+ */
+const showAiTip = computed(
+  () =>
+    settings.aiReviewTipEnabled &&
+    !settings.aiReviewTipDismissed &&
+    !ui.aiTipClosed &&
+    canAiReview.value,
+)
+
+/** 气泡右上角的「×」：只关这一次，不写盘 */
+function closeAiTip(): void {
+  ui.aiTipClosed = true
+}
+
+/** 气泡左上角的「不再提示」：写进设置，之后永远不出现 */
+function muteAiTip(): void {
+  settings.aiReviewTipDismissed = true
+  ui.aiTipClosed = true
+}
+
+/**
  * 选中范围里已经存在的译文语言。
  *
  * 用来在开窗之前提醒后果 —— 两个 AI 功能都会动到译文：校对会整体重建字幕
@@ -568,20 +596,39 @@ async function saveInPlace(): Promise<void> {
 
       <span class="spacer" />
 
-      <button
-        class="btn btn--ai"
-        type="button"
-        :disabled="!canAiReview"
-        :title="
-          canAiReview
-            ? '交给网页版 AI 助手校对。经剪贴板中转，软件不代你发送'
-            : '当前没有可校对的字幕'
-        "
-        @click="openAiReview"
-      >
-        <Icon name="spell-check" :size="15" />
-        <span>AI 校对</span>
-      </button>
+      <!-- AI 校对入口 + 引导气泡。气泡挂在按钮的正上方：它要指的就是这个按钮 -->
+      <span class="aitip">
+        <button
+          class="btn btn--ai"
+          type="button"
+          :disabled="!canAiReview"
+          :title="
+            canAiReview
+              ? '交给网页版 AI 助手校对。经剪贴板中转，软件不代你发送'
+              : '当前没有可校对的字幕'
+          "
+          @click="openAiReview"
+        >
+          <Icon name="spell-check" :size="15" />
+          <span>AI 校对</span>
+        </button>
+
+        <div v-if="showAiTip" class="aitip__card" role="note">
+          <div class="aitip__head">
+            <button class="aitip__never" type="button" @click="muteAiTip">不再提示</button>
+            <button
+              class="aitip__close"
+              type="button"
+              aria-label="关闭提示"
+              @click="closeAiTip"
+            >
+              <Icon name="x" :size="11" />
+            </button>
+          </div>
+          <p class="aitip__text">使用 AI 校对功能可以大幅度优化识别过程中产生的小错误</p>
+          <span class="aitip__arrow" aria-hidden="true" />
+        </div>
+      </span>
       <button
         class="btn btn--ai"
         type="button"
@@ -706,6 +753,84 @@ async function saveInPlace(): Promise<void> {
 
 .editor__foot .btn--ai:disabled {
   box-shadow: none;
+}
+
+/*
+ * AI 校对引导气泡。
+ *
+ * 挂在按钮的正上方而不是页面角落：它要说的是「点这个按钮」，离开按钮就没有意义。
+ * 用 absolute 而不是占位元素 —— 它是一次性提示，不该挤动底部那一排已经很满的控件。
+ * 右对齐到按钮右缘，箭头指回按钮中心偏右。
+ */
+.aitip {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.aitip__card {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: var(--z-dropdown, 100);
+  width: 250px;
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  border: 1px solid var(--color-ai-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  box-shadow: var(--shadow-md);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-base);
+  /* 负外边距的那类「贴近按钮」写法在这里不适用，靠 padding 控制内呼吸 */
+  cursor: default;
+}
+
+.aitip__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.aitip__never {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.aitip__never:hover {
+  color: var(--color-text-primary);
+  text-decoration: underline;
+}
+
+.aitip__close {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-tertiary);
+}
+
+.aitip__close:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.aitip__text {
+  color: var(--color-text-primary);
+}
+
+/* 指向按钮的小三角：两格边框拼出来的，不用图片也不用伪元素的多余层 */
+.aitip__arrow {
+  position: absolute;
+  right: 24px;
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  transform: rotate(45deg);
+  background: var(--color-bg-surface);
+  border-right: 1px solid var(--color-ai-border);
+  border-bottom: 1px solid var(--color-ai-border);
 }
 
 /* 校验列表 */

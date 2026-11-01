@@ -24,6 +24,11 @@ import {
   type ReviewSummary,
 } from '@/utils/llmResult'
 import { buildReviewPrompt, buildTranslatePrompt, estimatePromptTokens } from '@/utils/llmPrompt'
+import {
+  SCRIPT_STRENGTH_OPTIONS,
+  normalizeStrength,
+  strengthOption,
+} from '@/data/scriptStrength'
 import { pickPresentTerms, splitTerms } from '@/utils/prompt'
 import { hasText } from '@/utils/segmentOps'
 import { containmentSimilarityPrepared, prepareText } from '@/utils/transcriptMerge'
@@ -34,8 +39,8 @@ import Icon from '@/components/Icon.vue'
 
 type Step = 'copy' | 'paste' | 'apply'
 
-/* 只是为了让主题在辅助窗口也生效（store 初始化时会应用 data-theme） */
-useSettingsStore()
+/* 主题（store 初始化时会应用 data-theme）+ AI 相关偏好，两者都在本窗口直接用 */
+const settings = useSettingsStore()
 
 const bridge = window.xbaos
 const params = new URLSearchParams(window.location.search)
@@ -190,72 +195,109 @@ function usableOf(t: AssistReviewTarget): SubtitleSegment[] {
   return t.segments.filter(hasText)
 }
 
-/** 每个文件选中的区间（下标基于 usableOf 的结果，闭区间） */
-const ranges = ref<Record<string, { from: number; to: number }>>({})
+/**
+ * 每个文件的勾选状态（布尔数组，下标对齐 `usableOf` 的结果）。
+ *
+ * 用布尔数组而不是「下标集合」有两个原因：逐条判定是 O(1)，且与条目一一对应，
+ * 条数变了（主窗口改了内容再打开本窗口）只要长度对不上就整体退回「全选」，
+ * 不会出现「勾了一半却错位」那种谁也看不懂的局面。
+ *
+ * **整体替换**赋值（`{ ...old, [id]: next }`）而不是原地改：ref 包着的对象
+ * 原地改不会触发依赖，界面会「点了复选框没反应」。
+ */
+const pickedFlags = ref<Record<string, boolean[]>>({})
 
-function rangeOf(t: AssistReviewTarget): { from: number; to: number } {
+function flagsOf(t: AssistReviewTarget): boolean[] {
   const n = usableOf(t).length
-  if (n === 0) return { from: 0, to: 0 }
-  const r = ranges.value[t.fileId]
-  if (!r) return { from: 0, to: n - 1 }
-  // 数据可能被主窗口刷新过（主窗口改了内容再打开辅助窗口），存量下标要夹一次，
-  // 否则 slice 会静默返回空数组，表现为「提示词里一条字幕都没有」
-  return { from: Math.max(0, Math.min(r.from, n - 1)), to: Math.max(0, Math.min(r.to, n - 1)) }
+  const stored = pickedFlags.value[t.fileId]
+  if (!stored || stored.length !== n) return new Array<boolean>(n).fill(true)
+  return stored
 }
 
+function isPicked(t: AssistReviewTarget, index: number): boolean {
+  return flagsOf(t)[index] !== false
+}
+
+function setFlags(t: AssistReviewTarget, flags: boolean[]): void {
+  pickedFlags.value = { ...pickedFlags.value, [t.fileId]: flags }
+}
+
+/** 点某一条的复选框 */
+function toggleCue(t: AssistReviewTarget, index: number): void {
+  const next = [...flagsOf(t)]
+  next[index] = next[index] === false
+  setFlags(t, next)
+  syncFileSelection(t)
+}
+
+/** 该文件全选 / 全不选 */
+function setAllCues(t: AssistReviewTarget, on: boolean): void {
+  setFlags(t, new Array<boolean>(usableOf(t).length).fill(on))
+  syncFileSelection(t)
+}
+
+/** 这个文件里被勾中的条目（顺序即提示词里的顺序） */
 function pickedOf(t: AssistReviewTarget): SubtitleSegment[] {
-  const { from, to } = rangeOf(t)
-  return usableOf(t).slice(from, to + 1)
+  const flags = flagsOf(t)
+  return usableOf(t).filter((_, i) => flags[i] !== false)
 }
 
-/** 这个文件是不是「全部条目都要处理」—— 全量走原来的整份重建路径，行为保持不变 */
-function isFullRange(t: AssistReviewTarget): boolean {
-  return pickedOf(t).length >= usableOf(t).length
+function pickedCount(t: AssistReviewTarget): number {
+  return pickedOf(t).length
 }
 
-function setRange(fileId: string, from: number, to: number): void {
-  const t = targets.value.find((x) => x.fileId === fileId)
-  if (!t) return
-  const n = usableOf(t).length
-  if (n === 0) return
-  const lo = Math.max(0, Math.min(from, n - 1))
-  // 起点越过终点时把另一端一起带走，不留下 from > to 这种空区间
-  const hi = Math.max(lo, Math.min(to, n - 1))
-  ranges.value = { ...ranges.value, [fileId]: { from: lo, to: hi } }
+/** 全选 = 走原来的整份重建路径，行为保持不变 */
+function isFullPick(t: AssistReviewTarget): boolean {
+  return pickedCount(t) >= usableOf(t).length
 }
 
-function resetRanges(): void {
-  const next: Record<string, { from: number; to: number }> = {}
-  for (const t of targets.value) {
-    next[t.fileId] = { from: 0, to: Math.max(0, usableOf(t).length - 1) }
-  }
-  ranges.value = next
+/** 勾了一部分（文件行的复选框显示成「半选」） */
+function isPartlyPick(t: AssistReviewTarget): boolean {
+  const n = pickedCount(t)
+  return n > 0 && n < usableOf(t).length
 }
 
-/** 下拉里那一行文字：序号 + 前十几个字，够认出是哪一条即可 */
-function previewOf(seg: SubtitleSegment): string {
-  const flat = seg.text.replace(/\s+/g, ' ').trim()
-  return flat.length > 14 ? `${flat.slice(0, 14)}…` : flat
+/** 恢复全部：清掉所有勾选状态，缺省即全选 */
+function resetPicks(): void {
+  pickedFlags.value = {}
 }
 
-/** 选了部分范围的文件名，用于第 3 步说明「这次只覆盖哪一段」 */
-const scopedTargets = computed(() => selectedTargets.value.filter((t) => !isFullRange(t)))
+/** 展开查看哪个文件的字幕清单（null = 全部收起） */
+const openPick = ref<string | null>(null)
 
-/** 有没有文件值得显示范围控件（至少两条字幕才谈得上分批） */
-const rangeEditable = computed(() => selectedTargets.value.some((t) => usableOf(t).length > 1))
-
-function onRangeFrom(t: AssistReviewTarget, e: Event): void {
-  setRange(t.fileId, Number((e.target as HTMLSelectElement).value), rangeOf(t).to)
+function togglePick(fileId: string): void {
+  openPick.value = openPick.value === fileId ? null : fileId
 }
 
-function onRangeTo(t: AssistReviewTarget, e: Event): void {
-  setRange(t.fileId, rangeOf(t).from, Number((e.target as HTMLSelectElement).value))
-}
+/**
+ * 真正会被发出去的文件：勾了文件、且文件里至少有一条被勾中。
+ *
+ * 提示词、条数校验、回写三处必须用同一份列表 —— 否则「提示词里发了 2 个文件、
+ * 校验时却按 3 个算」这种错位会直接表现为「整份拒绝」。
+ */
+const activeTargets = computed(() =>
+  selectedTargets.value.filter((t) => pickedOf(t).length > 0),
+)
+
+/** 有条目被排除在外的文件，用于第 3 步说明「这次只覆盖哪些」 */
+const scopedTargets = computed(() =>
+  activeTargets.value.filter((t) => !isFullPick(t)),
+)
+
+/**
+ * 处理范围这块要不要显示。
+ *
+ * 判据是「有没有文件可选」，**不是「有没有文件被选中」**。曾经写成
+ * `selectedTargets.some(...)`，于是点一次「全部取消」，文件清单连同勾选框一起
+ * 消失 —— 用户再也没法把它选回来，只能关掉窗口重开。空选的后果应该由
+ * 区块底部那句「还没有选择文件」来承担，而不是把操作入口本身收走。
+ */
+const pickEditable = computed(() => targets.value.some((t) => usableOf(t).length > 0))
 
 /** 第 3 步那句「本次只覆盖 …」的文字 */
 const scopeSummary = computed(() =>
   scopedTargets.value
-    .map((t) => `${t.fileName} 第 ${rangeOf(t).from + 1}–${rangeOf(t).to + 1} 条`)
+    .map((t) => `${t.fileName} 已选 ${pickedCount(t)} / ${usableOf(t).length} 条`)
     .join('；'),
 )
 
@@ -314,6 +356,19 @@ const scriptPercent = computed(() =>
   scriptSimilarity.value === null ? 0 : Math.round(scriptSimilarity.value * 100),
 )
 
+/**
+ * 原文案参考强度。
+ *
+ * 它读的是**设置里的人偏好**，不是窗口里的临时开关：用户在第 1 步调过一次之后，
+ * 下次开窗还是这一档（也正因如此，设置页里那一项与本处是同一个值，改任一处都变）。
+ * 只有贴了文稿才有意义，所以没贴时滑块禁用 —— 不禁用会让人以为它在改别的东西。
+ */
+const activeStrength = computed(() => strengthOption(settings.aiScriptStrength))
+
+function onStrengthInput(event: Event): void {
+  settings.aiScriptStrength = normalizeStrength(Number((event.target as HTMLInputElement).value))
+}
+
 /* --------------------------------------------------------- 提示词构建 */
 
 /** 从手填热词与词库里挑出「这段内容真的出现过」的专有名词 */
@@ -339,7 +394,9 @@ function collectTerms(list: AssistReviewTarget[]): string[] {
 const promptResult = computed(() => {
   const p = payload.value
   if (!p) return null
-  const list = selectedTargets.value
+  // 必须用 activeTargets（勾了文件且至少有一条被勾中）而不是 selectedTargets：
+  // 提示词里发出去几份、取回时就按几份校验，两边口径一旦不同就是「整份拒绝」
+  const list = activeTargets.value
   if (list.length === 0) return null
 
   const mapped = list.map((t) => ({
@@ -369,6 +426,7 @@ const promptResult = computed(() => {
       maxSegmentDuration: p.settings.maxSegmentDuration,
       terms: collectTerms(list),
       script,
+      scriptStrength: normalizeStrength(settings.aiScriptStrength),
     },
   })
 })
@@ -391,14 +449,50 @@ function note(text: string, kind: 'info' | 'error' | 'success' = 'info'): void {
   noteKind.value = kind
 }
 
-function toggleSelect(fileId: string): void {
-  selectedIds.value = selectedIds.value.includes(fileId)
-    ? selectedIds.value.filter((id) => id !== fileId)
-    : [...selectedIds.value, fileId]
+/**
+ * 文件级的勾选跟着逐条状态一起走：有任何一条被勾中就算选中，一条都没有就不算。
+ *
+ * 这两处状态（`selectedIds` 与 `pickedFlags`）本来是各改各的，于是很容易出现
+ * 「文件勾着、却 0 / 28 条」这种自相矛盾的行 —— 底栏还写着「已选 3 / 3 个文件」，
+ * 而提示词里其实只有 2 个文件。谁都不算错，只是两边没说同一件事。
+ */
+function syncFileSelection(t: AssistReviewTarget): void {
+  const on = pickedCount(t) > 0
+  const listed = selectedIds.value.includes(t.fileId)
+  if (on && !listed) selectedIds.value = [...selectedIds.value, t.fileId]
+  else if (!on && listed) selectedIds.value = selectedIds.value.filter((id) => id !== t.fileId)
 }
 
+/**
+ * 勾选 / 取消一个文件。
+ *
+ * 取消时**保留**逐条状态（大概率只是临时让开看看别的），但重新勾上时如果这个文件
+ * 已经被清空过，就恢复全选 —— 否则勾了还是 0 条，看起来像按钮坏了。
+ */
+function toggleSelect(fileId: string): void {
+  if (selectedIds.value.includes(fileId)) {
+    selectedIds.value = selectedIds.value.filter((id) => id !== fileId)
+    return
+  }
+  const t = targets.value.find((item) => item.fileId === fileId)
+  if (t && pickedCount(t) === 0) setAllCues(t, true)
+  // setAllCues 可能已经顺势把这个文件勾上了，别重复塞
+  if (!selectedIds.value.includes(fileId)) selectedIds.value = [...selectedIds.value, fileId]
+}
+
+/**
+ * 全选 / 全部取消（文件级）。
+ *
+ * 「全选」承诺的是「所有文件的所有条目」，所以连逐条状态一起复位 ——
+ * 只把文件 id 塞回去的话，之前被清空过的文件会以「勾着但 0 条」的样子回来。
+ */
 function toggleSelectAll(): void {
-  selectedIds.value = isAllSelected.value ? [] : targets.value.map((t) => t.fileId)
+  if (isAllSelected.value) {
+    selectedIds.value = []
+    return
+  }
+  resetPicks()
+  selectedIds.value = targets.value.map((t) => t.fileId)
 }
 
 /* ------------------------------------------------------------ 数据装载 */
@@ -461,7 +555,8 @@ async function loadPayload(): Promise<void> {
     payload.value = params.has('task') ? { ...base, task: 'translate' } : base
   }
   selectedIds.value = payload.value ? payload.value.targets.map((t) => t.fileId) : []
-  resetRanges()
+  resetPicks()
+  openPick.value = null
 }
 
 /* ------------------------------------------------------------ 第 1 步 */
@@ -496,9 +591,10 @@ const canApply = computed(
 )
 
 async function readClipboard(): Promise<void> {
-  const list = selectedTargets.value
+  // 与提示词用同一份列表：发出去 2 份就按 2 份校验，多一份少一份都会假失败
+  const list = activeTargets.value
   if (list.length === 0) {
-    note('请先选择文件。', 'error')
+    note('请先勾选要处理的文件与字幕。', 'error')
     return
   }
 
@@ -626,14 +722,14 @@ function confirmApply(): void {
     return
   }
 
-  /** 选中范围里那些条目的 id（顺序即提示词里的顺序） */
+  /** 勾选范围里那些条目的 id（顺序即提示词里的顺序） */
   const idsOf = (fileId: string): string[] => {
     const t = targets.value.find((x) => x.fileId === fileId)
     return t ? pickedOf(t).map((s) => s.id) : []
   }
   const fullOf = (fileId: string): boolean => {
     const t = targets.value.find((x) => x.fileId === fileId)
-    return !t || isFullRange(t)
+    return !t || isFullPick(t)
   }
 
   // 翻译：提交译文（按序号），主窗口据此「只换文本、不动时间码」
@@ -870,82 +966,92 @@ onBeforeUnmount(() => {
             </p>
           </div>
 
-          <!-- 文件选择：只有一个文件时不出现，免得白占地方 -->
-          <div v-if="multi" class="block">
+          <!--
+            处理范围：文件勾选 + 逐条字幕勾选合成一个功能区。
+
+            原来这里是两块 —— 上面「选择要翻译/校对的文件」一排复选框，下面
+            「处理范围」每个文件两个下拉（起止条目）。两个下拉只表达得了闭区间，
+            而实际需求经常是「这 30 条里跳过中问那 5 条标错的」，下拉根本做不到；
+            更要紧的是同一件事被拆成两个区块，用户得先想「我该动上面还是下面」。
+            合并后只有一处：文件行勾「这个文件要不要处理」，右侧箭头展开逐条勾选。
+          -->
+          <div v-if="pickEditable" class="block">
             <div class="block__head">
-              <span class="block__title">
-                <Icon name="list" :size="14" />
-                {{ isTranslate ? '选择要翻译的文件' : '选择要校对的文件' }}
-              </span>
+              <span class="block__title"><Icon name="list" :size="14" /> 处理范围</span>
               <button class="link" type="button" @click="toggleSelectAll">
                 {{ isAllSelected ? '全部取消' : '全选' }}
               </button>
             </div>
-            <ul class="pick">
-              <li v-for="t in targets" :key="t.fileId">
-                <label class="pick__row" :class="{ 'is-on': selectedIds.includes(t.fileId) }">
-                  <input
-                    class="pick__box"
-                    type="checkbox"
-                    :checked="selectedIds.includes(t.fileId)"
-                    @change="toggleSelect(t.fileId)"
-                  />
-                  <span class="pick__name">{{ t.fileName }}</span>
+            <p class="block__hint">
+              默认全部处理。条目太多、AI 一次吃不下时可以分批：只勾这一段，取回时也只覆盖这一段，
+              其余字幕保持原样。
+            </p>
+
+            <ul class="pick" :class="{ 'pick--open': openPick !== null }">
+              <li v-for="t in targets" :key="t.fileId" class="pick__item">
+                <div class="pick__row" :class="{ 'is-on': selectedIds.includes(t.fileId) }">
+                  <label class="pick__main">
+                    <input
+                      class="pick__box"
+                      type="checkbox"
+                      :checked="selectedIds.includes(t.fileId)"
+                      :indeterminate.prop="isPartlyPick(t)"
+                      @change="toggleSelect(t.fileId)"
+                    />
+                    <span class="pick__name">{{ t.fileName }}</span>
+                  </label>
                   <span class="pick__meta">
-                    {{ t.segmentCount }} 条 | {{ formatDuration(t.durationSec) }}
+                    {{ pickedCount(t) }} / {{ usableOf(t).length }} 条
                   </span>
-                </label>
+                  <button
+                    class="pick__more"
+                    type="button"
+                    :aria-expanded="openPick === t.fileId"
+                    :aria-label="`展开 ${t.fileName} 的字幕清单`"
+                    @click="togglePick(t.fileId)"
+                  >
+                    <Icon
+                      :name="openPick === t.fileId ? 'chevron-up' : 'chevron-down'"
+                      :size="14"
+                    />
+                  </button>
+                </div>
+
+                <div v-if="openPick === t.fileId" class="cues">
+                  <div class="cues__head">
+                    <span class="cues__tip">
+                      {{ isTranslate ? '只翻译勾选的条目' : '只校对勾选的条目' }}，其余保持原样
+                    </span>
+                    <button class="link" type="button" @click="setAllCues(t, true)">全选</button>
+                    <button class="link" type="button" @click="setAllCues(t, false)">清空</button>
+                  </div>
+                  <ul class="cues__list scroll-y">
+                    <li v-for="(s, i) in usableOf(t)" :key="s.id">
+                      <label class="cue" :class="{ 'is-off': !isPicked(t, i) }">
+                        <input
+                          class="cue__box"
+                          type="checkbox"
+                          :checked="isPicked(t, i)"
+                          @change="toggleCue(t, i)"
+                        />
+                        <span class="cue__no mono">{{ i + 1 }}</span>
+                        <span class="cue__text">{{ s.text }}</span>
+                      </label>
+                    </li>
+                  </ul>
+                </div>
               </li>
             </ul>
-            <p class="block__foot">
+
+            <!-- 一行都没选时不留「已选 0 / 3 个文件」这种读不出指令的账，直接说下一步该做什么 -->
+            <p v-if="activeTargets.length === 0" class="block__foot block__foot--empty">
+              <Icon name="info" :size="13" />
+              <span>还没有选择文件。勾上文件左侧的方框，或点右上角「全选」。</span>
+            </p>
+            <p v-else class="block__foot">
               已选 {{ selectedTargets.length }} / {{ targets.length }} 个文件，共
               <strong>{{ promptResult?.segmentCount ?? 0 }}</strong> 条字幕
             </p>
-          </div>
-
-          <!-- 处理范围：默认「全部」。长字幕分批校对时只发这一段，取回也只覆盖这一段 -->
-          <div v-if="rangeEditable" class="block">
-            <div class="block__head">
-              <span class="block__title"><Icon name="list" :size="14" /> 处理范围</span>
-              <button class="link" type="button" @click="resetRanges">恢复全部</button>
-            </div>
-            <p class="block__hint">
-              条目太多、AI 一次吃不下时可以分批：提示词只带这一段，取回时也只覆盖这一段，
-              其余字幕保持原样。
-            </p>
-            <ul class="range">
-              <li v-for="t in selectedTargets" :key="t.fileId" class="range__row">
-                <span class="range__name">{{ t.fileName }}</span>
-                <div class="range__ctl">
-                  <select
-                    class="select range__sel"
-                    :value="rangeOf(t).from"
-                    :disabled="usableOf(t).length < 2"
-                    :aria-label="`${t.fileName} 起始条目`"
-                    @change="onRangeFrom(t, $event)"
-                  >
-                    <option v-for="(s, i) in usableOf(t)" :key="s.id" :value="i">
-                      第 {{ i + 1 }} 条 {{ previewOf(s) }}
-                    </option>
-                  </select>
-                  <span class="range__sep">至</span>
-                  <select
-                    class="select range__sel"
-                    :value="rangeOf(t).to"
-                    :disabled="usableOf(t).length < 2"
-                    :aria-label="`${t.fileName} 结束条目`"
-                    @change="onRangeTo(t, $event)"
-                  >
-                    <option v-for="(s, i) in usableOf(t)" :key="s.id" :value="i">
-                      第 {{ i + 1 }} 条 {{ previewOf(s) }}
-                    </option>
-                  </select>
-                </div>
-                <span class="range__count" :class="{ 'is-scoped': !isFullRange(t) }">
-                  {{ pickedOf(t).length }} / {{ usableOf(t).length }} 条
-                </span>
-              </li>
-            </ul>
           </div>
 
           <!-- 原文案参考（可选）。翻译用不到它 —— 那是「按同一份稿子校正」的辅助输入，
@@ -966,6 +1072,47 @@ onBeforeUnmount(() => {
               rows="4"
               placeholder="在此粘贴原始文稿"
             ></textarea>
+
+            <!--
+              参考强度：同一份文稿，用法可以差很多 —— 逐字念稿的视频里，字幕与文稿
+              不一致就是识别错了；只写了提纲随口讲的视频里，硬按文稿改反而会让字幕
+              与声音对不上。所以这一维交给用户，默认「平衡」。
+            -->
+            <div class="strength">
+              <div class="strength__row">
+                <span class="strength__label">参考强度</span>
+                <span class="strength__value">{{ activeStrength.label }}</span>
+              </div>
+              <div class="levels">
+                <input
+                  class="levels__input"
+                  type="range"
+                  min="0"
+                  max="3"
+                  step="1"
+                  :value="settings.aiScriptStrength"
+                  :disabled="!scriptText.trim()"
+                  aria-label="原文案参考强度"
+                  @input="onStrengthInput"
+                />
+                <div class="levels__ticks">
+                  <button
+                    v-for="item in SCRIPT_STRENGTH_OPTIONS"
+                    :key="item.value"
+                    class="levels__tick"
+                    :class="{ 'is-on': settings.aiScriptStrength === item.value }"
+                    type="button"
+                    :disabled="!scriptText.trim()"
+                    @click="settings.aiScriptStrength = item.value"
+                  >
+                    {{ item.label }}
+                  </button>
+                </div>
+              </div>
+              <p class="block__hint">
+                {{ scriptText.trim() ? activeStrength.hint : '粘贴文稿后可调整：越靠左越以文稿为准，越靠右越宽松。' }}
+              </p>
+            </div>
             <p v-if="scriptText.trim()" class="script__stat" :class="`script__stat--${scriptState}`">
               <Icon
                 :name="scriptState === 'blocked' ? 'alert' : scriptState === 'weak' ? 'info' : 'check'"
@@ -985,9 +1132,11 @@ onBeforeUnmount(() => {
             </p>
           </div>
 
-          <div v-if="!canCopy" class="warn">
+          <!-- 处理范围区块能自己说明「还没选文件」时就别再下面重说一遍；
+               只有整块都没渲染出来（所有文件都没有可处理的字幕）时才由这里兜底 -->
+          <div v-if="!canCopy && !pickEditable" class="warn">
             <Icon name="alert" :size="14" />
-            <span>请至少选择一个文件。</span>
+            <span>没有可处理的字幕，请检查所选文件。</span>
           </div>
 
           <div v-if="promptResult?.overLimit" class="warn">
@@ -1008,18 +1157,6 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <pre class="prompt__body">{{ previewText }}</pre>
-          </div>
-
-          <div class="pane__actions">
-            <button
-              class="btn btn--primary btn--lg"
-              type="button"
-              :disabled="busy || !canCopy"
-              @click="copyPrompt"
-            >
-              <Icon name="copy" :size="15" />
-              <span>复制提示词</span>
-            </button>
           </div>
         </section>
 
@@ -1062,17 +1199,6 @@ onBeforeUnmount(() => {
               </span>
               <span v-else>AI 可能改错或漏改，取回后请核对变化明细再确认覆盖。</span>
             </div>
-          </div>
-
-          <div class="pane__actions">
-            <button class="btn" type="button" @click="restart">
-              <Icon name="refresh" :size="14" />
-              <span>回到上一步</span>
-            </button>
-            <button class="btn btn--primary btn--lg" type="button" @click="step = 'apply'">
-              <span>我已复制结果，去取回</span>
-              <Icon name="chevron-right" :size="15" />
-            </button>
           </div>
         </section>
 
@@ -1134,7 +1260,7 @@ onBeforeUnmount(() => {
 
             <div v-if="summary.previews.length > 0" class="diffs">
               <div class="diffs__head">
-                <span>变化明细（前 {{ summary.previews.length }} 处）</span>
+                <span>变化明细（共 {{ summary.previews.length }} 处）</span>
                 <span class="diffs__hint">AI 可能整体重排，序号仅供参考</span>
               </div>
               <ul class="diffs__list">
@@ -1253,38 +1379,79 @@ onBeforeUnmount(() => {
               暂不能{{ isTranslate ? '载入' : '覆盖' }}。请检查 AI 输出是否完整、分隔行是否被改动。
             </span>
           </div>
-
-          <div class="pane__actions">
-            <button
-              class="btn btn--primary btn--lg"
-              type="button"
-              :disabled="busy || submitted"
-              @click="readClipboard"
-            >
-              <Icon name="import" :size="15" />
-              <span>{{ results.length > 0 ? '重新读取剪贴板' : isTranslate ? '读取剪贴板并校验' : '读取剪贴板并应用' }}</span>
-            </button>
-            <button
-              v-if="canApply"
-              class="btn btn--lg btn--danger"
-              type="button"
-              @click="confirmApply"
-            >
-              <Icon name="check" :size="15" />
-              <span>{{ isTranslate ? '载入译文（可撤回）' : '确认覆盖（可撤回）' }}</span>
-            </button>
-          </div>
         </section>
       </template>
     </div>
 
-    <!-- 状态条：把结果和错误都摊在明面上，用户不用猜 -->
+    <!--
+      底部横条：左边摊开当前状态，右边是本步骤的动作按钮。
+
+      按钮从「内容区最下方」搬到这里，是因为它们本来就属于「这一屏的出口」，
+      而不是内容的一部分 —— 第 1 步的内容（勾选区 + 文稿区 + 提示词预览）一长，
+      按钮就被推到滚动区最深处，用户得先滚到底才看得到。搬到固定横条后，
+      三步的按钮位置完全一致，进下一步时整条按钮一起换掉，不需要重新找。
+
+      状态文案留在同一条里而不是单独一行：两行灰条上下叠着等于白占 30px 高度。
+    -->
     <footer class="astatus" :class="`astatus--${noteKind}`">
       <Icon
+        class="astatus__icon"
         :name="noteKind === 'error' ? 'alert' : noteKind === 'success' ? 'check' : 'info'"
         :size="13"
       />
-      <span>{{ noteText || '按上方步骤操作即可。全程不会上传任何内容。' }}</span>
+      <span class="astatus__text">
+        {{ noteText || '按上方步骤操作即可。全程不会上传任何内容。' }}
+      </span>
+
+      <div class="pane__actions">
+        <!-- 第 1 步：唯一的出口是复制 -->
+        <button
+          v-if="step === 'copy'"
+          class="btn btn--primary"
+          type="button"
+          :disabled="busy || !canCopy"
+          @click="copyPrompt"
+        >
+          <Icon name="copy" :size="15" />
+          <span>复制提示词</span>
+        </button>
+
+        <!-- 第 2 步：可以回退，也可以声明「已复制，去取回」 -->
+        <template v-else-if="step === 'paste'">
+          <button class="btn" type="button" @click="restart">
+            <Icon name="refresh" :size="14" />
+            <span>回到上一步</span>
+          </button>
+          <button class="btn btn--primary" type="button" @click="step = 'apply'">
+            <span>我已复制结果，去取回</span>
+            <Icon name="chevron-right" :size="15" />
+          </button>
+        </template>
+
+        <!-- 第 3 步：先读取校验，校验通过才出现「确认」 -->
+        <template v-else>
+          <button
+            class="btn"
+            type="button"
+            :disabled="busy || submitted"
+            @click="readClipboard"
+          >
+            <Icon name="import" :size="15" />
+            <span>
+              {{ results.length > 0 ? '重新读取剪贴板' : isTranslate ? '读取剪贴板并校验' : '读取剪贴板并应用' }}
+            </span>
+          </button>
+          <button
+            v-if="canApply"
+            class="btn btn--primary"
+            type="button"
+            @click="confirmApply"
+          >
+            <Icon name="check" :size="15" />
+            <span>{{ isTranslate ? '载入译文（可撤回）' : '确认覆盖（可撤回）' }}</span>
+          </button>
+        </template>
+      </div>
     </footer>
   </div>
 </template>
@@ -1511,11 +1678,14 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
+/* 动作区：现在固定住在底部横条的右端，不再跟着内容滚走。
+   不给 margin-top（那是内容区里的写法），靠横条的 align-items 对齐即可 */
 .pane__actions {
+  flex: none;
   display: flex;
+  align-items: center;
   gap: var(--space-3);
-  flex-wrap: wrap;
-  margin-top: var(--space-2);
+  margin-left: auto;
 }
 
 /* ---- 区块（文件选择 / 文案输入 / 结果清单共用外壳）---- */
@@ -1561,6 +1731,14 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
+/* 空选提示：与计数同一位置（视线不用挪），用 info 色说明「这里还差一步」 */
+.block__foot--empty {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-text-secondary);
+}
+
 /* ---- 目标语言（翻译任务） ---- */
 .langpick {
   display: flex;
@@ -1592,7 +1770,6 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   padding: var(--space-2);
   border-radius: var(--radius-sm);
-  cursor: pointer;
   font-size: var(--font-size-xs);
 }
 
@@ -1628,67 +1805,139 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
-/* 处理范围：一行一个文件，两端各一个下拉 */
-.range {
+/* 处理范围：一行一个文件（勾选框 + 文件名 + 已选条数 + 展开箭头），
+   展开后是这个文件的全部字幕。整行不再是 label —— 右侧那个箭头必须是独立按钮，
+   否则点它会连带把文件勾选一起切掉。 */
+.pick__item {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
 }
 
-.range__row {
-  display: grid;
-  /* 第一行：文件名 + 条数；第二行：两个下拉占满，避免中文选项被挤成竖排 */
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-1) var(--space-2);
-  font-size: var(--font-size-xs);
-}
-
-.range__name {
-  grid-column: 1;
-  grid-row: 1;
+.pick__main {
+  flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.pick__more {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+}
+
+.pick__more:hover {
+  background: var(--color-bg-active);
   color: var(--color-text-primary);
 }
 
-.range__ctl {
-  grid-column: 1 / -1;
-  grid-row: 2;
+/* 展开的字幕清单：贴齐文件行，左侧缩进表示从属关系 */
+.cues {
+  margin: 0 0 var(--space-2) 22px;
+  padding: var(--space-1) 0 var(--space-1) var(--space-3);
+  border-left: 2px solid var(--color-border);
+}
+
+.cues__head {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
-  min-width: 0;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
 }
 
-/* 下拉会被 flex 压到 min-content，中文选项一压就只剩一个字宽 —— 给它一个下限 */
-.range__sel {
-  flex: 1 1 0;
+.cues__tip {
+  flex: 1;
   min-width: 0;
-  height: 26px;
-  font-size: var(--font-size-xs);
-}
-
-.range__sep {
-  flex: none;
+  font-size: 11px;
   color: var(--color-text-tertiary);
 }
 
-.range__count {
-  grid-column: 2;
-  grid-row: 1;
-  justify-self: end;
+.cues__list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* 一个文件几百条时不能把整个区块撑开 */
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.cue {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 3px var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.cue:hover {
+  background: var(--color-bg-hover);
+}
+
+/* 取消勾选的条目压暗 + 去掉删除线以外的强调，一眼能扫出「哪些不发出去」 */
+.cue.is-off .cue__text,
+.cue.is-off .cue__no {
+  color: var(--color-text-tertiary);
+}
+
+.cue__box {
   flex: none;
+  margin-top: 3px;
+  accent-color: var(--color-accent);
+}
+
+.cue__no {
+  flex: none;
+  min-width: 22px;
+  text-align: right;
   color: var(--color-text-tertiary);
   font-variant-numeric: tabular-nums;
 }
 
-/* 选了部分范围时把条数点亮，免得用户以为还是全量 */
-.range__count.is-scoped {
+.cue__text {
+  min-width: 0;
   color: var(--color-text-primary);
+  line-height: var(--line-base);
+  overflow-wrap: anywhere;
+}
+
+/* 参考强度：标题行 + 滑块 + 解释，三段贴在一起 */
+.strength {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--color-border-subtle);
+}
+
+.strength__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  /* 与滑块同宽：否则「平衡」两个字会被推到区块最右边，和它描述的控件差出一大截 */
+  max-width: 360px;
+}
+
+.strength__label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.strength__value {
+  font-size: var(--font-size-xs);
   font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
 }
 
 /* 第 3 步顶部那句「本次只覆盖 …」 */
@@ -1720,6 +1969,7 @@ onBeforeUnmount(() => {
   color: inherit;
   font: inherit;
   text-align: left;
+  cursor: pointer;
 }
 
 .pick__caret {
@@ -2028,13 +2278,26 @@ onBeforeUnmount(() => {
   flex: none;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
   border-top: 1px solid var(--color-border);
   background: var(--color-bg-surface);
   font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
   line-height: var(--line-base);
+}
+
+.astatus__icon {
+  flex: none;
+}
+
+/*
+ * 状态文案可以很长（「只识别到 1 个文件，但你选择了 2 个…」），必须能缩，
+ * 否则会把右侧的按钮挤出窗口 —— flex 子项默认最小宽度就是内容宽度。
+ */
+.astatus__text {
+  flex: 1;
+  min-width: 0;
 }
 
 .astatus--success {

@@ -20,8 +20,14 @@
  *     回来之后由 llmResult 逐条校验。
  */
 
-import type { PunctuationMode, PunctuationOptions, SubtitleSegment } from '@/types'
+import type {
+  PunctuationMode,
+  PunctuationOptions,
+  ScriptStrength,
+  SubtitleSegment,
+} from '@/types'
 import { hasText } from '@/utils/segmentOps'
+import { strengthOption } from '@/data/scriptStrength'
 import { serializeSrt, srtTime } from '@/utils/subtitle'
 
 /** 超过这个字符数就提示可能超出对话类模型的输入上限（不做分批，只提示） */
@@ -55,6 +61,8 @@ export interface ReviewPromptOptions {
   terms?: string[]
   /** 原文案参考。调用方需先过相似度门槛，别把无关文案塞进来 */
   script?: string
+  /** 原文案参考的强度，缺省按「平衡」（2）走 */
+  scriptStrength?: ScriptStrength
 }
 
 export interface ReviewPromptInput {
@@ -164,29 +172,91 @@ function termsClause(terms: string[]): string | null {
   ].join('\n')
 }
 
-/** 【原文案参考】段落 —— 文案纠偏的核心，锚点那句比一长串规则更管用 */
-function scriptClause(script: string): string {
+/**
+ * 【原文案参考】段落 —— 文案纠偏的核心，锚点那句比一长串规则更管用。
+ *
+ * 强度（`ScriptStrength`）改变的是**「文稿与识别结果不一致时谁说了算」**，
+ * 而不是「要不要用文稿」。四档各有一套允许/不允许清单，末尾再用一句话钉住：
+ * 模型对一长串并列规则记不住，但会照着最后那句总结的调子走。
+ *
+ * 三档共有的底线（哪一档都不许破）：时间码以识别结果为准、不按文稿重排条目、
+ * 不越过【字幕规格】的长度上限。这三条写死在每档里，不指望模型自己推。
+ */
+function scriptClause(script: string, strength: ScriptStrength): string {
+  const option = strengthOption(strength)
+
+  const allow: Record<ScriptStrength, string[]> = {
+    0: [
+      '识别结果与文稿写法不同的地方，**一律以文稿为准**：同音字、专有名词、数字、词序、整句措辞都算在内。',
+      '文稿里有、识别结果漏掉的字词，补回**对应的那一条**里（不要为此新建条目）。',
+      '识别结果里多出来、而文稿里根本没有的内容，如果读起来像是识别噪声，可以删掉；' +
+        '如果明显是朗读时临时加的口语，保留。',
+    ],
+    1: [
+      '同一个位置对得上、只是用词有出入时，以文稿的用词为准（同音字、专有名词、数字、明显不同的措辞）。',
+      '识别结果比文稿多出个别字、或语序略有出入时，按文稿收拢。',
+    ],
+    2: [
+      '遇到识别结果与文稿「读音相同或相近、但写法不同」的地方，以文稿的写法为准' +
+        '（主要用于修正同音字、专有名词、人名、数字）。',
+      '识别结果与文稿在同一位置用词不同、但意思一致时，可以按文稿的用词修正。',
+    ],
+    3: [
+      '只借用文稿里**专有名词的写法**（人名、品牌、产品名、术语、缩写、数字与单位）。',
+      '识别结果把专有名词写错时，按文稿改回去。',
+    ],
+  }
+
+  const forbid: Record<ScriptStrength, string[]> = {
+    0: [
+      '不要按文稿重排或合并条目 —— 条目结构仍以识别结果为基础。',
+      '不要把文稿里的两句话硬塞进一条字幕，仍然要守住【字幕规格】的长度上限。',
+      '不要按文稿的字数重新分配时间码：时间码一律以识别结果为准。',
+    ],
+    1: [
+      '不要因为文稿里没写，就把朗读里确实说了的内容删掉。',
+      '整句都与文稿对不上、而识别结果本身读得通的地方，保留识别结果。',
+      '不要把文稿里有、但能看出没被朗读的段落补进字幕。',
+      '不要按文稿重排或合并条目。',
+    ],
+    2: [
+      '不要把文稿里有、但朗读中没有的内容补进字幕 —— 字幕必须对应实际说了什么。',
+      '不要因为文稿里没写，就把朗读中确实说了的内容删掉。',
+      '不要按文稿重排或合并条目，条目结构仍然以识别结果为基础。',
+      '文稿与识别结果差异过大的地方（整句都不一样），说明那是朗读时的即兴发挥，' +
+        '保持识别结果的原样，不要强行改成文稿的写法。',
+    ],
+    3: [
+      '除专有名词外，不要用文稿替换识别结果的任何用词。',
+      '不要因为文稿措辞不同就改写句子，哪怕你认为文稿写得更好。',
+      '不要增删任何内容。',
+      '不要按文稿重排或合并条目。',
+    ],
+  }
+
   return [
     '【原文案参考】',
-    '下面是这段内容的原始文稿。它**只是参考**，不是标准答案 —— 实际朗读可能与文稿有出入。',
+    option.prompt,
     '',
     '允许你做：',
-    '1. 遇到识别结果与文稿「读音相同或相近、但写法不同」的地方，以文稿的写法为准' +
-      '（主要用于修正同音字、专有名词、人名、数字）。',
-    '2. 识别结果与文稿在同一位置用词不同、但意思一致时，可以按文稿的用词修正。',
+    ...allow[strength].map((s, i) => `${i + 1}. ${s}`),
     '',
     '不允许你做：',
-    '1. 不要把文稿里有、但朗读中没有的内容补进字幕 —— 字幕必须对应实际说了什么。',
-    '2. 不要因为文稿里没写，就把朗读中确实说了的内容删掉。',
-    '3. 不要按文稿重排或合并条目，条目结构仍然以识别结果为基础。',
-    '4. 文稿与识别结果差异过大的地方（整句都不一样），说明那是朗读时的即兴发挥，' +
-      '保持识别结果的原样，不要强行改成文稿的写法。',
+    ...forbid[strength].map((s, i) => `${i + 1}. ${s}`),
     '',
-    '一句话原则：文稿用来纠正「写错的字」，不用来改变「说了什么」。',
+    `一句话原则：${SUMMARY[strength]}`,
     '',
     '【原文案正文】',
     script.trim(),
   ].join('\n')
+}
+
+/** 每档的一句话总结 —— 模型对这一句的遵从度高于上面所有条目 */
+const SUMMARY: Record<ScriptStrength, string> = {
+  0: '文稿是标准答案，字幕要还原文稿，而不是还原识别结果。',
+  1: '文稿定用词，朗读定内容。',
+  2: '文稿用来纠正「写错的字」，不用来改变「说了什么」。',
+  3: '只认专有名词，其余的都不动。',
 }
 
 /**
@@ -270,7 +340,7 @@ export function buildReviewPrompt(input: ReviewPromptInput): ReviewPromptResult 
   if (terms) sections.push(terms, '')
 
   if (options.script && options.script.trim()) {
-    sections.push(scriptClause(options.script), '')
+    sections.push(scriptClause(options.script, options.scriptStrength ?? 2), '')
   }
 
   sections.push('【输出格式】', formatClause(multi, duration), '', '【待校对的字幕】', body)
@@ -351,6 +421,8 @@ export function buildTranslatePrompt(input: TranslatePromptInput): ReviewPromptR
   const must = [
     `一条原文对应一条译文，**条数必须与输入完全一致**（共 ${segmentCount} 条）—— 不允许合并、拆分、删除或新增任何一条。`,
     '每一行就是完整的一条，**不要一条跨多行**，也不要一行里塞两条。',
+    '**断句位置必须与原文一致**：原文在哪一条断开，译文也在那一条断开。' +
+      '不要为了凑成一个完整的句子而挪动条目的边界。',
     '序号原样保留，不要跳号，也不要重新编号。',
     '**不要输出时间码。**',
     `译文要符合${lang}字幕的惯用表达：口语、简洁，不要逐字直译。`,
@@ -360,6 +432,29 @@ export function buildTranslatePrompt(input: TranslatePromptInput): ReviewPromptR
     '不要使用 Markdown 代码块包裹（不要输出反引号）。',
   ]
 
+  /*
+   * 这一节是用户实测报上来的问题：整份英文译文里，**每一条都首字母大写、
+   * 每一条结尾都有一个句点** —— 于是原本一句话被切成三段的字幕，读起来成了
+   * 三个没头没尾的短句。
+   *
+   * 根因不在模型的翻译能力，在输入形态：喂进去的是「一条一行、彼此独立」的
+   * 编号列表，模型自然按「每一行是一个完整句子」来处理。而字幕的断句是按停顿
+   * 切的，一句话横跨三四条是常态。所以必须显式告诉它这件事，并且给出反例对照。
+   */
+  const crossLine = [
+    '【断句与标点：最容易出错的地方】',
+    '下面这些条目是语音识别按**停顿**切出来的，不是按句子切的。相邻的好几条往往属于同一句话。',
+    '',
+    '- 先按整段语义翻译，再按原文的断条位置切回同样条数。',
+    '- 一句话没说完就结束的条目：结尾**不加任何句末标点**（句号、问号、感叹号），可以用逗号，也可以什么都不加。',
+    '- 承接上一条继续的部分：**首字母小写**，不要在开头另起一个大写。',
+    '- 只有这一条确实讲完了一整句时，才用句末标点，并把首字母大写。',
+    '- 专有名词、语言名、人称代词 I 等按该语言规则该大写的，照常大写，不受上面限制。',
+    '',
+    '不要把每一条都翻成一个独立的完整句子 —— 那样每行看着都通顺，连起来却是断的。',
+    '',
+  ]
+
   const sections: string[] = [
     '你是一位专业的字幕翻译。下面是一份按序号排列的字幕文本（只有编号与文字，没有时间码）。',
     `请把它翻译成【${lang}】。`,
@@ -367,6 +462,7 @@ export function buildTranslatePrompt(input: TranslatePromptInput): ReviewPromptR
     '【必须遵守】',
     must.map((s) => `- ${s}`).join('\n'),
     '',
+    ...crossLine,
   ]
 
   if (multi) {
@@ -377,23 +473,46 @@ export function buildTranslatePrompt(input: TranslatePromptInput): ReviewPromptR
     )
   }
 
-  const formatRows: string[] = ['【输出格式】', '每条一行：序号、英文句点、一个空格、译文。']
+  /*
+   * 格式示例用目标语言的真实写法，而不是「第一句的译文」这种中文占位符：
+   * 占位符看不出大小写与句末标点该怎么处理，而这两件事正是上面那一节要教的。
+   * 示例是英语，别的语言按该语言的大写规则与句读替换即可（已在下面注明）。
+   */
+  const EXAMPLE = [
+    '1. First, a quick question.',
+    '2. How many MB is 1 GB?',
+    '3. Many of you would say 1024 MB,',
+    '4. but if we open the calculator on the computer,',
+    '5. we will see that 1 GB is actually 1000 MB.',
+  ]
+
+  const formatRows: string[] = [
+    '【输出格式】',
+    '- 每条一行：**序号 + 一个英文句点 `.` + 一个空格 + 译文**。',
+    '- 序号后面那个 `.` 是**序号分隔符**，不是句子的结束符 —— 不要在译文末尾重复加一个句点。',
+    '',
+    '下面用英语演示断句与大小写（其他语言按该语言的大写规则与句读处理，规则相同）：',
+    ...EXAMPLE,
+    '',
+    '注意第 2 条以问号结尾是因为它本身就是一句话；而第 3、4 条结尾是逗号、第 4 条首字母小写，' +
+      '因为它们都只是同一句话的一部分。同样的断句，如果翻成「每条一个句号」，读起来就会变成五个残句。',
+    '',
+  ]
   if (multi) {
     // 把分隔行直接摆进格式示例，而不是只在上面用文字要求 —— 模型很爱把
     // 输出开头的【文件 1/N】当成"标题"吞掉（用户实测踩到），示例里露过面它才照抄。
     formatRows.push(
       `每个文件前面写一行【文件 k/${targets.length}】文件名（k 从 1 开始），再跟这个文件的译文行。例如：`,
       `【文件 1/${targets.length}】xxx.mp3`,
-      '1. 第一句的译文',
-      '2. 第二句的译文',
+      '1. Opening line of the first file.',
+      '2. Second line of the same file,',
       '',
       `【文件 2/${targets.length}】yyy.mp3`,
-      '1. 第一句的译文',
+      '1. Opening line of the second file.',
       '',
       '**输出的第一行就是【文件 1/N】那一行，前面不要有任何内容。**',
+      '',
     )
-  } else {
-    formatRows.push('例如：', '1. 这是第一句的译文', '2. 这是第二句的译文', '')
   }
   formatRows.push(
     `只输出这些行，不要有其他内容。总条数必须等于输入（${segmentCount} 条）。`,

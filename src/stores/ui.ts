@@ -105,6 +105,14 @@ export const useUiStore = defineStore('ui', () => {
    * 共用一个的话先关的那个会把后开的锁一起解掉。
    */
   const recordActive = ref(false)
+  /**
+   * 「AI 校对」引导气泡这一次运行里被关掉了。
+   *
+   * 只存内存、不写盘：气泡上的「×」语义是「这次别挡我」，用户下次打开软件
+   * 仍然该看到一次提示（那是它的价值）；而「不再提示」是写进设置里的永久决定。
+   * 两者必须分开存，否则「×」就变成了永久关闭 —— 那等于把两个按钮做成一个。
+   */
+  const aiTipClosed = ref(false)
   /** 「开始识别」按钮飞向进度条的一次性指示；null = 没有在飞 */
   const taskFlight = ref<TaskFlight | null>(null)
 
@@ -232,6 +240,7 @@ export const useUiStore = defineStore('ui', () => {
     settingsGroup,
     assistActive,
     recordActive,
+    aiTipClosed,
     taskFlight,
     taskProgress,
     navigate,

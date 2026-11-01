@@ -8,6 +8,7 @@ import type {
   LineEnding,
   OutputLocationMode,
   PunctuationOptions,
+  ScriptStrength,
   SubtitleFormat,
   SubtitleViewMode,
   TextEncoding,
@@ -148,6 +149,26 @@ export interface SettingsSnapshot {
   exportLangMode: ExportLangMode
   /** 双语导出时的行序：原文在上（默认）还是译文在上 */
   exportLangSourceFirst: boolean
+  /* ---- AI 辅助 ---- */
+  /**
+   * 「原文案参考」的强度，0 严格 → 3 宽松，默认 2（平衡）。
+   * 没贴原文稿时它不起作用，所以不需要单独一个「启用」开关。
+   * 分档语义见 `types/index.ts` 的 `ScriptStrength`。
+   */
+  aiScriptStrength: ScriptStrength
+  /**
+   * 编辑器页「AI 校对」按钮上方的引导气泡。这是**总开关**：
+   * 关掉之后气泡永远不出现，用户想再看回来打开即可。
+   */
+  aiReviewTipEnabled: boolean
+  /**
+   * 用户点过气泡上的「不再提示」。
+   *
+   * 与上面的开关分开存，是因为两者语义不同：一个是「我现在不想看」，
+   * 一个是「我永远不想看」。重新打开开关会把它一并复位 ——
+   * 否则用户打开了开关却什么都看不到，只会以为功能坏了。
+   */
+  aiReviewTipDismissed: boolean
 }
 
 export const DEFAULT_SETTINGS: SettingsSnapshot = {
@@ -216,6 +237,11 @@ export const DEFAULT_SETTINGS: SettingsSnapshot = {
   translationLang: '',
   exportLangMode: 'both',
   exportLangSourceFirst: true,
+  // AI 辅助同样是纯新增字段，不需要升键
+  // 默认「平衡」：只借文稿纠同音字与专名，是四档里最不容易把字幕改坏的
+  aiScriptStrength: 2,
+  aiReviewTipEnabled: true,
+  aiReviewTipDismissed: false,
 }
 
 function load(): SettingsSnapshot {
@@ -285,6 +311,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const translationLang = ref(initial.translationLang)
   const exportLangMode = ref<ExportLangMode>(initial.exportLangMode)
   const exportLangSourceFirst = ref(initial.exportLangSourceFirst)
+  const aiScriptStrength = ref<ScriptStrength>(initial.aiScriptStrength)
+  const aiReviewTipEnabled = ref(initial.aiReviewTipEnabled)
+  const aiReviewTipDismissed = ref(initial.aiReviewTipDismissed)
 
   function snapshot(): SettingsSnapshot {
     return {
@@ -325,6 +354,9 @@ export const useSettingsStore = defineStore('settings', () => {
       translationLang: translationLang.value,
       exportLangMode: exportLangMode.value,
       exportLangSourceFirst: exportLangSourceFirst.value,
+      aiScriptStrength: aiScriptStrength.value,
+      aiReviewTipEnabled: aiReviewTipEnabled.value,
+      aiReviewTipDismissed: aiReviewTipDismissed.value,
     }
   }
 
@@ -359,6 +391,17 @@ export const useSettingsStore = defineStore('settings', () => {
   )
 
   watch(themeMode, applyTheme, { immediate: true })
+
+  /*
+   * 重新打开「AI 校对引导」时，把「不再提示」一并复位。
+   *
+   * 这两件事看起来是一件，其实不是：开关是「这个功能我关掉了」，
+   * 不再提示是「我永远不想看」。如果只改开关不动标记，用户打开开关后
+   * 依然什么都看不到 —— 那是标准的「设置了没用」。
+   */
+  watch(aiReviewTipEnabled, (on) => {
+    if (on) aiReviewTipDismissed.value = false
+  })
 
   /*
    * 毛玻璃开关。这里只把「用户想要什么」发给主进程（存副本 + 即时切材质），
@@ -420,6 +463,9 @@ export const useSettingsStore = defineStore('settings', () => {
     translationLang.value = d.translationLang
     exportLangMode.value = d.exportLangMode
     exportLangSourceFirst.value = d.exportLangSourceFirst
+    aiScriptStrength.value = d.aiScriptStrength
+    aiReviewTipEnabled.value = d.aiReviewTipEnabled
+    aiReviewTipDismissed.value = d.aiReviewTipDismissed
   }
 
   return {
@@ -460,6 +506,9 @@ export const useSettingsStore = defineStore('settings', () => {
     translationLang,
     exportLangMode,
     exportLangSourceFirst,
+    aiScriptStrength,
+    aiReviewTipEnabled,
+    aiReviewTipDismissed,
     resetAll,
   }
 })

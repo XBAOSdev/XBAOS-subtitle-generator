@@ -580,12 +580,17 @@ export function applyTranslation(
  *
  * 按位置逐条对比，而不是做序列对齐：大模型可能整体重排，位置对应关系本来就会漂，
  * 强行对齐出来的"精确 diff"反而更误导。这里只回答两个问题 ——
- * 条数从多少变成多少、大概有多少条动过 —— 再给一小段前后对照让人过目。
+ * 条数从多少变成多少、大概有多少条动过 —— 再把**每一处**变化都列出来让人过目。
+ *
+ * 早期这里默认只留前 12 处（`previewLimit = 12`），本意是「给个样本就够了」。
+ * 实际用下来是反效果：用户看到「30 处有变化」却只能翻到 12 条，剩下 18 条改成了
+ * 什么样完全无从确认 —— 而确认覆盖这个动作恰恰要求能逐条看。现在默认全量，
+ * 由容器自己滚动；参数保留，只为少数需要截断的场景（比如内联摘要）。
  */
 export function summarizeReview(
   cues: ParsedCue[],
   prev: SubtitleSegment[],
-  previewLimit = 12,
+  previewLimit = Number.POSITIVE_INFINITY,
 ): ReviewSummary {
   const count = Math.max(cues.length, prev.length)
   let changed = 0
@@ -596,7 +601,7 @@ export function summarizeReview(
     const after = cues[i]?.text.trim() ?? ''
     const isChanged = before !== after
     if (isChanged) changed += 1
-    if (i < previewLimit && isChanged) {
+    if (previews.length < previewLimit && isChanged) {
       previews.push({ index: i + 1, before, after, changed: true })
     }
   }

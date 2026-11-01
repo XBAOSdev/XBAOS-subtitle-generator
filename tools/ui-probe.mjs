@@ -240,6 +240,32 @@ const scenarios = {
       check('步骤条 3 项', stepCount === 3, String(stepCount))
       check('初始停在第 1 步', String(await activeStep()).includes('准备提示词'), String(await activeStep()))
 
+      /*
+       * ---- 动作按钮统一在右下角 ----
+       * 以前按钮跟着内容滚：第 1 步内容一长就得先滚到底才看得见，而且三步的
+       * 位置各不相同，每进下一步都要重新找。现在统一住在底部横条的右端。
+       */
+      const footGeo = () =>
+        cdp.evaluate(`(() => {
+          const bar = document.querySelector('.astatus')
+          const btns = [...(bar ? bar.querySelectorAll('.pane__actions .btn') : [])]
+          if (!btns.length) return null
+          const last = btns[btns.length - 1].getBoundingClientRect()
+          return {
+            labels: btns.map((b) => b.textContent.trim()),
+            right: Math.round(window.innerWidth - last.right),
+            bottom: Math.round(window.innerHeight - last.bottom),
+          }
+        })()`)
+
+      const step1Foot = await footGeo()
+      check('第 1 步的动作按钮在底栏里', !!step1Foot, JSON.stringify(step1Foot))
+      check(
+        '按钮贴在窗口右下角',
+        !!step1Foot && step1Foot.right <= 24 && step1Foot.bottom <= 24,
+        JSON.stringify(step1Foot),
+      )
+
       const promptLen = await cdp.evaluate(
         `document.querySelector('.prompt__body')?.textContent.length ?? 0`,
       )
@@ -258,62 +284,279 @@ const scenarios = {
        * 默认必须是「全部」：任何默认收窄都会让用户以为整份都校对过了。
        * 收窄之后，提示词必须真的变短 —— 只看计数文字会漏掉「界面变了但提示词没变」
        * 这种假的通过。
+       *
+       * 结构已从「起止两个下拉」改成「文件行 + 展开逐条勾选」：下拉只表达得了
+       * 连续区间，而实际需求常常是跳着选；同一件事也不该拆成两个区块。
        */
-      const rangeRows = await cdp.evaluate(
-        `[...document.querySelectorAll('.range__row')].map((r) => ({
-          sel: r.querySelectorAll('select').length,
-          count: (r.querySelector('.range__count')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+      const fileRows = await cdp.evaluate(
+        `[...document.querySelectorAll('.pick__item')].map((r) => ({
+          caret: r.querySelectorAll('.pick__more').length,
+          count: (r.querySelector('.pick__meta')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
         }))`,
       )
-      check('每个选中文件都有一行「处理范围」', rangeRows.length === 2, JSON.stringify(rangeRows))
-      check('处理范围是「起 / 止」两个下拉', rangeRows.every((r) => r.sel === 2), JSON.stringify(rangeRows))
-      check('处理范围默认覆盖全部条目', rangeRows[0]?.count === '2 / 2 条', rangeRows[0]?.count)
+      check('处理范围：一个文件一行', fileRows.length === 2, JSON.stringify(fileRows))
+      check('每个文件都有展开箭头', fileRows.every((r) => r.caret === 1), JSON.stringify(fileRows))
+      check('处理范围默认覆盖全部条目', fileRows[0]?.count === '2 / 2 条', fileRows[0]?.count)
 
       const fullChars = await cdp.evaluate(
         `Number((document.querySelector('.prompt__meta')?.textContent ?? '0').replace(/[^0-9]/g, ''))`,
       )
 
-      // 把结束条目收到第 1 条
-      await cdp.evaluate(`(() => {
-        const sel = document.querySelectorAll('.range__row')[0].querySelectorAll('select')[1]
-        sel.value = '0'
-        sel.dispatchEvent(new Event('change', { bubbles: true }))
-      })()`)
+      // 展开第一个文件的字幕清单：逐条勾选是这个功能区的核心
+      const caret = await centerOf(`document.querySelectorAll('.pick__more')[0]`)
+      if (!caret) throw new Error('找不到文件行的展开箭头')
+      await cdp.click(caret.x, caret.y)
+      await sleep(250)
+      const cueRows = await cdp.evaluate(`document.querySelectorAll('.cue').length`)
+      check('展开后列出该文件的全部字幕', cueRows === 2, String(cueRows))
+      const allCuesChecked = await cdp.evaluate(
+        `[...document.querySelectorAll('.cue__box')].length > 0 &&
+         [...document.querySelectorAll('.cue__box')].every((b) => b.checked)`,
+      )
+      check('字幕默认全选', allCuesChecked === true)
+
+      // 只取消第 2 条
+      const secondCue = await centerOf(`document.querySelectorAll('.cue__box')[1]`)
+      if (!secondCue) throw new Error('找不到第二条字幕的复选框')
+      await cdp.click(secondCue.x, secondCue.y)
       await waitFor(
         cdp,
-        `document.querySelectorAll('.range__row')[0].querySelector('.range__count').textContent.trim().startsWith('1 ')`,
+        `(document.querySelectorAll('.pick__meta')[0]?.textContent ?? '').trim().startsWith('1 ')`,
         4000,
         50,
       )
       const scopedRow = await cdp.evaluate(`(() => {
-        const row = document.querySelectorAll('.range__row')[0]
+        const row = document.querySelectorAll('.pick__item')[0]
         return {
-          count: (row.querySelector('.range__count')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+          count: (row.querySelector('.pick__meta')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
           chars: Number((document.querySelector('.prompt__meta')?.textContent ?? '0').replace(/[^0-9]/g, '')),
         }
       })()`)
-      check('收窄到 1 条后计数跟着变', scopedRow.count === '1 / 2 条', scopedRow.count)
-      check('收窄后提示词真的变短了（不是只有界面在变）', scopedRow.chars < fullChars, `${scopedRow.chars} vs ${fullChars}`)
-
-      // 点「恢复全部」回到全量
-      await cdp.evaluate(
-        `document.querySelector('.range__row').closest('.block').querySelector('.link').click()`,
+      check('取消勾选后计数跟着变', scopedRow.count === '1 / 2 条', scopedRow.count)
+      check(
+        '取消勾选后提示词真的变短了（不是只有界面在变）',
+        scopedRow.chars < fullChars,
+        `${scopedRow.chars} vs ${fullChars}`,
       )
+
+      // 点展开区里的「全选」回到全量
+      await cdp.evaluate(`(() => {
+        const btn = [...document.querySelectorAll('.cues__head .link')].find((b) =>
+          b.textContent.includes('全选'),
+        )
+        btn.click()
+        return true
+      })()`)
       await waitFor(
         cdp,
-        `document.querySelectorAll('.range__row')[0].querySelector('.range__count').textContent.trim().startsWith('2 ')`,
+        `(document.querySelectorAll('.pick__meta')[0]?.textContent ?? '').trim().startsWith('2 ')`,
         4000,
         50,
       )
       const restored = await cdp.evaluate(`(() => {
-        const row = document.querySelectorAll('.range__row')[0]
+        const row = document.querySelectorAll('.pick__item')[0]
         return {
-          count: (row.querySelector('.range__count')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+          count: (row.querySelector('.pick__meta')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
           chars: Number((document.querySelector('.prompt__meta')?.textContent ?? '0').replace(/[^0-9]/g, '')),
         }
       })()`)
-      check('「恢复全部」把范围还原', restored.count === '2 / 2 条', restored.count)
-      check('「恢复全部」后提示词长度复原', restored.chars === fullChars, `${restored.chars} vs ${fullChars}`)
+      check('「全选」把范围还原', restored.count === '2 / 2 条', restored.count)
+      check('「全选」后提示词长度复原', restored.chars === fullChars, `${restored.chars} vs ${fullChars}`)
+
+      /*
+       * ---- 顶部「全部取消」不许把整个区块弄没 ----
+       * 曾经区块的显示条件挂在「当前选中了什么」上：一点全部取消，文件清单连同勾选框
+       * 一起消失，用户再也点不回来（只能关掉窗口重开）。判断依据必须是「有没有文件可选」，
+       * 而不是「有没有文件被选中」。这里顺带验一遍空选时界面还在说人话。
+       */
+      const cancelAll = await cdp.evaluate(`(() => {
+        const btn = [...document.querySelectorAll('.block__head .link')].find((b) =>
+          b.textContent.includes('全部取消'),
+        )
+        if (!btn) return false
+        btn.click()
+        return true
+      })()`)
+      check('处理范围标题栏有「全部取消」', cancelAll === true)
+      await sleep(300)
+
+      const afterCancel = await cdp.evaluate(`(() => ({
+        rows: document.querySelectorAll('.pick__item').length,
+        checked: [...document.querySelectorAll('.pick__box')].filter((b) => b.checked).length,
+        toggle: [...document.querySelectorAll('.block__head .link')].map((b) => b.textContent.trim()),
+        foot: (document.querySelector('.block__foot')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+        prompt: (document.querySelector('.prompt__body')?.textContent ?? '').trim().length,
+      }))()`)
+      check(
+        '点「全部取消」后文件清单仍在（还能再选回来）',
+        afterCancel.rows === 2,
+        `${afterCancel.rows} 行`,
+      )
+      check('全部取消后没有文件被勾中', afterCancel.checked === 0, String(afterCancel.checked))
+      check('按钮跟着变成「全选」', afterCancel.toggle.includes('全选'), afterCancel.toggle.join(' / '))
+      check(
+        '空选时给出可执行的提示，而不是「已选 0 / 2 个文件」',
+        afterCancel.foot.includes('还没有选择文件'),
+        afterCancel.foot,
+      )
+
+      // 再点「全选」要能真的回到全量（含逐条状态复位，不留「勾着却 0 条」的行）
+      await cdp.evaluate(`(() => {
+        const btn = [...document.querySelectorAll('.block__head .link')].find((b) =>
+          b.textContent.trim() === '全选',
+        )
+        if (btn) btn.click()
+        return true
+      })()`)
+      await waitFor(
+        cdp,
+        `[...document.querySelectorAll('.pick__box')].every((b) => b.checked)`,
+        4000,
+        50,
+      )
+      const backAll = await cdp.evaluate(`(() => ({
+        checked: [...document.querySelectorAll('.pick__box')].filter((b) => b.checked).length,
+        counts: [...document.querySelectorAll('.pick__meta')].map((m) =>
+          m.textContent.replace(/\\s+/g, ' ').trim(),
+        ),
+        chars: Number((document.querySelector('.prompt__meta')?.textContent ?? '0').replace(/[^0-9]/g, '')),
+      }))()`)
+      check('再点「全选」把所有文件勾回来', backAll.checked === 2, String(backAll.checked))
+      check(
+        '勾回来时逐条也全部恢复（不会留下 0 条的空文件）',
+        backAll.counts.every((c) => !c.startsWith('0 ')),
+        backAll.counts.join(' / '),
+      )
+      check('提示词回到全量', backAll.chars === fullChars, `${backAll.chars} vs ${fullChars}`)
+
+      /*
+       * ---- 逐条「清空」不该留下「勾着但 0 条」的行 ----
+       * 这种行的存在会让底栏的「已选 N 个文件」与提示词里的文件数对不上：
+       * 界面上三个文件都勾着，实际只发了两个出去。
+       */
+      await cdp.evaluate(`(() => {
+        const caret = document.querySelectorAll('.pick__more')[0]
+        if (caret && caret.getAttribute('aria-expanded') !== 'true') caret.click()
+        return true
+      })()`)
+      await sleep(250)
+      await cdp.evaluate(`(() => {
+        const btn = [...document.querySelectorAll('.cues__head .link')].find((b) =>
+          b.textContent.includes('清空'),
+        )
+        if (!btn) return false
+        btn.click()
+        return true
+      })()`)
+      await sleep(300)
+      const afterClear = await cdp.evaluate(`(() => {
+        const row = document.querySelectorAll('.pick__item')[0]
+        return {
+          box: row.querySelector('.pick__box')?.checked,
+          rowOn: row.querySelector('.pick__row')?.classList.contains('is-on'),
+          foot: (document.querySelector('.block__foot')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+        }
+      })()`)
+      check(
+        '清空一个文件的全部条目后，该文件自动退出处理范围',
+        afterClear.box === false && afterClear.rowOn === false,
+        JSON.stringify(afterClear),
+      )
+
+      // 顺着来一遍反向：手动勾其中一条 → 文件自动回到范围里
+      await cdp.evaluate(`document.querySelectorAll('.cue__box')[0]?.click()`)
+      await sleep(300)
+      const afterOneCue = await cdp.evaluate(`(() => {
+        const row = document.querySelectorAll('.pick__item')[0]
+        return {
+          box: row.querySelector('.pick__box')?.checked,
+          half: row.querySelector('.pick__box')?.indeterminate,
+          count: (row.querySelector('.pick__meta')?.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+        }
+      })()`)
+      check(
+        '手动勾一条又把该文件带回范围（且显示为半选）',
+        afterOneCue.box === true && afterOneCue.half === true,
+        JSON.stringify(afterOneCue),
+      )
+
+      // 回到全量，后面的断言（强度、编码提示）都按「全部处理」算
+      await cdp.evaluate(`(() => {
+        const btn = [...document.querySelectorAll('.block__head .link')].find(
+          (b) => b.textContent.trim() === '全选',
+        )
+        if (btn) btn.click()
+        return true
+      })()`)
+      await waitFor(
+        cdp,
+        `[...document.querySelectorAll('.pick__meta')].every((m) => !m.textContent.trim().startsWith('0 '))`,
+        4000,
+        50,
+      )
+      await cdp.evaluate(`(() => {
+        const caret = document.querySelectorAll('.pick__more')[0]
+        if (caret && caret.getAttribute('aria-expanded') === 'true') caret.click()
+        return true
+      })()`)
+      await sleep(250)
+
+      /*
+       * ---- 原文案参考强度 ----
+       * 用户要求「校对强度可变」：同一份文稿，逐字念稿的视频要严格照改，
+       * 随手讲的视频反而不能被改死。四档靠滑块选，必须真的改变提示词 ——
+       * 否则就是「界面能调、AI 不理」。
+       */
+      const noScriptDisabled = await cdp.evaluate(
+        `document.querySelector('.levels__input')?.disabled === true`,
+      )
+      check('没贴文稿时强度滑块禁用（此时它不起作用）', noScriptDisabled === true)
+
+      await cdp.evaluate(`(() => {
+        const t = document.querySelector('textarea.script')
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
+        setter.call(t, '大家好欢迎来到本期节目今天我们聊一聊显卡这个东西先说说它为什么这么贵')
+        t.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()`)
+      await sleep(400)
+
+      const tickCount = await cdp.evaluate(`document.querySelectorAll('.levels__tick').length`)
+      check('参考强度是四档滑块', tickCount === 4, String(tickCount))
+      const strengthLabel = () =>
+        cdp.evaluate(`document.querySelector('.strength__value')?.textContent?.trim() ?? ''`)
+      check('默认停在中档「平衡」', (await strengthLabel()) === '平衡', await strengthLabel())
+
+      const promptChars = () =>
+        cdp.evaluate(
+          `Number((document.querySelector('.prompt__meta')?.textContent ?? '0').replace(/[^0-9]/g, ''))`,
+        )
+      const midChars = await promptChars()
+      await cdp.evaluate(`document.querySelectorAll('.levels__tick')[0].click()`)
+      await sleep(300)
+      const strictChars = await promptChars()
+      check('点刻度能切到「严格」', (await strengthLabel()) === '严格', await strengthLabel())
+      await cdp.evaluate(`document.querySelectorAll('.levels__tick')[3].click()`)
+      await sleep(300)
+      const looseChars = await promptChars()
+      check('点刻度能切到「宽松」', (await strengthLabel()) === '宽松', await strengthLabel())
+      /*
+       * 「换了档，提示词到底变没变」只能看字符数 —— 界面预览只给前 800 字符，
+       * 而这一段本来就在 800 之后。四档的允许/不允许清单是不同段落，长度自然不同；
+       * 这里要求三档各不相同即可证明真的换了一整段文字（具体措辞由 unit 守门逐档断言）。
+       *
+       * 别写成「严格一定比平衡长」：那是拍脑袋的假设，实测严格档恰好短 4 个字
+       * （条目更少但每条更长），断言反而会误报。
+       */
+      check(
+        '不同档位真的换了提示词（三档字符数互不相同）',
+        new Set([midChars, strictChars, looseChars]).size === 3,
+        `平衡 ${midChars} / 严格 ${strictChars} / 宽松 ${looseChars}`,
+      )
+      // 还原到默认档：后面的断言（以及「默认值」这件事本身）都按平衡档算
+      await cdp.evaluate(`document.querySelectorAll('.levels__tick')[2].click()`)
+      await sleep(250)
+      check('可以回到默认档', (await strengthLabel()) === '平衡', await strengthLabel())
 
       // 提示词按设置动态生成：默认设置是「去停顿标点」，就不能再要求 AI 补标点
       const promptText1 = await cdp.evaluate(`document.querySelector('.prompt__body')?.textContent ?? ''`)
@@ -399,6 +642,17 @@ const scenarios = {
       await sleep(400)
 
       check('复制后进入第 2 步', String(await activeStep()).includes('粘贴'), String(await activeStep()))
+      const step2Foot = await footGeo()
+      check(
+        '第 2 步的按钮换成这一步的两个',
+        !!step2Foot && step2Foot.labels.length === 2 && step2Foot.labels.join('|').includes('去取回'),
+        JSON.stringify(step2Foot?.labels),
+      )
+      check(
+        '第 2 步的按钮也在同一个位置上',
+        !!step2Foot && step2Foot.right <= 24 && step2Foot.bottom <= 24,
+        JSON.stringify(step2Foot),
+      )
       const clipLen = await cdp.evaluate(`window.__xbaosClip ? window.__xbaosClip.text.length : -1`)
       check('提示词确实写进了剪贴板', clipLen > 50, String(clipLen))
       const howtoCount = await cdp.evaluate(`document.querySelectorAll('.howto li').length`)
@@ -457,6 +711,26 @@ const scenarios = {
       )
       const status = await cdp.evaluate(`document.querySelector('.astatus')?.textContent ?? ''`)
       check('状态条给出读取成功提示', status.includes('读取成功'), status.slice(0, 40))
+
+      const step3Foot = await footGeo()
+      check(
+        '第 3 步的按钮换成读取与确认',
+        !!step3Foot &&
+          step3Foot.labels.length === 2 &&
+          step3Foot.labels.some((l) => l.includes('确认覆盖')),
+        JSON.stringify(step3Foot?.labels),
+      )
+      check(
+        '第 3 步的按钮仍在右下角（三步位置一致）',
+        !!step3Foot && step3Foot.right <= 24 && step3Foot.bottom <= 24,
+        JSON.stringify(step3Foot),
+      )
+
+      // 变化明细全量展示：标题写「共 N 处」而不是「前 N 处」
+      const diffHead = await cdp.evaluate(
+        `document.querySelector('.diffs__head')?.textContent?.replace(/\\s+/g, ' ').trim() ?? ''`,
+      )
+      check('变化明细写「共 N 处」（不再截断到 12 条）', diffHead.includes('共'), diffHead)
 
       await shot(cdp, 'probe-assist-step3.png')
 
@@ -666,8 +940,9 @@ const scenarios = {
       // 看起来像渲染坏了。这条断言卡的就是这个「报了成功却什么都没显示」的中间态。
       await goto(cdp, BASE + '/?window=assist&demo=1&theme=light&task=translate&files=1')
       await sleep(300)
-      const oneFileCount = await cdp.evaluate(`document.querySelectorAll('.pick__box').length`)
-      check('单文件翻译：演示数据只有一个文件（单文件分支才生效）', oneFileCount === 0, `文件选择区 ${oneFileCount} 行`)
+      // 单文件时「处理范围」照常出现（一个文件也要能挑条目），只是只有一行
+      const oneFileCount = await cdp.evaluate(`document.querySelectorAll('.pick__item').length`)
+      check('单文件也显示处理范围（一个文件一行）', oneFileCount === 1, `文件选择区 ${oneFileCount} 行`)
 
       const copyOne = await centerOfBtn('复制提示词')
       if (!copyOne) throw new Error('单文件翻译段：找不到「复制提示词」按钮')
@@ -1707,14 +1982,14 @@ const scenarios = {
     const groups = await cdp.evaluate(
       `[...document.querySelectorAll('.setnav__item')].map((b) => b.textContent.replace(/\\s+/g, ''))`,
     )
-    check('设置页有左侧分组导航', groups.length === 7, JSON.stringify(groups))
+    check('设置页有左侧分组导航', groups.length === 8, JSON.stringify(groups))
     check('默认停在外观组', (await activeGroup()).includes('外观'), await activeGroup())
     check('同屏只显示一个分组', (await visibleGroups()) === 1, String(await visibleGroups()))
 
     // 隐藏的区块必须仍在 DOM 里：搜索与深链都靠全局查询找元素
     check(
       '未激活分组仍保留在 DOM（只是不显示）',
-      (await cdp.evaluate(`document.querySelectorAll('.setgroup').length`)) === 7,
+      (await cdp.evaluate(`document.querySelectorAll('.setgroup').length`)) === 8,
       String(await cdp.evaluate(`document.querySelectorAll('.setgroup').length`)),
     )
 
@@ -3058,9 +3333,11 @@ const scenarios = {
 
     // 底部一排控件统一到同一高度。曾经 AI 入口故意加高（--control-height-lg），
     // 结果与左右两侧的 20/32/38px 混排，视觉上参差不齐；现已按设计要求对齐。
+    // 注意要排除引导气泡里的两个小按钮（「不再提示」16px、「×」16px）——
+    // 它们是气泡自己的控件，不是这一排动作按钮。
     const grayHeight = await cdp.evaluate(`(() => {
       const btn = [...document.querySelectorAll('.editor__foot button')].find(
-        (b) => !b.classList.contains('btn--ai'),
+        (b) => !b.classList.contains('btn--ai') && !b.closest('.aitip__card'),
       )
       return btn ? Math.round(btn.getBoundingClientRect().height) : 0
     })()`)
@@ -3122,6 +3399,123 @@ const scenarios = {
         toast ?? '点击后没有任何提示',
       )
     }
+
+    /* ------------------------------------------------ AI 校对引导气泡 */
+    /*
+     * 气泡的作用是把人引到「AI 校对」上去，所以它必须真的贴在按钮上方、
+     * 文案一字不差，而且尺寸克制（挡住半屏的提示等于没提示）。
+     *
+     * 两种关闭方式语义不同，但视觉结果一样（都是「不见了」），最容易实现成同一件事：
+     *   「×」      这次别挡我 → 只存在内存里，下次开软件还会出现
+     *   「不再提示」永远别出现 → 写进设置，重启依然不再出现
+     * 所以中间必须夹一次重新加载：不加载就分不出「记住」和「没记住」。
+     */
+    const tip = () =>
+      cdp.evaluate(`(() => {
+        const card = document.querySelector('.aitip__card')
+        if (!card) return { present: false }
+        const btn = card.closest('.aitip')?.querySelector('.btn--ai')
+        const cr = card.getBoundingClientRect()
+        const br = btn ? btn.getBoundingClientRect() : null
+        return {
+          present: true,
+          text: (card.querySelector('.aitip__text')?.textContent ?? '').trim(),
+          never: (card.querySelector('.aitip__never')?.textContent ?? '').trim(),
+          hasClose: !!card.querySelector('.aitip__close'),
+          width: Math.round(cr.width),
+          height: Math.round(cr.height),
+          above: br ? Math.round(cr.bottom) <= Math.round(br.top) : false,
+          rightGap: br ? Math.round(cr.right - br.right) : 999,
+        }
+      })()`)
+
+    const clickIn = (sel) =>
+      cdp.evaluate(`(() => {
+        const el = document.querySelector(${JSON.stringify(sel)})
+        if (!el) return false
+        el.click()
+        return true
+      })()`)
+
+    await goto(cdp, BASE + '/?demo=1&view=editor&theme=light')
+    const tip1 = await tip()
+    check('识别完成后「AI 校对」按钮上方出现引导气泡', tip1.present === true)
+    if (!tip1.present) return
+
+    check(
+      '气泡文案与产品要求一字不差',
+      tip1.text === '使用 AI 校对功能可以大幅度优化识别过程中产生的小错误',
+      tip1.text,
+    )
+    check('气泡右上角有「×」、左上角有「不再提示」', tip1.hasClose && tip1.never === '不再提示',
+      `close=${tip1.hasClose} never="${tip1.never}"`)
+    check(
+      '气泡贴在按钮正上方且右缘对齐（不是在页面某个角落）',
+      tip1.above && Math.abs(tip1.rightGap) <= 1,
+      `above=${tip1.above} rightGap=${tip1.rightGap}px`,
+    )
+    check(
+      '气泡尺寸克制，不铺满半屏',
+      tip1.width > 0 && tip1.width <= 280 && tip1.height <= 120,
+      `${tip1.width}×${tip1.height}`,
+    )
+
+    // ---- 「×」只关这一次 ----
+    check('点「×」能关掉气泡', (await clickIn('.aitip__close')) === true)
+    await sleep(250)
+    check('点「×」后气泡消失', (await tip()).present === false)
+
+    await goto(cdp, BASE + '/?demo=1&view=editor&theme=light')
+    check(
+      '「×」只是本次关闭：重新打开页面气泡还会出现',
+      (await tip()).present === true,
+    )
+
+    // ---- 「不再提示」写进设置 ----
+    check('点「不再提示」能关掉气泡', (await clickIn('.aitip__never')) === true)
+    await sleep(250)
+    check('点「不再提示」后气泡消失', (await tip()).present === false)
+    const dismissed = await cdp.evaluate(
+      `JSON.parse(localStorage.getItem('xbaos.settings.v6') || '{}').aiReviewTipDismissed`,
+    )
+    check('「不再提示」已落到设置里（写盘，不是只改内存）', dismissed === true, String(dismissed))
+
+    await goto(cdp, BASE + '/?demo=1&view=editor&theme=light')
+    check('「不再提示」之后重新打开页面也不再出现', (await tip()).present === false)
+
+    // ---- 设置里的开关 ----
+    // 开关关掉 → 永不出气泡；再打开 → 连「不再提示」一起复位（否则用户打开开关却看不到气泡，
+    // 会以为开关坏了）。这两条是同一个功能的两半，必须一起验。
+    await goto(cdp, BASE + '/?demo=1&view=settings')
+    const sw = `#field-ai-tip input`
+    const swOn = await cdp.evaluate(`(() => {
+      const el = document.querySelector('#field-ai-tip input')
+      if (!el) return null
+      el.scrollIntoView({ block: 'center' })
+      return el.checked
+    })()`)
+    check('设置里能看到「AI 校对」引导提示的开关', swOn !== null)
+    check('默认是开着的（不打扰老用户的前提下默认引导）', swOn === true, String(swOn))
+
+    await clickIn(sw)
+    await sleep(250)
+    await goto(cdp, BASE + '/?demo=1&view=editor&theme=light')
+    check('设置里关掉开关后编辑器不再出现气泡', (await tip()).present === false)
+
+    await goto(cdp, BASE + '/?demo=1&view=settings')
+    await clickIn(sw)
+    await sleep(250)
+    await goto(cdp, BASE + '/?demo=1&view=editor&theme=light')
+    check(
+      '把开关重新打开会连「不再提示」一起复位（气泡回来了）',
+      (await tip()).present === true,
+    )
+
+    // 复位：localStorage 在同一浏览器会话里共享，别把「不再提示」留给后面的场景
+    await cdp.evaluate(`(() => {
+      Object.keys(localStorage).filter((k) => k.startsWith('xbaos.settings')).forEach((k) => localStorage.removeItem(k))
+      return true
+    })()`)
   },
 
   /**

@@ -440,6 +440,98 @@ body.is-dragging {
   outline-offset: 2px;
 }
 
+/* ---- 离散档位滑块 ----
+   档位是有语义的离散值（严格 / 偏严 / 平衡 / 宽松），不是连续量。
+   所以标签本身也可点：拖动只解决了「调整」，标签解决的是「一共几档、现在第几档」。
+   两处用到（设置页、AI 辅助窗口），样式放全局，不要在组件里各写一套。 */
+.levels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  /* 四档的离散控件不需要铺满整行：越宽，标签离它对应的滑块位置越远，
+     反而读不出「现在停在第几档」。360px 下四个标签与四个档位基本对齐。 */
+  max-width: 360px;
+}
+
+.levels__input {
+  appearance: none;
+  width: 100%;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.levels__input::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--color-border-strong);
+}
+
+.levels__input::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  /* 轨道 4px、滑块 14px：往上提一半才居中 */
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  border: 2px solid var(--color-bg-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.levels__input:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+  border-radius: var(--radius-pill);
+}
+
+.levels__input:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/*
+ * 刻度用 space-between 而不是等分网格：滑块的指针可以走到轨道两端（0% 与 100%），
+ * 网格每列的中心却永远离两端差半格 —— 四档的控件里，那半格看起来就是「对不齐」。
+ * 首尾两格按边对齐，误差压到几像素以内。
+ */
+.levels__ticks {
+  display: flex;
+  justify-content: space-between;
+}
+
+.levels__tick {
+  border: 0;
+  background: none;
+  padding: 2px 0;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  text-align: center;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+
+.levels__tick:first-child {
+  text-align: left;
+}
+
+.levels__tick:last-child {
+  text-align: right;
+}
+
+.levels__tick:hover:not(.is-on):not(:disabled) {
+  color: var(--color-text-secondary);
+}
+
+.levels__tick.is-on {
+  color: var(--color-text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.levels__tick:disabled {
+  cursor: not-allowed;
+}
+
 /* ==========================================================================
    容器
    ========================================================================== */

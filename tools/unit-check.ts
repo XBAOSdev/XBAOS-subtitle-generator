@@ -82,6 +82,11 @@ import {
   summarizeReview,
 } from '../src/utils/llmResult'
 import { toPlain, toPlainList } from '../src/utils/plain'
+import {
+  SCRIPT_STRENGTH_OPTIONS,
+  normalizeStrength,
+  strengthOption,
+} from '../src/data/scriptStrength'
 import { buildMergedTimeline, type MergeSourceFile } from '../src/utils/mergeTimeline'
 import { parseReplaceDict, applyReplaceRules } from '../src/utils/dictReplace'
 import {
@@ -1680,6 +1685,70 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
       '【原文案参考】',
     ),
   )
+
+  /*
+   * 原文案参考强度。
+   *
+   * 这一维最容易退化成「界面上有四个档、提示词里却是同一段话」——
+   * 那种情况下用户调了没反应，还以为是 AI 不听话。所以逐档比对措辞。
+   */
+  const byStrength = [0, 1, 2, 3].map(
+    (s) =>
+      buildReviewPrompt({
+        targets,
+        options: { ...options, script: '今天我们聊一聊显卡这个东西', scriptStrength: s as 0 | 1 | 2 | 3 },
+      }).prompt,
+  )
+  check(
+    '文案强度四档都能生成文案段',
+    byStrength.every((p) => p.includes('【原文案参考】')),
+  )
+  check(
+    '文案强度四档措辞互不相同（调档必须真的改变提示词）',
+    new Set(byStrength).size === 4,
+    `${new Set(byStrength).size} 种`,
+  )
+  check('严格档：文稿说了算', byStrength[0].includes('一律以文稿为准'))
+  check('严格档的一句话原则是「还原文稿」', byStrength[0].includes('字幕要还原文稿'))
+  check('宽松档：只借专有名词写法', byStrength[3].includes('专有名词的写法'))
+  check(
+    '宽松档明确不许用文稿替换别的用词',
+    byStrength[3].includes('不要用文稿替换识别结果的任何用词'),
+  )
+  check(
+    '每一档都守住「不按文稿重排条目」',
+    byStrength.every((p) => p.includes('不要按文稿重排或合并条目')),
+    byStrength.findIndex((p) => !p.includes('不要按文稿重排或合并条目')) + '',
+  )
+  check(
+    '严格档仍不许按文稿重排时间码',
+    byStrength[0].includes('不要按文稿的字数重新分配时间码'),
+  )
+  /*
+   * 默认档从源码里读，不 import store：store 模块会连带引入 pinia 与 vue，
+   * 而这里是纯 Node 环境。用一条源码扫描守住「默认必须是中间那一档」足够。
+   */
+  const settingsSrc = readFileSync(
+    new URL('../src/stores/settings.ts', import.meta.url),
+    'utf8',
+  )
+  check('默认档是平衡（2）', /^\s*aiScriptStrength: 2,$/m.test(settingsSrc), '在 DEFAULT_SETTINGS 里')
+  check(
+    '「重新打开开关」会复位「不再提示」',
+    /watch\(aiReviewTipEnabled[\s\S]{0,120}?aiReviewTipDismissed\.value = false/.test(settingsSrc),
+    '否则打开开关也看不到气泡',
+  )
+  check('档位越界值被夹回合法范围', normalizeStrength(-3) === 0 && normalizeStrength(99) === 3)
+  check('档位 NaN 落回平衡档', normalizeStrength(Number.NaN) === 2)
+  check(
+    '每一档都有给用户看的解释文字',
+    SCRIPT_STRENGTH_OPTIONS.every((o) => o.label.length <= 3 && o.hint.length > 8),
+  )
+  check(
+    '档位下标与数组顺序一致（滑块靠它取档，错位就会「选严格实际是宽松」）',
+    SCRIPT_STRENGTH_OPTIONS.every((o, i) => o.value === i) &&
+      strengthOption(3).label === '宽松',
+  )
 }
 
 /* ---- AI 校对：多文件输出的切块 ---- */
@@ -1839,6 +1908,32 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   check('被删除的条目出现在预览里', del.previews.some((p) => p.after === ''))
 }
 
+/*
+ * 概览不再截断。
+ *
+ * 早期默认只留前 12 处（`previewLimit = 12`），本意是给个样本；
+ * 实际用下来是反效果：界面写着「30 处有变化」，用户却只能翻到 12 条，
+ * 剩下 18 条被改成了什么样完全无法确认 —— 而确认覆盖这个动作恰恰要求能逐条看。
+ */
+{
+  const many = Array.from({ length: 20 }, (_, i) => ({
+    start: i,
+    end: i + 0.9,
+    text: `改过的第 ${i + 1} 句`,
+  }))
+  const manyPrev = Array.from({ length: 20 }, (_, i) => ({
+    ...seg(i, i + 0.9, `原来的第 ${i + 1} 句`),
+  }))
+  const all = summarizeReview(many, manyPrev)
+  check(
+    '概览列出全部变化（不再截断到 12 条）',
+    all.previews.length === 20 && all.changed === 20,
+    `${all.previews.length} / ${all.changed}`,
+  )
+  const capped = summarizeReview(many, manyPrev, 3)
+  check('显式传入上限时仍然截断（参数保留可用）', capped.previews.length === 3)
+}
+
 /* ---- 跨进程纯化（toPlain）----
  *
  * 背景：Electron 的 IPC 走结构化克隆，V8 对任何 JSProxy 一律拒收并抛
@@ -1934,6 +2029,36 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     'AssistView：assist.submit 的实参经过 toPlain 纯化',
     /\bsubmit\(\{[\s\S]{0,300}?toPlain\(/.test(assistSrc),
     'submit({ fileId, cues: toPlain(outcome.value.cues) })',
+  )
+}
+
+/* ---- 交互不变量：「处理范围」区块不能跟着选择一起消失 ----
+ *
+ * 区块的显示条件曾经挂在「当前选中了什么」上，于是点一次「全部取消」，文件清单
+ * 连同勾选框一起消失，用户再也选不回来（只能关窗重开）。这类退化不报错、不抛异常，
+ * 只是把操作入口本身收走了 —— 跑一遍点击流程也未必发现，所以扫源码钉死。
+ */
+{
+  const readSource = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const assistSrc = readSource('src/views/AssistView.vue')
+
+  check(
+    '「处理范围」区块的显示条件看「有没有文件可选」，不看「选没选中」',
+    /const pickEditable = computed\(\(\) => targets\.value\.some/.test(assistSrc) &&
+      !/const pickEditable = computed\(\(\) => selectedTargets/.test(assistSrc),
+    'pickEditable 应基于 targets.value —— 基于 selectedTargets 会让「全部取消」把整块弄没',
+  )
+  check(
+    '逐条勾选会带着文件级勾选一起走（不留「勾着却 0 条」的行）',
+    /function syncFileSelection/.test(assistSrc) &&
+      /function toggleCue[\s\S]{0,240}?syncFileSelection\(t\)/.test(assistSrc) &&
+      /function setAllCues[\s\S]{0,240}?syncFileSelection\(t\)/.test(assistSrc),
+    'toggleCue / setAllCues 都应调用 syncFileSelection(t)',
+  )
+  check(
+    '「全选」把范围复位成全部条目，不是只把文件 id 塞回去',
+    /function toggleSelectAll[\s\S]{0,240}?resetPicks\(\)/.test(assistSrc),
+    'toggleSelectAll 选中全部时应先 resetPicks()',
   )
 }
 
@@ -3090,6 +3215,34 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   check('翻译提示词：强调条数一致', r.prompt.includes('条数必须与输入完全一致'))
   check('翻译提示词：明确要求不要输出时间码', r.prompt.includes('不要输出时间码'))
   check('翻译提示词：条数与文件数统计正确', r.segmentCount === 2 && r.fileCount === 1)
+
+  /*
+   * 「每条都首字母大写 + 每条结尾加句点」是用户实测报上来的问题：
+   * 一句话被识别切成三条，译出来成了三个残句。根因是输入是「一条一行」的
+   * 编号列表，模型按「每行一个完整句子」处理。所以提示词必须显式说明这件事。
+   */
+  check(
+    '翻译提示词：明确断句位置必须与原文一致',
+    r.prompt.includes('断句位置必须与原文一致'),
+  )
+  check(
+    '翻译提示词：点明相邻条目常属同一句话',
+    r.prompt.includes('相邻的好几条往往属于同一句话'),
+  )
+  check(
+    '翻译提示词：明令不要把每条都翻成独立句子',
+    r.prompt.includes('不要把每一条都翻成一个独立的完整句子'),
+  )
+  check(
+    '翻译提示词：把序号后的句点说清是分隔符（这是「每条都加句号」的直接诱因）',
+    r.prompt.includes('序号分隔符'),
+    '旧写法「序号、英文句点、一个空格、译文」会被读成句末标点',
+  )
+  check(
+    '翻译提示词：示例里有句中断条（逗号结尾 + 下一条小写开头）',
+    r.prompt.includes('3. Many of you would say 1024 MB,') &&
+      r.prompt.includes('4. but if we open the calculator on the computer,'),
+  )
 
   const wrapped = buildTranslatePrompt({
     targets: [{ fileName: 'a.wav', durationSec: 30, segments: [seg(0, 2, '上句\n下句')] }],

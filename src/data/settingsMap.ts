@@ -40,6 +40,7 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
   { id: 'appearance', label: '外观', icon: 'sun' },
   { id: 'engine', label: '识别与性能', icon: 'cpu' },
   { id: 'subtitle', label: '字幕处理', icon: 'type' },
+  { id: 'ai', label: 'AI 辅助', icon: 'spell-check' },
   { id: 'export', label: '导出', icon: 'save' },
   { id: 'words', label: '词表', icon: 'book' },
   { id: 'shortcut', label: '快捷键', icon: 'keyboard' },
@@ -169,6 +170,25 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
     anchor: 'field-gap-max',
     group: 'subtitle',
     keywords: ['最长时长', '上限', '填充'],
+  },
+
+  // ---- AI 辅助
+  {
+    id: 'ai-script-strength',
+    label: '原文案参考强度',
+    section: 'sec-ai',
+    anchor: 'field-ai-strength',
+    group: 'ai',
+    keywords: ['校对', '文案', '文稿', '原稿', '强度', '严格', '宽松', '逐字', '照着念'],
+    note: '仅在粘贴原文稿时生效',
+  },
+  {
+    id: 'ai-tip',
+    label: 'AI 校对引导提示',
+    section: 'sec-ai',
+    anchor: 'field-ai-tip',
+    group: 'ai',
+    keywords: ['气泡', '提示', '引导', '新手', '关掉', '不再提示', '悬浮'],
   },
 
   // ---- 导出

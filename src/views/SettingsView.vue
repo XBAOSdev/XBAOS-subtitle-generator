@@ -9,6 +9,11 @@ import { buildWrapWords } from '@/utils/wrapWords'
 import { COMMON_WORDS, COMMON_WORD_GROUPS } from '@/data/commonWords'
 import { LEXICONS } from '@/data/lexicons'
 import {
+  SCRIPT_STRENGTH_OPTIONS,
+  normalizeStrength,
+  strengthOption,
+} from '@/data/scriptStrength'
+import {
   SETTINGS_GROUPS,
   entryCountOf,
   groupOfDomId,
@@ -33,6 +38,14 @@ const activeWrapCount = computed(
   () => buildWrapWords(settings.lexiconIds, settings.promptTerms).length,
 )
 const wordbookOpen = ref(false)
+
+/** 当前档位的解释文字。越界值先夹一次，旧存档里的脏值不该让设置页崩 */
+const activeStrength = computed(() => strengthOption(settings.aiScriptStrength))
+
+/** 滑块给的是字符串，写回 store 前必须夹成 0..3 的整数 */
+function onStrengthInput(event: Event): void {
+  settings.aiScriptStrength = normalizeStrength(Number((event.target as HTMLInputElement).value))
+}
 
 const bridge = window.xbaos
 
@@ -680,6 +693,57 @@ function reset(): void {
                   <span class="switch__track" />
                   <span>启用单条最长时长限制</span>
                 </label>
+              </div>
+            </section>
+          </div>
+
+          <!-- ------------------------------------------------------ AI 辅助 -->
+          <div v-show="ui.settingsGroup === 'ai'" class="setgroup">
+            <section id="sec-ai" class="block">
+              <div class="block__head">
+                <Icon name="spell-check" :size="14" />
+                <span class="block__title">AI 校对</span>
+              </div>
+              <div class="block__body">
+                <p id="field-ai-strength" class="field__label">原文案参考强度</p>
+                <div class="levels">
+                  <input
+                    class="levels__input"
+                    type="range"
+                    min="0"
+                    max="3"
+                    step="1"
+                    :value="settings.aiScriptStrength"
+                    aria-label="原文案参考强度"
+                    @input="onStrengthInput"
+                  />
+                  <div class="levels__ticks">
+                    <button
+                      v-for="item in SCRIPT_STRENGTH_OPTIONS"
+                      :key="item.value"
+                      class="levels__tick"
+                      :class="{ 'is-on': settings.aiScriptStrength === item.value }"
+                      type="button"
+                      @click="settings.aiScriptStrength = item.value"
+                    >
+                      {{ item.label }}
+                    </button>
+                  </div>
+                </div>
+                <p class="field__hint">{{ activeStrength.hint }}</p>
+                <p class="field__hint">
+                  只在 AI 校对的提示词里粘贴了原文稿时起作用；不贴文稿时这一项不影响结果。
+                </p>
+
+                <label id="field-ai-tip" class="switch tip-switch">
+                  <input v-model="settings.aiReviewTipEnabled" type="checkbox" />
+                  <span class="switch__track" />
+                  <span>在编辑器显示「AI 校对」引导提示</span>
+                </label>
+                <p class="hint">
+                  识别完成后，编辑器底部「AI 校对」按钮上方会出现一段提示。关掉后不再出现；
+                  重新打开时会连「不再提示」一起复位。
+                </p>
               </div>
             </section>
           </div>
@@ -1356,6 +1420,10 @@ function reset(): void {
 
 .glass-switch {
   margin-top: var(--space-4);
+}
+
+.tip-switch {
+  margin-top: var(--space-5);
 }
 
 .shortcuts {
