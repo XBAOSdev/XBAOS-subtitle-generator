@@ -19,6 +19,7 @@ import { depthPreset } from '@/utils/reasoningDepth'
 import { mergeRuns, runText, type RecognitionRun } from '@/utils/transcriptMerge'
 import { applyRescue, planRescueRanges, RESCUE_BEAM_SIZE } from '@/utils/lowConfRescue'
 import { applyLineWrap } from '@/utils/lineWrap'
+import { buildWrapWords } from '@/utils/wrapWords'
 import { vadPreset } from '@/data/vadPresets'
 import {
   applyTranslation as applyTranslationTo,
@@ -1307,6 +1308,8 @@ const MIME_BY_EXT: Record<string, string> = {
           maxCharsPerLine: settings.maxCharsPerLine,
           maxCharsPerLineEn: settings.maxCharsPerLineEn,
           maxLinesPerSegment: settings.maxLinesPerSegment,
+          // 词表决定切点落在哪，不改变任何文字：常用词 + 选中词库 + 手填术语
+          wrapWords: buildWrapWords(settings.lexiconIds, settings.promptTerms),
         })
 
         /*

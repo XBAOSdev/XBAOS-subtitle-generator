@@ -20,18 +20,20 @@
     --color-bg-selected: #2c2c2c;
 
     /*
-     * 毛玻璃标题栏（细则见 theme-light.css 同名注释）。
-     * 深色下比浅色**更薄**：材质本来就暗，遮罩一厚就完全看不出透明，
-     * 只剩一条和内容区一样的黑带 —— 这正是「深色没效果」的原因。
+     * 毛玻璃（三档语义与浅色一致，见 theme-light.css 对应注释）。
+     * 深色下每一档都比浅色**再透一档**：材质本来就暗，遮罩一厚就完全看不出透明，
+     * 只剩一条和内容区一样的黑带 —— 这正是「深色没效果」的由来。
+     * 但差距不能拉太开：上一版框架条 0.62、内容区 0.91，中间空掉一大截，
+     * 看上去像两条不同的界面拼在一起。现在收成 0.66 → 0.78 → 0.905 的连续梯度。
      */
-    --glass-titlebar-bg: color-mix(in srgb, var(--color-bg-base) 62%, transparent);
-    --glass-titlebar-sheen: rgba(255, 255, 255, 0.06);
-    --glass-titlebar-border: color-mix(in srgb, var(--color-border) 45%, transparent);
-    /* 壳层同样只留一成左右的透出量，两级拆分的理由见 theme-light.css */
-    --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 78%, transparent);
-    --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 58%, transparent);
+    --glass-chrome-bg: color-mix(in srgb, var(--color-bg-base) 66%, transparent);
+    --glass-nav-bg: color-mix(in srgb, var(--color-bg-base) 78%, transparent);
+    --glass-chrome-sheen: rgba(255, 255, 255, 0.06);
+    --glass-chrome-border: color-mix(in srgb, var(--color-border) 45%, transparent);
+    /* 外壳与框架条同值（页脚条透到它上面正好是同一档），内层 0.72 两级拆分的理由见浅色注释 */
+    --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 66%, transparent);
+    --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 72%, transparent);
     --glass-app-bg: color-mix(in srgb, var(--color-bg-base) 90%, transparent);
-    --glass-panel-bg: color-mix(in srgb, var(--color-bg-surface) 88%, transparent);
     /* 深色下用深色光晕，浅色下用白色光晕 */
     --glass-text-halo: rgba(0, 0, 0, 0.5);
 
@@ -127,14 +129,14 @@
   --color-border-strong: #454545;
   --color-border-subtle: #242424;
 
-  /* 毛玻璃标题栏：数值须与上面的媒体查询块保持一致（两处都要改） */
-  --glass-titlebar-bg: color-mix(in srgb, var(--color-bg-base) 62%, transparent);
-  --glass-titlebar-sheen: rgba(255, 255, 255, 0.06);
-  --glass-titlebar-border: color-mix(in srgb, var(--color-border) 45%, transparent);
-  --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 78%, transparent);
-  --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 58%, transparent);
+  /* 毛玻璃三档：数值须与上面的媒体查询块保持一致（两处都要改） */
+  --glass-chrome-bg: color-mix(in srgb, var(--color-bg-base) 66%, transparent);
+  --glass-nav-bg: color-mix(in srgb, var(--color-bg-base) 78%, transparent);
+  --glass-chrome-sheen: rgba(255, 255, 255, 0.06);
+  --glass-chrome-border: color-mix(in srgb, var(--color-border) 45%, transparent);
+  --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 66%, transparent);
+  --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 72%, transparent);
   --glass-app-bg: color-mix(in srgb, var(--color-bg-base) 90%, transparent);
-  --glass-panel-bg: color-mix(in srgb, var(--color-bg-surface) 88%, transparent);
   --glass-text-halo: rgba(0, 0, 0, 0.5);
 
   --color-text-primary: #e6e6e6;

@@ -1447,9 +1447,11 @@ const scenarios = {
           appAlpha: alphaOf('.app'),
           // 两级壳层：外壳遮罩 + 内容区遮罩，乘起来才是内容区实际的材质透出量
           shellAlpha: alphaOf('.app__main'),
-          regionAlpha: alphaOf('.view__body'),
-          // 侧栏/状态条（面板色，直接压在材质上或外壳上）
+          // 设置页没有 .view__body（内容区拆成了左分组栏 + 右表单），右侧表单区才是那一级
+          regionAlpha: alphaOf('.view__body, .setmain'),
+          // 侧栏/状态条/分组栏：导航面板与框架条各一档，必须两两同值
           sidebarAlpha: alphaOf('.sidebar'),
+          navAlpha: alphaOf('.setnav'),
           statusAlpha: alphaOf('.statusbar'),
           // 卡片必须仍然不透明，否则正文可读性没了
           cardAlpha: alphaOf('.block, .panel, .step'),
@@ -1476,7 +1478,7 @@ const scenarios = {
 
     const dark = await veilOf('dark')
     check('深色：玻璃层更薄（比浅色更透，否则看不出效果）', dark.glass.alpha < light.glass.alpha, `dark=${dark.glass.alpha} light=${light.glass.alpha}`)
-    check('深色：玻璃层确实半透明', dark.glass.alpha > 0.25 && dark.glass.alpha < 0.65, JSON.stringify(dark))
+    check('深色：玻璃层确实半透明', dark.glass.alpha > 0.5 && dark.glass.alpha < 0.75, JSON.stringify(dark))
 
     // ---- 标题栏下方整块界面：有玻璃味但不能喧宾夺主 ----
     check('外壳不铺底（两层半透明相叠等于没材质）', light.glass.appAlpha === 0, String(light.glass.appAlpha))
@@ -1493,8 +1495,30 @@ const scenarios = {
         (1 - light.glass.shellAlpha) * (1 - light.glass.regionAlpha) < 0.15,
       `透出 ${(((1 - light.glass.shellAlpha) * (1 - light.glass.regionAlpha)) * 100).toFixed(1)}%`,
     )
-    check('侧栏同为极淡玻璃', light.glass.sidebarAlpha > 0.85 && light.glass.sidebarAlpha < 0.98, String(light.glass.sidebarAlpha))
-    check('状态条同为极淡玻璃', light.glass.statusAlpha > 0.85 && light.glass.statusAlpha < 0.98, String(light.glass.statusAlpha))
+    /*
+     * 三档统一（2026-11-01）：框架条（标题栏 = 状态条）> 导航面板（侧栏 = 分组栏）> 内容画布。
+     * 改成「同档同值」是为了掐死那种「左白右灰中间实心」的拼贴感 —— 只断言「都是半透明」
+     * 是不够的，各区域各自半透明但互不相等，看着照样不统一。
+     */
+    check(
+      '状态条与标题栏同档（框架条）',
+      Math.abs(light.glass.statusAlpha - light.glass.alpha) < 0.02,
+      `status=${light.glass.statusAlpha} title=${light.glass.alpha}`,
+    )
+    check(
+      '侧栏与分组栏同档（导航面板）',
+      Math.abs(light.glass.navAlpha - light.glass.sidebarAlpha) < 0.02,
+      `nav=${light.glass.navAlpha} sidebar=${light.glass.sidebarAlpha}`,
+    )
+    check(
+      '导航面板比框架条实、比内容区透（三档单调）',
+      light.glass.sidebarAlpha > light.glass.alpha &&
+        light.glass.sidebarAlpha < 1 - (1 - light.glass.shellAlpha) * (1 - light.glass.regionAlpha),
+      `chrome=${light.glass.alpha} nav=${light.glass.sidebarAlpha} canvas=${(
+        1 -
+        (1 - light.glass.shellAlpha) * (1 - light.glass.regionAlpha)
+      ).toFixed(3)}`,
+    )
     check('卡片保持不透明（正文可读性优先）', light.glass.cardAlpha === 1, String(light.glass.cardAlpha))
     check(
       '深色壳层同样是两级',
@@ -1586,14 +1610,26 @@ const scenarios = {
     await shot(cdp, 'probe-glass-setting.png')
 
     /*
-     * 再出一张「玻璃模式」的截图：浏览器里没有系统材质，这里垫一块代表材质的
-     * 纯色当替身，就能看出「遮罩 + 材质色」叠起来到底什么观感 —— 光看计算值
-     * 判断不了「深浅两套色调是否协调」。浅色用浅材质、深色用深材质分别出图。
+     * 再出一张「玻璃模式」的截图：浏览器里没有系统材质，这里垫一块替身壁纸
+     * 当材质，就能看出「遮罩 + 材质」叠起来到底什么观感 —— 光看计算值判断不了
+     * 「深浅两套色调是否协调」。
+     *
+     * 替身**必须是带明暗的模糊画面，不能是纯色**：内容区透出量只有 6%~7%，
+     * 纯色垫在底下几乎看不出任何差异，会让人误判成「玻璃没生效」或「分层没区别」；
+     * 真实桌面有亮有暗，透出来的正是那份明暗差 —— 那才是判断平不平衡的依据。
      */
-    for (const [theme, mat, name, view] of [
-      ['light', '#8e9aa6', 'probe-glass-light.png', '&view=settings'],
-      ['light', '#8e9aa6', 'probe-glass-import.png', ''],
-      ['dark', '#2b333c', 'probe-glass-dark.png', '&view=settings'],
+    // 单行拼接：这段要嵌进 evaluate 的字符串字面量里，换行会让整段注入语法错误
+    const MATERIAL = [
+      'radial-gradient(45% 40% at 18% 22%, #22303d 0%, rgba(34,48,61,0) 62%)',
+      'radial-gradient(40% 45% at 78% 74%, #b3623c 0%, rgba(179,98,60,0) 60%)',
+      'radial-gradient(35% 30% at 62% 12%, #efe4d2 0%, rgba(239,228,210,0) 58%)',
+      'radial-gradient(30% 35% at 40% 88%, #101820 0%, rgba(16,24,32,0) 60%)',
+      'linear-gradient(135deg, #56697c 0%, #93a4b3 100%)',
+    ].join(', ')
+    for (const [theme, name, view] of [
+      ['light', 'probe-glass-light.png', '&view=settings'],
+      ['light', 'probe-glass-import.png', ''],
+      ['dark', 'probe-glass-dark.png', '&view=settings'],
     ]) {
       await goto(cdp, `${BASE}/?demo=1&theme=${theme}${view}`)
       await sleep(500)
@@ -1601,7 +1637,10 @@ const scenarios = {
         document.documentElement.classList.add('glass')
         const sheet = document.createElement('div')
         sheet.id = 'probe-material'
-        sheet.style.cssText = 'position:fixed;inset:0;z-index:-1;background:${mat}'
+        sheet.style.cssText =
+          'position:fixed;inset:-60px;z-index:-1;pointer-events:none;' +
+          'filter:blur(26px) saturate(1.05);' +
+          'background:${MATERIAL}'
         document.body.appendChild(sheet)
         return true
       })()`)
@@ -1613,6 +1652,174 @@ const scenarios = {
         return true
       })()`)
     }
+  },
+
+  /**
+   * 设置页：左侧二级菜单 + 顶部搜索 + 内置词表查看器。
+   *
+   * 这一套的坑集中在「元素藏在 display:none 里」：分组用 v-show 切换，
+   * 未激活的区块仍在 DOM 里（搜索与深链要能找到），但 `scrollIntoView`
+   * 对它们无效。所以跳转必须先切分组、下一帧再滚 —— 只走一半就会表现为
+   * 「点了搜索结果是没反应」，而 DOM 查询一切正常，很难看出来。
+   */
+  async 'settings-nav'(cdp) {
+    const centerOf = (js) =>
+      cdp.evaluate(`(() => {
+        const el = ${js}
+        if (!el) return null
+        el.scrollIntoView({ block: 'center' })
+        const r = el.getBoundingClientRect()
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      })()`)
+
+    const click = async (js) => {
+      const p = await centerOf(js)
+      if (p) await cdp.click(p.x, p.y)
+      await sleep(320)
+    }
+
+    const navItem = (label) =>
+      `[...document.querySelectorAll('.setnav__item')].find((b) => b.textContent.includes('${label}'))`
+    const sidebarItem = (label) =>
+      `[...document.querySelectorAll('.sidebar__item')].find((b) => b.textContent.includes('${label}'))`
+
+    /** 当前可见的分组（v-show 隐藏的仍是 DOM，offsetParent 才是判据） */
+    const visibleGroups = () =>
+      cdp.evaluate(
+        `[...document.querySelectorAll('.setgroup')].filter((g) => g.offsetParent !== null).length`,
+      )
+    const activeGroup = () =>
+      cdp.evaluate(
+        `document.querySelector('.setnav__item.is-active')?.textContent.replace(/\\s+/g, '') ?? ''`,
+      )
+    const typeSearch = (text) =>
+      cdp.evaluate(`(() => {
+        const input = document.querySelector('.setsearch__input')
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+        setter.call(input, ${JSON.stringify(text)})
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()`)
+
+    await goto(cdp, BASE + '/?demo=1&view=settings&theme=light')
+
+    // ---- 二级菜单
+    const groups = await cdp.evaluate(
+      `[...document.querySelectorAll('.setnav__item')].map((b) => b.textContent.replace(/\\s+/g, ''))`,
+    )
+    check('设置页有左侧分组导航', groups.length === 7, JSON.stringify(groups))
+    check('默认停在外观组', (await activeGroup()).includes('外观'), await activeGroup())
+    check('同屏只显示一个分组', (await visibleGroups()) === 1, String(await visibleGroups()))
+
+    // 隐藏的区块必须仍在 DOM 里：搜索与深链都靠全局查询找元素
+    check(
+      '未激活分组仍保留在 DOM（只是不显示）',
+      (await cdp.evaluate(`document.querySelectorAll('.setgroup').length`)) === 7,
+      String(await cdp.evaluate(`document.querySelectorAll('.setgroup').length`)),
+    )
+
+    await click(navItem('词表'))
+    check('点分组能切换内容', (await activeGroup()).includes('词表'), await activeGroup())
+    check('切换后仍是单组可见', (await visibleGroups()) === 1, String(await visibleGroups()))
+
+    // ---- 搜索：命中设置项 → 切分组 + 高亮
+    await typeSearch('编码')
+    const hits = await cdp.evaluate(
+      `[...document.querySelectorAll('.setsearch__item')].map((b) => b.textContent.replace(/\\s+/g, ''))`,
+    )
+    check('搜索出候选面板', hits.length > 0, JSON.stringify(hits))
+    check('搜「编码」直接命中默认编码', hits.some((h) => h.includes('默认编码')), JSON.stringify(hits))
+
+    await click(`document.querySelector('.setsearch__item')`)
+    check('点搜索结果切到所属分组', (await activeGroup()).includes('导出'), await activeGroup())
+    const flashed = await cdp.evaluate(`(() => {
+      const el = document.getElementById('field-export-encoding')
+      return el ? el.classList.contains('is-flash') : false
+    })()`)
+    check('跳转后目标控件被高亮', flashed === true)
+
+    // 换一个词：验证同义词命中 + 跨组跳转
+    await typeSearch('毛玻璃')
+    await click(`document.querySelector('.setsearch__item')`)
+    check('同义词也能跳回外观组', (await activeGroup()).includes('外观'), await activeGroup())
+
+    await typeSearch('这个词肯定搜不到')
+    const empty = await cdp.evaluate(
+      `document.querySelector('.setsearch__empty')?.textContent.trim() ?? ''`,
+    )
+    check('无结果时给出空态文案', empty.includes('没有匹配'), empty)
+    await cdp.evaluate(`(() => {
+      document.querySelector('.setsearch__clear')?.click()
+      return true
+    })()`)
+    await sleep(200)
+
+    // ---- 分组记忆：会话内切页回来还在原组（存 store，重启不复位也算符合预期）
+    await click(navItem('快捷键'))
+    await click(sidebarItem('导入'))
+    await click(sidebarItem('设置'))
+    check('切页回来仍停在原分组', (await activeGroup()).includes('快捷键'), await activeGroup())
+
+    // ---- 内置词表查看器（只读）
+    await click(navItem('词表'))
+    await click(
+      `[...document.querySelectorAll('#sec-wordbook .btn')].find((b) => b.textContent.includes('查看词表内容'))`,
+    )
+    const book = await cdp.evaluate(`(() => {
+      const wb = document.querySelector('.wb')
+      if (!wb) return null
+      return {
+        tabs: [...wb.querySelectorAll('.wb__tab')].map((t) => t.textContent.replace(/\\s+/g, '')),
+        words: wb.querySelectorAll('.wb__word').length,
+        sections: wb.querySelectorAll('.wb__section').length,
+      }
+    })()`)
+    check('打开内置词表弹窗', !!book, JSON.stringify(book))
+    check(
+      '词表弹窗列出常用词库与各领域词库',
+      !!book && book.tabs.length === 6,
+      JSON.stringify(book?.tabs),
+    )
+    check(
+      '常用词库按语类分节展示',
+      !!book && book.sections >= 10 && book.words > 500,
+      JSON.stringify(book),
+    )
+
+    await click(`[...document.querySelectorAll('.wb__tab')].find((b) => b.textContent.includes('数码科技'))`)
+    const state = await cdp.evaluate(
+      `document.querySelector('.wb__state')?.textContent.replace(/\\s+/g, '') ?? ''`,
+    )
+    check('领域词库标明是否已勾选', /勾选/.test(state), state)
+    await cdp.evaluate(`(() => {
+      const input = document.querySelector('.wb__search-input')
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+      setter.call(input, '固态')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    await sleep(300)
+    const filtered = await cdp.evaluate(
+      `[...document.querySelectorAll('.wb__word')].map((w) => w.textContent)`,
+    )
+    check(
+      '词表内查找能筛选词条',
+      filtered.length > 0 && filtered.every((w) => w.includes('固态')),
+      JSON.stringify(filtered),
+    )
+
+    await click(`[...document.querySelectorAll('.wb__foot .btn')].find((b) => b.textContent.includes('关闭'))`)
+    check(
+      '关闭按钮能收起弹窗',
+      (await cdp.evaluate(`!!document.querySelector('.wb')`)) === false,
+    )
+
+    await shot(cdp, 'probe-settings-nav.png')
+
+    await cdp.evaluate(`(() => {
+      Object.keys(localStorage).filter((k) => k.startsWith('xbaos.settings')).forEach((k) => localStorage.removeItem(k))
+      return true
+    })()`)
   },
 
   async 'accuracy-settings'(cdp) {
@@ -3048,9 +3255,11 @@ const scenarios = {
           }
         })
         const currentEl = document.querySelector('.own__current')
+        // 页面里已经不再渲染 .view__title（页名改由窗口标题栏正中显示），
+        // 判「当前在哪一页」统一读 .titlebar__view
         return {
-          title: document.querySelector('.view__title')
-            ? document.querySelector('.view__title').textContent.trim()
+          title: document.querySelector('.titlebar__view')
+            ? document.querySelector('.titlebar__view').textContent.trim()
             : '',
           builtins,
           activeBuiltin: builtins.filter((b) => b.active).map((b) => b.name),

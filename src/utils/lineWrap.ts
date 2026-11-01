@@ -10,12 +10,23 @@
  *   ① **折行**：一条的文本能装进 maxLines 行 → 原条目文本改为用 `\n` 分行；
  *   ② **拆分**：折不完 → 按宽度比例切时间，拆成多条字幕（每条内部仍分行）。
  *
- * 断点偏好：优先在中文标点后断行，其次空格，都没有才硬切（CJK 逐字断，
- * 英文单词绝不从中间断）。宽度口径与 validate.ts 一致：汉字 2、其余 1。
+ * ## 断点怎么选
  *
- * 硬切会留下「装满的行 + 一两个字」的零头，而单条只允许 1 行时零头就是
- * 独立的一条字幕、时间只能按宽度分到零点几秒。所以切完还要过一道
- * `balanceLines`，把零头匀回前一行。已含 `\n` 的文本按段处理，段间不再合并。
+ * 中文没有词间空格，按宽度硬切必然切进词里 —— 「二进制并不适合我 /
+ * 们日常的计算和交流」。所以断点不是「装满就切」，而是**枚举容量内的每个
+ * 原子边界、逐个打分取最高**，优先级从高到低：
+ *
+ *   ① 不落在词内部（靠 `wrapWords` 词表命中的区间判断）
+ *   ② 行首不是后缀助词（们的了着过吗呢吧…）
+ *   ③ 行尾不是前置虚词（第每哪不就还已被把…）与数词
+ *   ④ 落在中文标点之后
+ *   ⑤ 落在空格处
+ *   ⑥ 宽度接近满行（纯粹的观感项，权重最低）
+ *
+ * 词表是可选输入：不传就退化成纯宽度折行（老行为），传了就按上面优先级走。
+ * 词表只影响「切在哪里」，**不增删任何一个字** —— 行数、总字数恒等于输入。
+ *
+ * 已含 `\n` 的文本按段处理，段间不再合并，手工排版得以保留。
  */
 
 import type { SubtitleSegment } from '@/types'
@@ -29,6 +40,23 @@ const CJK = /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/
 /** 这些标点之后是天然的断行点（从优到劣：句末 > 句中） */
 const BREAK_AFTER = /^[。！？；，、：…）》」』”]/
 
+/**
+ * 行首禁则：后缀性助词与语气词。它们几乎不可能作为词的开头，出现在行首
+ * 必然意味着上一个词被劈开了（「我们」→「我 / 们」）。
+ */
+const NO_LINE_START = new Set('们的了着过吗呢吧啊嘛呀哦')
+
+/**
+ * 行尾禁则：前置性虚词、副词与数词。这些字后面必须跟字才能成词
+ * （「不就」「还」「第」「被」），作行尾同样是拆词信号。
+ * 只收**单字用法占绝对多数**的字 —— 像「个」「为」「于」「和」虽然偶尔
+ * 能结尾（一个 / 因为 / 总和），但误伤代价只是切点挪一格，仍值得收录。
+ */
+const NO_LINE_END = new Set('第每哪某不很太更最都也还就刚已被把让对向从这那些而但或')
+
+/** 词表匹配窗口上限：常用词与术语最多 6 字，再长不收 */
+const MAX_WORD_ATOMS = 6
+
 export interface LineWrapSpec {
   /** 中文单行最大字数（宽度上限 = 字数 × 2） */
   maxCharsPerLine: number
@@ -36,6 +64,11 @@ export interface LineWrapSpec {
   maxCharsPerLineEn: number
   /** 单条最多行数 */
   maxLinesPerSegment: number
+  /**
+   * 断句词表：落在这些词内部的切点会被强烈扣分。
+   * 不传时退化为纯宽度折行。词表**只影响断点位置**，不改变任何文字。
+   */
+  wrapWords?: readonly string[]
 }
 
 export interface LineWrapResult {
@@ -89,7 +122,7 @@ function tokenize(text: string): Atom[] {
     }
     if (CJK.test(ch)) {
       flush()
-      atoms.push({ text: ch, width: CJK.test(ch) ? 2 : 1 })
+      atoms.push({ text: ch, width: 2 })
       continue
     }
     word += ch
@@ -110,114 +143,145 @@ function atomsWidth(atoms: Atom[]): number {
   return atoms.reduce((sum, a) => sum + a.width, 0)
 }
 
-/** 需要空格分隔的原子（英文单词、数字），CJK 与空格本身不算 */
-function isWordAtom(atom: Atom): boolean {
-  return atom.text !== ' ' && !CJK.test(atom.text[0])
-}
-
 /**
- * 尾行过短时，从前一行尾部匀一部分原子过来。
+ * 标出「不可切」的位置：落在词表命中的词内部即为不可切。
  *
- * 硬切只会把文本切成「装满的行 + 零头」，零头常常只有一两个字；当
- * `maxLinesPerSegment` 为 1 时每个零头都会变成独立的一条字幕，时间按宽度
- * 占比只能分到零点几秒 —— 观众看到的就是「一条只有 0.17 秒的单字字幕」。
+ * 只对单字原子（CJK）做匹配 —— 英文单词本身就是一个不可分的原子，
+ * 天然不会被切开，不需要也不应该参与这里的判断。
  *
- * 这里只做局部搬运：某行宽度不足半行时，从它前面那一行搬原子过来，直到
- * 接近两行的均值（且不超过容量）。行数、条数、总字数都不变，前一行至少
- * 留一个原子，所以搬完不会出现空行。两行都不满半行时不动 —— 那时搬了
- * 也不改善观感，反而把断句弄乱。
+ * 采用最长匹配：同一位置能匹配到 4 字词时不再退去看 2 字词，否则
+ * 「计算和交流」里的「计算」会被「和交」这样的假词干扰。
  */
-function balanceLines(lines: Atom[][], capacity: number): Atom[][] {
-  if (lines.length < 2) return lines
-  const minWidth = capacity / 2
-  // 原子数组会被 pop/unshift，逐行拷一份，别改到调用方的数据
-  const out = lines.map((atomsOfLine) => atomsOfLine.slice())
+function markWordCuts(atoms: Atom[], words: Set<string>): Set<number> {
+  const bad = new Set<number>()
+  const n = atoms.length
+  let i = 0
 
-  for (let i = out.length - 1; i >= 1; i -= 1) {
-    const cur = out[i]
-    const curW = atomsWidth(cur)
-    if (curW >= minWidth) continue
-
-    const prev = out[i - 1]
-    const prevW = atomsWidth(prev)
-    if (prevW <= minWidth) continue
-
-    const target = Math.min(capacity, (prevW + curW) / 2)
-    let filled = curW
-    let remain = prevW
-    while (filled < target && prev.length > 1) {
-      const next = prev[prev.length - 1]
-      // 标点属于前一句，搬到下一行开头会变成「，很多人」这种断句
-      if (BREAK_AFTER.test(next.text)) break
-      const spacer = isWordAtom(next) && cur.length > 0 && isWordAtom(cur[0]) ? 1 : 0
-      const move = spacer + next.width
-      // 搬过来会把这一行顶出容量上限时就不搬 —— 平衡的目的不是造超宽条目
-      if (filled + move > capacity) break
-      // 搬走之后前一行不能跌破半行，否则只是把短行从尾巴挪到了中间
-      if (remain - move < minWidth) break
-      prev.pop()
-      remain -= next.width
-      filled += move
-      if (spacer) {
-        // 英文单词紧挨英文单词时必须补空格，否则两个词会粘成一个
-        cur.unshift({ text: ' ', width: 1 })
+  while (i < n) {
+    let matched = 0
+    const maxLen = Math.min(MAX_WORD_ATOMS, n - i)
+    for (let len = maxLen; len >= 2; len -= 1) {
+      let text = ''
+      let usable = true
+      for (let k = 0; k < len; k += 1) {
+        const atom = atoms[i + k]
+        // 空格与英文单词会打断中文词，不能跨过去匹配
+        if (atom.text.length !== 1 || atom.text === ' ') {
+          usable = false
+          break
+        }
+        text += atom.text
       }
-      cur.unshift(next)
+      if (!usable) continue
+      if (words.has(text)) {
+        matched = len
+        break
+      }
+    }
+
+    if (matched > 0) {
+      for (let k = 1; k < matched; k += 1) bad.add(i + k)
+      i += matched
+    } else {
+      i += 1
     }
   }
 
-  return out
+  return bad
+}
+
+/**
+ * 给「在 cut 处断行」打分。分数越高越该在这里断。
+ *
+ * 权重是按「宁可两条宽度不匀，也不把词切开」定的：词边界与禁则的惩罚
+ * 比宽度项高两个数量级，所以只要存在一个合法切点，就不会选到词内部去。
+ */
+function cutScore(
+  atoms: Atom[],
+  cut: number,
+  capacity: number,
+  prefix: number[],
+  badWords: Set<number> | null,
+): number {
+  const last = atoms[cut - 1]
+  const first = atoms[cut]
+  const leftW = prefix[cut]
+  const rightW = prefix[atoms.length] - prefix[cut]
+
+  let score = 0
+
+  if (BREAK_AFTER.test(last.text)) score += 800
+  else if (last.text === ' ' || first.text === ' ') score += 400
+
+  if (badWords && badWords.has(cut)) score -= 8000
+  if (NO_LINE_START.has(first.text[0])) score -= 12000
+  if (NO_LINE_END.has(last.text[last.text.length - 1])) score -= 2500
+
+  // 一行只剩几个字，观感上同样是「断错了」—— 但代价远低于拆词
+  if (Math.min(leftW, rightW) < capacity * 0.3) score -= 400
+
+  /*
+   * 宽度目标随剩余量变化：
+   *   只剩两行 → 按均分，避免「第一行挤满、第二行只剩几个字」；
+   *   还有三行以上 → 按装满，把容量留给后续行，否则越折越碎。
+   */
+  const restW = prefix[atoms.length]
+  const ideal = restW <= capacity * 2 ? restW / 2 : capacity
+  score -= Math.abs(leftW - ideal) * 5
+
+  return score
+}
+
+/**
+ * 按容量切行。词表为空时等价于「装满就切」的老行为。
+ */
+function breakAtoms(atoms: Atom[], capacity: number, words: Set<string> | null): string[] {
+  const lines: string[] = []
+  let rest = atoms
+
+  while (atomsWidth(rest) > capacity) {
+    const prefix: number[] = [0]
+    for (const atom of rest) prefix.push(prefix[prefix.length - 1] + atom.width)
+    const badWords = words && words.size > 0 ? markWordCuts(rest, words) : null
+
+    let bestCut = 1
+    let bestScore = -Infinity
+    for (let cut = 1; cut < rest.length; cut += 1) {
+      // 切点本身超出容量就没资格参与比较（超宽单词由 cut = 1 兜底）
+      if (prefix[cut] > capacity) break
+      const score = cutScore(rest, cut, capacity, prefix, badWords)
+      if (score > bestScore) {
+        bestScore = score
+        bestCut = cut
+      }
+    }
+
+    const line = render(rest.slice(0, bestCut))
+    if (line) lines.push(line)
+    rest = rest.slice(bestCut)
+    // 行首空格带过来没有意义，丢掉
+    while (rest.length > 0 && rest[0].text === ' ') rest = rest.slice(1)
+  }
+
+  const tail = render(rest)
+  if (tail) lines.push(tail)
+  return lines
 }
 
 /**
  * 把一行文本按宽度上限切成若干行。
- * 断点从优到劣：中文标点后 > 空格 > 硬切（单词不从中间断，宁可超宽）。
+ *
+ * @param wrapWords 断句词表。不传则退化为纯宽度折行。
  */
-export function breakIntoLines(text: string, capacity: number): string[] {
+export function breakIntoLines(
+  text: string,
+  capacity: number,
+  wrapWords?: readonly string[],
+): string[] {
   const flat = text.replace(/\s+/g, ' ').trim()
   if (!flat) return []
-  const atoms = tokenize(flat)
-
-  const lines: Atom[][] = []
-  let line: Atom[] = []
-  let lineW = 0
-
-  const pushLine = (atomsOfLine: Atom[]): void => {
-    if (render(atomsOfLine)) lines.push(atomsOfLine)
-  }
-
-  for (const atom of atoms) {
-    const overflow = lineW + atom.width > capacity && line.length > 0
-
-    if (overflow && atom.text === ' ') {
-      // 空格处断行最干净：当前行收尾，空格不带入下一行
-      pushLine(line)
-      line = []
-      lineW = 0
-      continue
-    }
-
-    if (overflow) {
-      // 从尾部往回找断点：上一个原子是中文标点 → 在它后面断；否则硬切
-      let cut = line.length
-      for (let i = line.length; i >= 1; i--) {
-        if (BREAK_AFTER.test(line[i - 1].text)) {
-          cut = i
-          break
-        }
-      }
-      pushLine(line.slice(0, cut))
-      line = line.slice(cut)
-      lineW = line.reduce((sum, a) => sum + a.width, 0)
-    }
-
-    line.push(atom)
-    lineW += atom.width
-  }
-  pushLine(line)
-
-  // 硬切留下的零头（常常只有一两个字）在这里匀回前一行
-  return balanceLines(lines, capacity).map(render)
+  const words = wrapWords && wrapWords.length > 0 ? new Set(wrapWords) : null
+  return breakAtoms(tokenize(flat), capacity, words)
 }
 
 function round3(v: number): number {
@@ -257,6 +321,8 @@ export function applyLineWrap(
   const capacityCjk = Math.max(4, spec.maxCharsPerLine) * 2
   const capacityEn = Math.max(8, spec.maxCharsPerLineEn)
   const maxLines = Math.max(1, spec.maxLinesPerSegment)
+  // 词表只构一次：一批几百条字幕，逐条 new Set 会把这个开销放大几百倍
+  const words = spec.wrapWords && spec.wrapWords.length > 0 ? new Set(spec.wrapWords) : null
 
   const out: SubtitleSegment[] = []
   let rewrapped = 0
@@ -277,10 +343,7 @@ export function applyLineWrap(
     }
 
     const capacity = isCjkDominant(parts.join('')) ? capacityCjk : capacityEn
-    const lines =
-      parts.length === 1
-        ? breakIntoLines(parts[0], capacity)
-        : parts.flatMap((part) => breakIntoLines(part, capacity))
+    const lines = parts.flatMap((part) => breakAtoms(tokenize(part), capacity, words))
     if (lines.length === 1 && lines[0] === seg.text) {
       out.push(seg)
       continue

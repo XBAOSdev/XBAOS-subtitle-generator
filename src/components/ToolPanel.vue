@@ -8,6 +8,7 @@ import { useEditorStore } from '@/stores/editor'
 import Icon from '@/components/Icon.vue'
 import { applyReplaceRules, parseReplaceDict } from '@/utils/dictReplace'
 import { applyLineWrap } from '@/utils/lineWrap'
+import { buildWrapWords } from '@/utils/wrapWords'
 import { SOURCE_SLOT, otherSlotsWithText } from '@/utils/segmentOps'
 import type { SubtitleSegment } from '@/types'
 
@@ -422,6 +423,8 @@ function rewrap(): void {
     maxCharsPerLine: settings.maxCharsPerLine,
     maxCharsPerLineEn: settings.maxCharsPerLineEn,
     maxLinesPerSegment: settings.maxLinesPerSegment,
+    // 与识别后处理同一套词表，否则「重新断行」会退回按宽度硬切
+    wrapWords: buildWrapWords(settings.lexiconIds, settings.promptTerms),
   })
 
   let changed = 0

@@ -222,15 +222,6 @@ async function start(event?: MouseEvent): Promise<void> {
 
 <template>
   <div class="view">
-    <header class="view__head">
-      <div class="view__head-inner">
-        <h1 class="view__title">导入音频</h1>
-        <p class="view__desc">
-          识别与导出全部在本机完成，不会上传任何文件。识别完成后先进入预览，确认无误再导出。
-        </p>
-      </div>
-    </header>
-
     <div class="view__body">
       <div class="view__body-inner">
         <div class="io">
@@ -249,9 +240,7 @@ async function start(event?: MouseEvent): Promise<void> {
                     <Icon name="type" :size="13" />
                     <span>导入字幕文件</span>
                   </button>
-                  <span class="hint">
-                    直接编辑已有的 SRT / VTT / ASS 字幕，改完可覆盖保存回原文件
-                  </span>
+                  <span class="hint">编辑已有字幕文件，可覆盖保存</span>
                 </div>
               </div>
             </section>
@@ -365,9 +354,7 @@ async function start(event?: MouseEvent): Promise<void> {
                   <span class="mode__icon"><Icon name="layers" :size="18" /></span>
                   <span class="mode__body">
                     <span class="mode__title">合并为一条时间轴</span>
-                    <span class="mode__hint">
-                      按导入顺序拼接，时间码依次累加，输出单个字幕文件
-                    </span>
+                    <span class="mode__hint">拼成一条时间轴，输出单个文件</span>
                   </span>
                   <span v-if="project.batchModeLocked" class="mode__lock">
                     <Icon name="lock" :size="11" />
@@ -386,7 +373,7 @@ async function start(event?: MouseEvent): Promise<void> {
                   <span class="mode__icon"><Icon name="list" :size="18" /></span>
                   <span class="mode__body">
                     <span class="mode__title">各自独立处理</span>
-                    <span class="mode__hint">每个音频单独识别，输出多个独立的字幕文件</span>
+                    <span class="mode__hint">各自输出多个文件</span>
                   </span>
                   <span v-if="project.batchModeLocked" class="mode__lock">
                     <Icon name="lock" :size="11" />
@@ -417,7 +404,6 @@ async function start(event?: MouseEvent): Promise<void> {
                       {{ item.label }}
                     </option>
                   </select>
-                  <span class="field__hint">固定为中文可避免误判成其他语言</span>
                 </label>
 
                 <div class="field">
@@ -491,7 +477,6 @@ async function start(event?: MouseEvent): Promise<void> {
                     rows="2"
                     placeholder="节目名、人名、专业术语，用换行或逗号分隔"
                   />
-                  <span class="field__hint">提示引擎这些词的写法，可提升专有名词准确率</span>
                 </label>
 
                 <details class="adv">

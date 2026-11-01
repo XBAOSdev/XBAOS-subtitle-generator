@@ -81,6 +81,17 @@ export const useUiStore = defineStore('ui', () => {
    */
   const settingsAnchor = ref<string | null>(null)
   /**
+   * 设置页当前所在的分组（左侧二级菜单）。
+   *
+   * 只存内存不写盘：会话内来回切页要停在上次那一组（调完字幕规格去看效果、
+   * 再回来不用重新点），但重开软件回到第一组更符合预期 —— 用户往往是从
+   * 头到尾扫一遍，而不是接着上次的位置。
+   *
+   * 放 store 而不是组件本地，是因为深链（模型页 → 模型存储位置）需要在
+   * 激活之前就指定分组，组件那时还没渲染。
+   */
+  const settingsGroup = ref<string>('appearance')
+  /**
    * AI 辅助窗口是否开着。
    *
    * 它存在期间主界面会被压暗并拦截交互 —— 「复制提示词 → 去网页 AI → 贴回来」
@@ -218,6 +229,7 @@ export const useUiStore = defineStore('ui', () => {
     dialog,
     dialogPayload,
     settingsAnchor,
+    settingsGroup,
     assistActive,
     recordActive,
     taskFlight,

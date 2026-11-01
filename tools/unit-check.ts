@@ -34,7 +34,15 @@ import {
   overflowLaneIds,
 } from '../src/utils/timelineLayout'
 import { countIssues, visibleIssues, widthUnits } from '../src/utils/validate'
-import { applyLineWrap } from '../src/utils/lineWrap'
+import { applyLineWrap, breakIntoLines } from '../src/utils/lineWrap'
+import { buildWrapWords } from '../src/utils/wrapWords'
+import { COMMON_WORDS, COMMON_WORD_GROUPS } from '../src/data/commonWords'
+import {
+  SETTINGS_ENTRIES,
+  SETTINGS_GROUPS,
+  groupOfDomId,
+  searchSettings,
+} from '../src/data/settingsMap'
 import { srtTime, serializeSrt, serializeAss, composeForExport, bundleLangTag, sourceLangTag } from '../src/utils/subtitle'
 import { planExport, pickTranslationLang, translationLangsOf, type PlanSource } from '../src/utils/exportPlan'
 import { parseSubtitle } from '../src/utils/subtitleParse'
@@ -1064,29 +1072,29 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     JSON.stringify(tail.segments.map((s) => Number((s.end - s.start).toFixed(3)))),
   )
   check(
-    '匀过之后两行宽度接近',
+    '两行宽度接近',
     Math.abs(widthUnits(tail.segments[0].text) - widthUnits(tail.segments[1].text)) <= 4,
     JSON.stringify(tail.segments.map((s) => widthUnits(s.text))),
   )
 
-  // 匀行要搬英文单词时，词与词之间的空格不能丢，否则会粘成一个不存在的词
+  // 英文断行落在词与词之间的空格上，不能把两个词粘成一个
   const enTail = applyLineWrap(
     [seg(0, 8, 'the quick brown fox jumps over the lazy dog and x')],
     { maxCharsPerLine: 8, maxCharsPerLineEn: 20, maxLinesPerSegment: 1 },
   )
   const enWords = enTail.segments.map((s) => s.text).join(' ').split(/\s+/)
   check(
-    '匀行搬词不粘连',
+    '英文断行不粘连',
     'the quick brown fox jumps over the lazy dog and x'.split(' ').every((w) => enWords.includes(w)),
     JSON.stringify(enTail.segments.map((s) => s.text)),
   )
   check(
-    '匀行不会造出超宽行',
+    '英文断行不超宽',
     enTail.segments.every((s) => s.text.length <= 20),
     JSON.stringify(enTail.segments.map((s) => s.text.length)),
   )
 
-  // 匀行不能把前一行末尾的标点搬到下一行开头：「览，很多人」比短尾行更刺眼
+  // 断行不能把前一行末尾的标点搬到下一行开头：「览，很多人」比短尾行更刺眼
   const punctTail = applyLineWrap([seg(0, 4, '我们今天聊聊无痕浏览，很多人其实都')], SPEC)
   check(
     '标点没被搬到行首或行中',
@@ -1140,6 +1148,82 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const withTr = { ...seg(0, 8, '这条字幕被折行了所以译文需要确认'), translations: { en: 'translated text' } }
   const flagged = applyLineWrap([withTr], { ...SPEC, maxCharsPerLine: 6 })
   check('折行后译文标红待确认', (flagged.segments[0].staleSlots ?? []).includes('en'), JSON.stringify(flagged.segments[0]))
+
+  /* ---- 断句词表：切点必须落在词边界 ---- */
+  /*
+   * 中文没有词间空格，纯按宽度切必然切进词里 —— 用户截图里的
+   * 「二进制并不适合我 / 们日常的计算和交流」就是这么来的。
+   * 词表只改切点位置，不增删任何文字。
+   */
+  const words = buildWrapWords([], '')
+
+  check('常用词库条数够用', COMMON_WORDS.length >= 800, String(COMMON_WORDS.length))
+  check(
+    '常用词库全是 2–6 字的含中文词',
+    COMMON_WORDS.every((w) => {
+      const len = Array.from(w).length
+      return len >= 2 && len <= 6 && /[\u3400-\u9fff]/.test(w)
+    }),
+  )
+
+  // 对照：不传词表时「不 / 把」被切开；传入词表后挪到「为什么」之后
+  const hard = seg(0, 6, '那微软为什么不把错误的标准改过来呢')
+  const plain = applyLineWrap([hard], SPEC)
+  const smart = applyLineWrap([hard], { ...SPEC, wrapWords: words })
+  check(
+    '无词表时按宽度均分（对照基线）',
+    plain.segments.map((s) => s.text).join('|') === '那微软为什么不把错|误的标准改过来呢',
+    plain.segments.map((s) => s.text).join('|'),
+  )
+  check(
+    '词表把切点拉回词边界',
+    smart.segments.map((s) => s.text).join('|') === '那微软为什么|不把错误的标准改过来呢',
+    smart.segments.map((s) => s.text).join('|'),
+  )
+  check('词表不增删任何一个字', smart.segments.map((s) => s.text).join('') === hard.text)
+  check('词表不改变条数', smart.segments.length === plain.segments.length)
+
+  // 常见搭配同样不能被横切
+  const equalCase = '很多人觉得打开这个模式就等于在互联网上穿上了隐身衣'
+  check(
+    '「等于」不被切开',
+    breakIntoLines(equalCase, 32, words).join('|') === '很多人觉得打开这个模式|就等于在互联网上穿上了隐身衣',
+    breakIntoLines(equalCase, 32, words).join('|'),
+  )
+  const stdCase = '但问题就在于这套标准真的被全面执行了吗'
+  check(
+    '「标准」不被切开',
+    breakIntoLines(stdCase, 32, words).join('|') === '但问题就在于这套标准|真的被全面执行了吗',
+    breakIntoLines(stdCase, 32, words).join('|'),
+  )
+
+  // 禁则：行首不能是后缀助词（「我们」被劈成「我 / 们」的直接特征）
+  const noStart = breakIntoLines('很多人觉得无痕浏览的模式其实没那么安全', 26, words)
+  check(
+    '行首不出现后缀助词',
+    noStart.every((line) => !/^[们的了着过吗呢吧啊嘛]/.test(line)),
+    JSON.stringify(noStart),
+  )
+
+  // 词表不能成为「造出超短行」的借口
+  const noFrag = applyLineWrap([seg(0, 4, '这样看来国际标准其实已经非常明确了')], {
+    ...SPEC,
+    wrapWords: words,
+  })
+  check(
+    '词表不让尾行变得过短',
+    noFrag.segments.every((s) => widthUnits(s.text) >= 12),
+    JSON.stringify(noFrag.segments.map((s) => [s.text, widthUnits(s.text)])),
+  )
+
+  /* ---- 词表合成规则 ---- */
+  check('勾选词库纳入其专属断句词', buildWrapWords(['tech'], '').includes('这一代'))
+  check('未勾选词库不纳入', !buildWrapWords([], '').includes('这一代'))
+  check('手填术语进入词表', buildWrapWords([], '分布式账本，区块链').includes('分布式账本'))
+  check(
+    '手填的单字与纯英文被过滤',
+    !buildWrapWords([], '的').includes('的') && !buildWrapWords([], 'abc').includes('abc'),
+  )
 }
 
 /* ---- 识别结果基线对齐（alignOrigin） ---- */
@@ -1298,6 +1382,22 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
 }
 
+/* ---- 断句词表与提示词必须完全隔离（源码扫描） ---- */
+/*
+ * 断句词表是「用户没说出口的偏好」：想让它保护断句，但绝不希望它影响转录。
+ * 一旦哪天有人图省事在 `prompt.ts` 里引用词表，领域词库的 core 预算就会被
+ * 悄悄撑大、转录结果跟着变 —— 这种回归在界面上看不出来，只能靠扫描钉死。
+ */
+{
+  const readSource = (rel: string): string =>
+    readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const promptSrc = readSource('src/utils/prompt.ts')
+  check('提示词构造不引用断句词表', !/wrapWords|COMMON_WORDS|commonWords/.test(promptSrc))
+  // 断行只吃调用方传进来的词表，不自己去读词库（否则「重新断行」和识别后处理会走两套口径）
+  const lineWrapSrc = readSource('src/utils/lineWrap.ts')
+  check('断行不直接读领域词库', !/from '@\/data\/lexicons'/.test(lineWrapSrc))
+}
+
 /* ---- 实验功能隐藏守门（源码扫描） ---- */
 {
   const readSource = (rel: string): string =>
@@ -1335,23 +1435,74 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
   const lightCss = readSource('src/styles/theme-light.css')
   const darkCss = readSource('src/styles/theme-dark.css')
+  /*
+   * 2026-11-01：玻璃从「四套语义 + 分组栏漏网」统一成三档（框架条 / 导航面板 / 内容画布）。
+   * 三档共用**同一个底色**，只差透出量 —— 掺 surface 就会回到「左白右灰」的色带问题。
+   * 这一组守的是：令牌齐全、两处深色块都改、三档单调（越靠边缘越透）、区域归位不漏。
+   */
+  const glassTiers = ['--glass-chrome-bg', '--glass-nav-bg', '--glass-shell-bg', '--glass-region-bg']
   check(
-    '浅色标题栏用主界面底色（用 surface 会拉出色带）',
-    lightCss.includes('--glass-titlebar-bg: color-mix(in srgb, var(--color-bg-base)'),
+    '浅色三档玻璃令牌齐全，且都用主界面底色调',
+    glassTiers.every((t) =>
+      lightCss.includes(`${t}: color-mix(in srgb, var(--color-bg-base)`),
+    ),
+    glassTiers.filter((t) => !lightCss.includes(`${t}:`)).join(','),
   )
   check(
-    '深浅两套标题栏遮罩同一底色系（色调才统一）',
-    darkCss.includes('--glass-titlebar-bg: color-mix(in srgb, var(--color-bg-base) 62%, transparent)'),
+    '玻璃遮罩一律不掺 surface（掺了就出现色带）',
+    !/--glass-(chrome|nav|shell|region)-bg:[^;]*--color-bg-surface/.test(lightCss) &&
+      !/--glass-(chrome|nav|shell|region)-bg:[^;]*--color-bg-surface/.test(darkCss),
   )
   // 深色主题有「媒体查询 + 显式选择器」两块，改一处必漏另一处
   check(
-    '深色两处块都定义了毛玻璃令牌',
-    darkCss.split('--glass-titlebar-bg').length - 1 === 2,
-    `出现 ${darkCss.split('--glass-titlebar-bg').length - 1} 次`,
+    '深色两处块都定义了四档玻璃令牌',
+    glassTiers.every((t) => darkCss.split(`${t}:`).length - 1 === 2),
+    glassTiers.map((t) => `${t}=${darkCss.split(`${t}:`).length - 1}`).join(' '),
+  )
+  const veilPct = (css: string, token: string): number => {
+    const hit = new RegExp(`${token}: color-mix\\(in srgb, var\\(--color-bg-base\\) (\\d+)%`).exec(css)
+    return hit ? Number(hit[1]) : NaN
+  }
+  const tierOf = (css: string) => ({
+    chrome: veilPct(css, '--glass-chrome-bg'),
+    nav: veilPct(css, '--glass-nav-bg'),
+    shell: veilPct(css, '--glass-shell-bg'),
+    region: veilPct(css, '--glass-region-bg'),
+  })
+  for (const [name, css] of [
+    ['浅色', lightCss],
+    ['深色', darkCss],
+  ] as const) {
+    const t = tierOf(css)
+    // 外壳与框架条同值：页脚条不铺底、直接吃外壳，数值不同就会和状态条差一档
+    check(`${name}：外壳遮罩与框架条同值（页脚条才对得上状态条）`, t.shell === t.chrome, `${t.shell} vs ${t.chrome}`)
+    check(`${name}：框架条比导航面板更透`, t.chrome < t.nav, `chrome=${t.chrome} nav=${t.nav}`)
+    // 内容画布是外壳 × 内层相乘，合成后必须比导航面板更实，否则正文压不住材质
+    const canvas = 1 - (1 - t.shell / 100) * (1 - t.region / 100)
+    check(
+      `${name}：内容画布合成后比导航面板更实`,
+      canvas > t.nav / 100,
+      `canvas=${(canvas * 100).toFixed(1)}% nav=${t.nav}%`,
+    )
+  }
+  check(
+    '深色每一档都比浅色更透（材质本就暗，遮罩一厚就没效果）',
+    (() => {
+      const l = tierOf(lightCss)
+      const d = tierOf(darkCss)
+      return d.chrome < l.chrome && d.nav < l.nav && d.region <= l.region
+    })(),
+  )
+  // 区域归位：漏一个就一直实心夹在中间，界面看着像拼贴
+  check(
+    '导航面板三处归到同一档（侧栏 / 分组栏 / 文件树 / 编辑器侧栏）',
+    ['\\.sidebar', '\\.setnav', '\\.filetree', '\\.editor__side'].every((s) =>
+      new RegExp(`html\\.glass ${s}`).test(css),
+    ),
   )
   check(
-    '壳层令牌也是两份（标题栏 + 下方界面）',
-    lightCss.includes('--glass-shell-bg') && darkCss.split('--glass-shell-bg').length - 1 === 2,
+    '状态条与标题栏同一档（框架条）',
+    /html\.glass \.statusbar \{\s*background: var\(--glass-chrome-bg/.test(css),
   )
   // 两级拆分的理由：材质只看「头顶所有层透过率相乘」，页脚条压在内容遮罩之上就只剩 1%
   check(
@@ -3532,6 +3683,21 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '协议正文能选中复制（全局 user-select:none 不能漏进来）',
     readText('src/components/dialogs/LegalDialog.vue').includes('user-select: text'),
   )
+
+  /*
+   * 许可清单的斑马纹必须按「行」算。
+   *
+   * 两列网格是行优先填充，`nth-child(odd)` 命中的永远是**左列** —— 左列整片有底色、
+   * 右列整片裸着，看起来不像同一张表（用户截图指出过）。写成每四项取前两项才对。
+   * 这条守的是那种「不报错、只是变丑」的回退，肉眼看半天看不出来。
+   */
+  check(
+    '许可清单的斑马纹按行（4n+1 / 4n+2）而不是按项交替',
+    /\.licenses__row:nth-child\(4n \+ 1\)/.test(about) &&
+      /\.licenses__row:nth-child\(4n \+ 2\)/.test(about) &&
+      !/\.licenses__row:nth-child\(odd\)/.test(about),
+    'nth-child(odd) 只会命中左列',
+  )
 }
 
 /* ------------------------------------------------ 录制音频窗口的接线守门 */
@@ -3594,5 +3760,110 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
 }
 
+/* -------------------------------------------- 设置页：二级菜单与搜索索引 */
+{
+  const readSource = (rel: string): string =>
+    readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const settingsView = readSource('src/views/SettingsView.vue')
+
+  // 词条区按分组铺开，「共 N 词」又是各分节之和 —— 跨组重复会让两个数对不上，
+  // 用户会把「软件算错了」当成 bug 报上来
+  const groupSum = COMMON_WORD_GROUPS.reduce((sum, g) => sum + g.words.length, 0)
+  check(
+    '常用词分组之和等于总词数（跨组不重复）',
+    groupSum === COMMON_WORDS.length,
+    `${groupSum} vs ${COMMON_WORDS.length}`,
+  )
+
+  const domIds = new Set(Array.from(settingsView.matchAll(/\bid="([a-z0-9-]+)"/gi), (m) => m[1]))
+
+  /*
+   * 索引里的每个 id 都必须真在页面上。删区块时忘了删索引，用户会「搜得到、
+   * 点进去没反应」—— 这类 bug 界面上看不出来，只能靠扫描钉死。
+   */
+  const missingSections = SETTINGS_ENTRIES.filter((e) => !domIds.has(e.section)).map(
+    (e) => e.section,
+  )
+  check(
+    '搜索索引的区块 id 都存在于设置页',
+    missingSections.length === 0,
+    missingSections.join(','),
+  )
+
+  const missingAnchors = SETTINGS_ENTRIES.filter((e) => e.anchor && !domIds.has(e.anchor)).map(
+    (e) => e.anchor as string,
+  )
+  check(
+    '搜索索引的控件锚点都存在于设置页',
+    missingAnchors.length === 0,
+    missingAnchors.join(','),
+  )
+
+  // 反方向：新增区块却忘了进索引，就是「界面有这一项、搜不到」
+  const blockIds = Array.from(
+    settingsView.matchAll(/<section id="([a-z0-9-]+)" class="block"/gi),
+    (m) => m[1],
+  )
+  const indexedSections = new Set(SETTINGS_ENTRIES.map((e) => e.section))
+  const unindexed = blockIds.filter((id) => !indexedSections.has(id))
+  check('设置页每个区块都在搜索索引里', unindexed.length === 0, unindexed.join(','))
+
+  // 每个分组都得有内容，否则左侧会出现点了什么都不显示的空组
+  const emptyGroups = SETTINGS_GROUPS.filter(
+    (g) => !SETTINGS_ENTRIES.some((e) => e.group === g.id),
+  ).map((g) => g.id)
+  check('每个分组都至少有一个设置项', emptyGroups.length === 0, emptyGroups.join(','))
+
+  const unknownGroups = SETTINGS_ENTRIES.filter(
+    (e) => !SETTINGS_GROUPS.some((g) => g.id === e.group),
+  ).map((e) => e.id)
+  check('设置项的分组都存在', unknownGroups.length === 0, unknownGroups.join(','))
+
+  const ids = SETTINGS_ENTRIES.map((e) => e.id)
+  check('设置项 id 不重复', new Set(ids).size === ids.length, String(ids.length))
+
+  // 深链：模型页点「更改存储位置」靠它决定先切哪一组
+  check('深链能找到所属分组', groupOfDomId('models-dir') === 'engine', String(groupOfDomId('models-dir')))
+  check('深链也认控件锚点', groupOfDomId('field-maxCharsPerLine') === 'subtitle')
+  check('陌生 id 不瞎猜分组', groupOfDomId('not-a-setting') === null)
+
+  /* ---- 搜索 ---- */
+  const hitIds = (q: string): string[] => searchSettings(q).map((e) => e.id)
+  check('搜「编码」命中默认编码', hitIds('编码').includes('export-encoding'), hitIds('编码').join(','))
+  check('搜「毛玻璃」命中外观项', hitIds('毛玻璃').includes('glass'), hitIds('毛玻璃').join(','))
+  check('搜「gbk」按同义词命中', hitIds('gbk').includes('export-encoding'), hitIds('gbk').join(','))
+  check('搜「字数」命中单行上限', hitIds('字数').includes('spec-zh'), hitIds('字数').join(','))
+  check('搜「热键」命中快捷键', hitIds('热键').includes('shortcuts'), hitIds('热键').join(','))
+  check('空搜索不出结果', searchSettings('   ').length === 0)
+
+  // 多个词是 AND：两个词必须同时命中同一条，否则「导出 gbk」会翻出所有导出项
+  const both = hitIds('导出 gbk')
+  check(
+    '多词搜索按 AND 收窄',
+    both.length === 1 && both[0] === 'export-encoding',
+    both.join(','),
+  )
+
+  /*
+   * 页面级大标题已整体删除（2026-11-01）：当前页名由窗口标题栏正中(.titlebar__view)
+   * 与左侧导航的选中态共同指示，页面里再写一遍只是重复，还把真正的内容往下压。
+   * 这条守两件事：四个视图都不许把 .view__head 写回来；样式表里也不许残留这套规则。
+   */
+  const headSurfaces = [
+    'src/views/HomeView.vue',
+    'src/views/ModelView.vue',
+    'src/views/SettingsView.vue',
+    'src/views/AboutView.vue',
+    'src/styles/global.css',
+  ]
+  const headLeftovers = headSurfaces.filter((rel) =>
+    /view__(head|title|desc)/.test(readSource(rel)),
+  )
+  check(
+    '页面不再渲染 .view__head / .view__title',
+    headLeftovers.length === 0,
+    headLeftovers.join(','),
+  )
+}
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 process.exit(fail > 0 ? 1 : 0)

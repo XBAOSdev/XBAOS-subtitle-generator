@@ -561,33 +561,16 @@ kbd {
   flex-direction: column;
 }
 
-.view__head {
-  flex: none;
-  padding: var(--space-5) var(--space-6) var(--space-3);
-}
-
-.view__head-inner {
-  width: 100%;
-  max-width: var(--content-max-width);
-  margin: 0 auto;
-}
-
-.view__title {
-  font-size: var(--font-size-lg);
-  font-weight: var(--weight-semibold);
-}
-
-.view__desc {
-  margin-top: 2px;
-  font-size: var(--font-size-xs);
-  color: var(--color-text-tertiary);
-}
-
+/*
+ * 页面不设大标题：当前页名由窗口标题栏正中与左侧导航的选中态共同指示，
+ * 页面里再写一遍纯属重复，还会把真正的内容往下压。
+ * 顶部内边距因此从 space-2 补到 space-5，让第一个区块不至于贴着窗口标题栏。
+ */
 .view__body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-2) var(--space-6) var(--space-6);
+  padding: var(--space-5) var(--space-6) var(--space-6);
 }
 
 .view__body-inner {
@@ -674,12 +657,18 @@ kbd {
    **「头顶所有层透过率相乘」才是实际透出的量** —— 层数比数值更关键，
    同一个区域绝不允许压两层（页脚条曾压了第二层，8% × 12% ≈ 1%，怎么调都不像玻璃）。
 
-   分档强度，跟着内容重要性走：
-     标题栏 .titlebar/.abar/.rbar  —— 最透，要的就是玻璃观感
-     页脚条 .view__foot/.editor__foot —— 只吃外壳那一层（不压第二层）→ 透出量是内容区的两三倍
-     内容区 .view__head/.view__body/.editor__center —— 外壳 + 内容区两级，材质只透一成
-     侧栏 / 状态条 / 编辑器侧栏 —— 面板色（surface 系），比内容区略抬起
-     卡片   不动（surface 底，正文与表格坐在上面，一透就没法读了）
+   分档统一成**三档**，一档一个语义；具体数值只在 theme-*.css 的 --glass-* 令牌里定义，
+   这里只负责把区域归到档上（改区域归位不用碰数值，改数值不用碰这里）：
+
+     框架条   .titlebar/.abar/.rbar · .statusbar · .view__foot/.editor__foot   → --glass-chrome-bg
+     导航面板 .sidebar · .setnav · .editor__side                             → --glass-nav-bg
+     内容画布 .view__body · .setmain · .editor__center（外壳 × 内层两级相乘）  → shell + region
+     卡片     不动（surface 底，正文与表格坐在上面，一透就没法读）
+
+   2026-11-01 之前这一圈是**四个不同的语义**（标题栏最透 / 页脚条吃外壳 / 内容区一成 /
+   侧栏与状态条用 surface 面板色），外加设置页的分组栏根本没进这份名单、一直是实心 ——
+   于是同一个窗口里出现「左白右灰中间实心」的拼贴感。现在统一成：**同一个底色 + 三档透出量**，
+   越靠窗口边缘越透、越靠正文越实，材质本身成了「框架退后、内容前进」的视觉引导。
    不支持的环境不会有这个类，以下规则整体不生效，界面保持纯色。
    ========================================================================== */
 html.glass,
@@ -707,12 +696,13 @@ html.glass .app__main {
 }
 
 /*
- * 内容区（--glass-region-bg）：在外壳遮罩之上再压一层，把材质透出量收到一成左右。
+ * 内容区（--glass-region-bg）：在外壳遮罩之上再压一层，把材质透出量收到 6% 上下。
  * 正文、表格、表单都坐在这一层上，透多了就没法读。
  * 页脚条刻意不在这份名单里 —— 它下面只有外壳那一层，玻璃才明显。
  */
-html.glass .view__head,
 html.glass .view__body,
+/* 设置页没有 .view__body：内容区拆成了「左分组栏 + 右表单」，只有右侧要压这一层 */
+html.glass .setmain,
 html.glass .editor__center {
   background: var(--glass-region-bg, transparent);
 }
@@ -723,13 +713,43 @@ html.glass .rec {
   background: var(--glass-app-bg, var(--color-bg-base));
 }
 
-/* 结构面板（侧栏 / 状态条 / 编辑器侧栏）：surface 调，比内容区略「抬起」 */
+/*
+ * 导航面板：主侧栏 / 设置页分组栏 / 编辑器文件树 / 编辑器右侧工具面板。
+ * 这几处必须是同一档 —— 分组栏与文件树曾经漏在这份名单之外，一直是实心 surface，
+ * 夹在半透的侧栏与内容区之间，正是「看起来不统一」最扎眼的地方。
+ */
 html.glass .sidebar,
-html.glass .statusbar,
+html.glass .setnav,
+html.glass .filetree,
 html.glass .editor__side {
-  background: var(--glass-panel-bg, var(--color-bg-surface));
+  background: var(--glass-nav-bg, var(--color-bg-surface));
   /* 分隔线同步淡化：半透明的面上留一条实线会很跳 */
-  border-color: var(--glass-titlebar-border, var(--color-border));
+  border-color: var(--glass-chrome-border, var(--color-border));
+}
+
+/*
+ * 状态条：与标题栏同一档（框架条）。它和页脚条上下紧挨着，
+ * 一个用 surface 实色、一个吃外壳半透明，叠在一起就是最深的那道割裂。
+ *
+ * 文字要跟着补偿：11px 的灰字坐在半透明底上，背后壁纸一深就糊成一片。
+ * 处置与标题栏一致 —— 提一档 + 与底色同向的极淡光晕，不新增颜色。
+ */
+html.glass .statusbar {
+  background: var(--glass-chrome-bg, var(--color-bg-surface));
+  border-color: var(--glass-chrome-border, var(--color-border));
+  color: var(--color-text-secondary);
+  text-shadow: 0 0 2px var(--glass-text-halo, transparent);
+}
+
+/* 页脚条同理：里面主要是一行 12px 的提示文字 */
+html.glass .view__foot,
+html.glass .editor__foot {
+  text-shadow: 0 0 2px var(--glass-text-halo, transparent);
+}
+
+html.glass .view__foot .hint,
+html.glass .editor__foot .editor__stat {
+  color: var(--color-text-secondary);
 }
 
 /*
@@ -740,17 +760,17 @@ html.glass .editor__side {
 html.glass .view__foot,
 html.glass .editor__foot {
   background: transparent;
-  border-color: var(--glass-titlebar-border, var(--color-border));
+  border-color: var(--glass-chrome-border, var(--color-border));
 }
 
 /* ---- 标题栏（三个窗口：主界面 / AI 辅助 / 录音）---- */
 html.glass .titlebar,
 html.glass .abar,
 html.glass .rbar {
-  background: var(--glass-titlebar-bg, var(--color-bg-surface));
-  border-bottom-color: var(--glass-titlebar-border, var(--color-border));
+  background: var(--glass-chrome-bg, var(--color-bg-surface));
+  border-bottom-color: var(--glass-chrome-border, var(--color-border));
   /* 顶部一道细内高光：半透明色块本身没有材质感，高光一加才立得住 */
-  box-shadow: inset 0 1px 0 var(--glass-titlebar-sheen, transparent);
+  box-shadow: inset 0 1px 0 var(--glass-chrome-sheen, transparent);
 }
 
 /*

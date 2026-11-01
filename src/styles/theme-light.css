@@ -22,34 +22,36 @@
   --color-bg-selected: #dedede;
 
   /*
-   * 毛玻璃标题栏（仅在 Electron 且系统支持时生效，见 global.css 的 html.glass）。
+   * 毛玻璃（仅在 Electron 且系统支持时生效，见 global.css 的 html.glass）。
    *
-   * 遮罩刻意用 **主界面底色**（不是 surface）：浅色下 surface 比 base 亮一档，
-   * 叠在明亮的材质上会拉出一条明显的浅色带，看起来「标题栏和界面不是一套」。
-   * 透明度留约四成给材质，既看得见透，色调又不跳。
+   * 统一成**三档透出量**，一档一个语义；数值只在这里定义，global.css 只负责把区域归到档上：
+   *   框架条   标题栏 / 状态栏 / 页脚条         透 24%   窗框，材质最该在这儿被看见
+   *   导航面板 主侧栏 / 分组栏 / 文件树 / 工具面板 透 14%  只有短标签，可以再透一点
+   *   内容画布 内容区（外壳 × 内层两级相乘）     透 6.7%  正文要读，压到近乎不透明
+   *
+   * 三档**都用主界面底色调**，一律不掺 surface：一掺就出现「左边偏白、右边偏灰」的色带，
+   * 那正是上一版看着不平衡的主因 —— 各区域底色不同，透明层数也不同，两件事混在一起，
+   * 调哪个数都不对。现在层次只由「透出量 + 1px 描边」表达，底色全局同一个。
    */
-  --glass-titlebar-bg: color-mix(in srgb, var(--color-bg-base) 76%, transparent);
+  --glass-chrome-bg: color-mix(in srgb, var(--color-bg-base) 76%, transparent);
+  --glass-nav-bg: color-mix(in srgb, var(--color-bg-base) 86%, transparent);
   /* 顶部一道细高光：给玻璃条一点厚度感，否则只是一块半透明色 */
-  --glass-titlebar-sheen: rgba(255, 255, 255, 0.5);
-  --glass-titlebar-border: color-mix(in srgb, var(--color-border) 55%, transparent);
+  --glass-chrome-sheen: rgba(255, 255, 255, 0.5);
+  --glass-chrome-border: color-mix(in srgb, var(--color-border) 55%, transparent);
 
   /*
-   * 标题栏**下方**的壳层。分两级是有原因的：材质只认「它头顶上所有层的透过率相乘」，
-   * 页脚条如果真的压在内容区那层遮罩**之上**，两层的透过率相乘后只剩 1%（8% × 12%），
-   * 材质等于透不出来 —— 这就是「页脚条怎么调都不像玻璃」的根因（2026-10-13）。
-   *
-   * 所以拆成：外壳一层薄遮罩（--glass-shell-bg）+ 内容区再压一层（--glass-region-bg），
-   * 乘起来正好是想要的 8% 透出；而页脚条**不再压第二层**，直接吃外壳那层，
-   * 材质透出量是内容区的两三倍，玻璃才看得见。
+   * 内容列分两级压：外壳（--glass-shell-bg）+ 内层（--glass-region-bg）。
+   * 材质只认「头顶所有层透过率相乘」，所以页脚条**不再自己铺底**，直接吃外壳那一层。
+   * 外壳数值**刻意与框架条相同**（0.76）：页脚条透明地叠上去，正好等于框架条那一档，
+   * 上下两条边才是一套。内层取 0.72，乘出来 0.933 —— 正文区的材质只透 6.7%。
    */
-  --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 80%, transparent);
-  --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 62%, transparent);
+  --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 76%, transparent);
+  --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 72%, transparent);
   /*
    * 单层容器（AI 辅助 / 录音两个窗口的根元素）用这个：它们只有一层，
-   * 所以取的是上面两级乘出来的**最终观感**。
+   * 所以直接取内容画布乘出来的**最终观感**。
    */
-  --glass-app-bg: color-mix(in srgb, var(--color-bg-base) 92%, transparent);
-  --glass-panel-bg: color-mix(in srgb, var(--color-bg-surface) 90%, transparent);
+  --glass-app-bg: color-mix(in srgb, var(--color-bg-base) 93%, transparent);
   /* 文字光晕：半透明底上文字对比会随背后的画面浮动，用与底色同向的极淡描边补回来 */
   --glass-text-halo: rgba(255, 255, 255, 0.6);
 

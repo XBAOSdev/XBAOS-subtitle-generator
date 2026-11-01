@@ -1,17 +1,38 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
 import type { PunctuationMode } from '@/types'
 import { PAUSE_PUNCT_LABELS } from '@/utils/punctuation'
 import { parseReplaceDict } from '@/utils/dictReplace'
+import { buildWrapWords } from '@/utils/wrapWords'
+import { COMMON_WORDS, COMMON_WORD_GROUPS } from '@/data/commonWords'
+import { LEXICONS } from '@/data/lexicons'
+import {
+  SETTINGS_GROUPS,
+  entryCountOf,
+  groupOfDomId,
+  searchSettings,
+  settingsGroupById,
+  type SettingsEntry,
+} from '@/data/settingsMap'
 import Icon from '@/components/Icon.vue'
+import WordbookDialog from '@/components/dialogs/WordbookDialog.vue'
 
 const settings = useSettingsStore()
 const ui = useUiStore()
 
 /** 词表里能解析出多少条可用规则。给个即时反馈，免得手滑写了不生效还不知道 */
 const dictRuleCount = computed(() => parseReplaceDict(settings.dictReplacements).length)
+
+/** 内置词表的规模，界面上直接报数，用户不用点开也心里有数 */
+const commonWordCount = COMMON_WORDS.length
+const commonGroupCount = COMMON_WORD_GROUPS.length
+/** 当前实际参与断句的词数：常用词库 + 勾选的领域词库 + 手填术语，去重后 */
+const activeWrapCount = computed(
+  () => buildWrapWords(settings.lexiconIds, settings.promptTerms).length,
+)
+const wordbookOpen = ref(false)
 
 const bridge = window.xbaos
 
@@ -44,6 +65,111 @@ const BACKEND_OPTIONS = [
   },
   { value: 'vulkan', label: '强制 Vulkan', hint: '需要显卡驱动支持，若不可用会导致识别失败' },
 ] as const
+
+/**
+ * 搜索。
+ *
+ * 面板的打开与否和查询串分开两个状态：清空输入后仍要能重新点开面板看上次搜的词，
+ * 而「搜索框有焦点 + 有内容」才出面板 —— 否则用户点了输入框却什么都看不到。
+ */
+const searchQuery = ref('')
+const searchOpen = ref(false)
+const searchCursor = ref(0)
+const searchResults = computed(() => searchSettings(searchQuery.value))
+const searchInput = ref<HTMLInputElement | null>(null)
+
+watch(searchQuery, () => {
+  searchCursor.value = 0
+  searchOpen.value = searchQuery.value.trim().length > 0
+})
+
+function clearSearch(): void {
+  searchQuery.value = ''
+  searchOpen.value = false
+  searchInput.value?.focus()
+}
+
+function onSearchKey(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    searchOpen.value = false
+    return
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault()
+    if (searchResults.value.length === 0) return
+    const step = event.key === 'ArrowDown' ? 1 : -1
+    const next = searchCursor.value + step
+    searchCursor.value = (next + searchResults.value.length) % searchResults.value.length
+    return
+  }
+  if (event.key === 'Enter') {
+    const hit = searchResults.value[searchCursor.value]
+    if (hit) jumpTo(hit)
+  }
+}
+
+/* ------------------------------------------------------------ 分组与跳转 */
+
+const scroller = ref<HTMLDivElement | null>(null)
+
+/**
+ * 每个分组各自的滚动位置。
+ *
+ * 只存在组件里（设置页被 KeepAlive 缓存，切走再回来还在），关掉软件即失效 ——
+ * 这正是用户要的「会话内记住，重启不记」。存 store 反而要额外操心清理。
+ */
+const scrollTops = new Map<string, number>()
+
+function rememberScroll(): void {
+  if (scroller.value) scrollTops.set(ui.settingsGroup, scroller.value.scrollTop)
+}
+
+function selectGroup(id: string): void {
+  if (id === ui.settingsGroup) return
+  rememberScroll()
+  ui.settingsGroup = id
+  searchOpen.value = false
+  void nextTick(() => {
+    if (scroller.value) scroller.value.scrollTop = scrollTops.get(id) ?? 0
+  })
+}
+
+/** 高亮刚跳到的目标，1.6 秒后自己淡出 */
+let flashTimer = 0
+function flash(el: HTMLElement): void {
+  window.clearTimeout(flashTimer)
+  for (const node of document.querySelectorAll('.is-flash')) node.classList.remove('is-flash')
+  el.classList.add('is-flash')
+  flashTimer = window.setTimeout(() => el.classList.remove('is-flash'), 1600)
+}
+
+/**
+ * 跳到某个 DOM id（设置项锚点或整个区块）。
+ *
+ * 必须**先切分组再找元素**：被 `v-show` 藏起来的元素 `display:none`，
+ * `scrollIntoView` 对它是空操作 —— 用户会看到「点了没反应」。
+ */
+async function jumpToDomId(domId: string): Promise<void> {
+  const group = groupOfDomId(domId)
+  if (group && group !== ui.settingsGroup) {
+    rememberScroll()
+    ui.settingsGroup = group
+  }
+  await nextTick()
+  const el = document.getElementById(domId)
+  if (!el) return
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  flash(el)
+  if (scroller.value) scrollTops.set(ui.settingsGroup, scroller.value.scrollTop)
+}
+
+function jumpTo(entry: SettingsEntry): void {
+  searchOpen.value = false
+  searchInput.value?.blur()
+  void jumpToDomId(entry.anchor ?? entry.section)
+}
+
+/* ------------------------------------------------------- 快捷键与诊断 */
 
 /** 诊断导出：把现场收成一个文件，用户直接发过来就行 */
 const diagBusy = ref(false)
@@ -115,8 +241,8 @@ onMounted(() => {
 })
 
 /**
- * 从模型管理页点「模型存储位置」跳进来时，直接滚到对应章节。
- * 设置页被 KeepAlive 缓存着，切回来**不会**重新挂载 —— 所以滚动只能靠
+ * 从模型管理页点「模型存储位置」跳进来时，直接切到对应分组并滚到章节。
+ * 设置页被 KeepAlive 缓存着，切回来**不会**重新挂载 —— 所以跳转只能靠
  * `ui.settingsAnchor` 这个状态触发，不能只写在 onMounted 里。
  */
 onActivated(() => {
@@ -124,9 +250,7 @@ onActivated(() => {
   const anchor = ui.settingsAnchor
   if (!anchor) return
   ui.settingsAnchor = null
-  void nextTick(() => {
-    document.getElementById(anchor)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  })
+  void nextTick(() => jumpToDomId(anchor))
 })
 
 /**
@@ -204,442 +328,838 @@ function reset(): void {
 
 <template>
   <div class="view">
-    <header class="view__head">
-      <div class="view__head-inner">
-        <h1 class="view__title">设置</h1>
-        <p class="view__desc">修改后立即生效，并自动保存到本机</p>
-      </div>
-    </header>
-
-    <div class="view__body">
-      <div class="view__body-inner">
-        <!-- 外观 -->
-        <section class="block">
-          <div class="block__head">
-            <Icon name="sun" :size="14" />
-            <span class="block__title">外观</span>
-          </div>
-          <div class="block__body">
-            <p class="field__label">主题</p>
-            <div v-seg-thumb class="choice-row">
-              <button
-                v-for="item in THEME_OPTIONS"
-                :key="item.value"
-                class="choice"
-                :class="{ 'is-active': settings.themeMode === item.value }"
-                type="button"
-                @click="settings.themeMode = item.value"
-              >
-                <Icon :name="item.icon" :size="16" />
-                <span>{{ item.label }}</span>
-              </button>
-            </div>
-            <p class="hint">
-              跟随系统时随系统深浅色切换，也可在此固定为一种。
-            </p>
-            <label class="switch glass-switch">
-              <input v-model="settings.glassEnabled" type="checkbox" />
-              <span class="switch__track" />
-              <span>毛玻璃效果</span>
-            </label>
-            <p class="hint">Windows 11 22H2 及以上生效，其余环境自动使用纯色。</p>
-          </div>
-        </section>
-
-        <!-- 性能 -->
-        <section class="block">
-          <div class="block__head">
-            <Icon name="cpu" :size="14" />
-            <span class="block__title">性能</span>
-          </div>
-          <div class="block__body">
-            <p class="field__label">推理后端</p>
-            <div class="backend-list">
-              <label
-                v-for="item in BACKEND_OPTIONS"
-                :key="item.value"
-                class="backend"
-                :class="{ 'is-active': settings.backend === item.value }"
-              >
-                <input v-model="settings.backend" type="radio" :value="item.value" />
-                <span class="backend__body">
-                  <span class="backend__label">
-                    {{ item.label }}
-                    <Icon
-                      v-if="item.value === 'auto'"
-                      name="zap"
-                      :size="12"
-                      class="backend__zap"
-                    />
-                  </span>
-                  <span class="backend__hint">{{ item.hint }}</span>
-                </span>
-              </label>
-            </div>
-            <p class="hint">
-              当前档位：{{ BACKEND_OPTIONS.find((i) => i.value === settings.backend)?.label }}。
-              实际使用的后端显示在底部状态条。
-            </p>
-          </div>
-        </section>
-
-        <!-- 模型存储位置 -->
-        <section id="models-dir" class="block">
-          <div class="block__head">
-            <Icon name="folder" :size="14" />
-            <span class="block__title">模型存储位置</span>
-          </div>
-          <div class="block__body">
-            <p class="punct-intro">
-              新下载的模型保存在此，识别时也从这里查找。也可以直接放入自备的
-              whisper.cpp 模型（<span class="mono">ggml-*.bin</span>）。
-            </p>
-            <p class="path-box mono">{{ effectiveModelsDir || '（正在读取…）' }}</p>
-            <div class="row-actions">
-              <button
-                class="btn btn--sm"
-                type="button"
-                :disabled="modelsDirBusy"
-                @click="changeModelsDir"
-              >
-                <Icon name="folder" :size="13" />
-                <span>更改位置</span>
-              </button>
-              <button
-                v-if="settings.modelsDir"
-                class="btn btn--sm"
-                type="button"
-                :disabled="modelsDirBusy"
-                @click="resetModelsDir"
-              >
-                <span>恢复默认</span>
-              </button>
-              <button class="btn btn--sm" type="button" @click="openModelsDir">
-                <Icon name="folder-open" :size="13" />
-                <span>打开文件夹</span>
-              </button>
-            </div>
-            <p class="hint">
-              更改后软件<strong>只会</strong>从新位置查找模型。原位置已下载的模型需自行复制过去，
-              否则会显示没有可用模型，需要重新下载。
-            </p>
-          </div>
-        </section>
-
-        <!-- 识别相关的设置已整体移到「导入」页，方便每次导入前顺手调整 -->
-        <section class="block">
-          <div class="block__head">
-            <Icon name="wave" :size="14" />
-            <span class="block__title">识别</span>
-          </div>
-          <div class="block__body">
-            <p class="punct-intro">
-              识别语言、推理深度、领域词库、热词提示与音质前处理都移到了「导入」页的识别设置面板，
-              在导入音频时即可随手调整。
-            </p>
-            <button class="btn btn--sm" type="button" @click="ui.navigate('home')">
-              <Icon name="import" :size="13" />
-              <span>前往导入页设置</span>
+    <!-- 点内容区任意处收起搜索面板；搜索框自己 stop 掉，否则一落点就收 -->
+    <div class="setbody" @mousedown="searchOpen = false">
+      <!-- 二级菜单：与编辑器左侧文件导航同一套观感（surface 底 + 右侧细边 + 选中填充） -->
+      <nav class="setnav">
+        <!-- 搜索：命中设置项后切分组 + 滚动 + 高亮，不是「过滤列表」 -->
+        <div class="setnav__search" @mousedown.stop>
+          <div class="setsearch__box" :class="{ 'is-active': searchOpen && searchQuery.trim() }">
+            <Icon name="search" :size="14" class="setsearch__icon" />
+            <input
+              ref="searchInput"
+              v-model="searchQuery"
+              class="setsearch__input"
+              type="text"
+              placeholder="搜索设置"
+              spellcheck="false"
+              @focus="searchOpen = searchQuery.trim().length > 0"
+              @keydown.stop="onSearchKey"
+            />
+            <button
+              v-if="searchQuery"
+              class="setsearch__clear"
+              type="button"
+              aria-label="清空搜索"
+              @click="clearSearch"
+            >
+              <Icon name="x" :size="12" />
             </button>
           </div>
-        </section>
 
-        <!-- 标点处理 -->
-        <section class="block">
-          <div class="block__head">
-            <Icon name="spell-check" :size="14" />
-            <span class="block__title">标点处理</span>
-          </div>
-          <div class="block__body">
-            <p class="punct-intro">
-              在识别结果进入预览与编辑之前自动执行。只处理起停顿作用的标点，
-              引号、括号、书名号等结构标点一律不动；数字里的小数点、千分位逗号也会跳过。
+          <div v-if="searchOpen && searchQuery.trim()" class="setsearch__panel">
+            <p v-if="searchResults.length === 0" class="setsearch__empty">
+              没有匹配的设置项
             </p>
-            <div class="grid-2">
-              <label class="field">
-                <span class="field__label">中文字幕（含中日韩字符）</span>
-                <select v-model="settings.punctuation.zh" class="select">
-                  <option v-for="item in PUNCT_OPTIONS" :key="item.value" :value="item.value">
-                    {{ item.label }}
-                  </option>
-                </select>
-                <span class="field__hint">
-                  默认去标点并切分。处理名单：{{ PAUSE_PUNCT_LABELS.zh }}
-                </span>
-              </label>
-
-              <label class="field">
-                <span class="field__label">西文字幕</span>
-                <select v-model="settings.punctuation.en" class="select">
-                  <option v-for="item in PUNCT_OPTIONS" :key="item.value" :value="item.value">
-                    {{ item.label }}
-                  </option>
-                </select>
-                <span class="field__hint">
-                  默认原样保留。处理名单：{{ PAUSE_PUNCT_LABELS.en }}
-                </span>
-              </label>
-            </div>
+            <button
+              v-for="(item, index) in searchResults"
+              :key="item.id"
+              class="setsearch__item"
+              :class="{ 'is-active': index === searchCursor }"
+              type="button"
+              @mousedown.prevent="jumpTo(item)"
+              @mouseenter="searchCursor = index"
+            >
+              <span class="setsearch__label">{{ item.label }}</span>
+              <span class="setsearch__meta">
+                {{ item.note ?? settingsGroupById(item.group)?.label }}
+              </span>
+            </button>
           </div>
-        </section>
+        </div>
 
-        <!-- 字幕规格 -->
-        <section class="block">
-          <div class="block__head">
-            <Icon name="type" :size="14" />
-            <span class="block__title">字幕规格</span>
-          </div>
-          <div class="block__body">
-            <p class="punct-intro">
-              这几项同时决定 <strong>AI 校对的提示词</strong>和<strong>导出时的自动折行</strong>，
-              改一次两边都生效。AI 校对会按这里的上限约束它的合并力度 —— 上限越松，
-              AI 越倾向于把多条并成一条长字幕。
-            </p>
-            <div class="grid-2">
-              <label class="field">
-                <span class="field__label">中文单行上限</span>
-                <input
-                  v-model.number="settings.maxCharsPerLine"
-                  class="input input--mono"
-                  type="number"
-                  min="8"
-                  max="40"
-                  step="1"
-                />
-                <span class="field__hint">单位字，行业惯例 14~16，上限 18</span>
-              </label>
-
-              <label class="field">
-                <span class="field__label">英文单行上限</span>
-                <input
-                  v-model.number="settings.maxCharsPerLineEn"
-                  class="input input--mono"
-                  type="number"
-                  min="20"
-                  max="80"
-                  step="1"
-                />
-                <span class="field__hint">单位字符（含空格），行业惯例 38~42</span>
-              </label>
-
-              <label class="field">
-                <span class="field__label">单条最多行数</span>
-                <input
-                  v-model.number="settings.maxLinesPerSegment"
-                  class="input input--mono"
-                  type="number"
-                  min="1"
-                  max="4"
-                  step="1"
-                />
-                <span class="field__hint">再多会压屏，常用 2 行</span>
-              </label>
-
-              <label class="field">
-                <span class="field__label">单条时长上限</span>
-                <input
-                  v-model.number="settings.maxSegmentDuration"
-                  class="input input--mono"
-                  type="number"
-                  min="0"
-                  max="30"
-                  step="0.5"
-                />
-                <span class="field__hint">单位秒，0 表示不限；超过就该考虑拆开</span>
-              </label>
-            </div>
-            <p class="punct-intro">
-              按当前设置：中文单条不超过
-              <strong>{{ settings.maxCharsPerLine * settings.maxLinesPerSegment }}</strong> 字，
-              英文单条不超过
-              <strong>{{ settings.maxCharsPerLineEn * settings.maxLinesPerSegment }}</strong> 字符。
-            </p>
-          </div>
-        </section>
-
-        <!-- 填充空隙 -->
-        <section class="block">
-          <div class="block__head">
-            <Icon name="wand" :size="14" />
-            <span class="block__title">填充空隙的默认参数</span>
-          </div>
-          <div class="block__body">
-            <div class="grid-3">
-              <label class="field">
-                <span class="field__label">间隔阈值</span>
-                <input
-                  v-model.number="settings.gapFill.thresholdSec"
-                  class="input input--mono"
-                  type="number"
-                  min="0.5"
-                  max="10"
-                  step="0.1"
-                />
-                <span class="field__hint">单位秒，超过则不填充</span>
-              </label>
-
-              <label class="field">
-                <span class="field__label">保留间隙</span>
-                <input
-                  v-model.number="settings.gapFill.keepGapSec"
-                  class="input input--mono"
-                  type="number"
-                  min="0"
-                  max="0.2"
-                  step="0.01"
-                />
-                <span class="field__hint">单位秒，防止边界闪烁</span>
-              </label>
-
-              <label class="field">
-                <span class="field__label">单条最长时长</span>
-                <input
-                  v-model.number="settings.gapFill.maxDurationSec"
-                  class="input input--mono"
-                  type="number"
-                  min="1"
-                  max="60"
-                  step="0.5"
-                  :disabled="!settings.gapFill.limitEnabled"
-                />
-                <span class="field__hint">默认 2 秒</span>
-              </label>
-            </div>
-
-            <label class="switch limit-switch">
-              <input v-model="settings.gapFill.limitEnabled" type="checkbox" />
-              <span class="switch__track" />
-              <span>启用单条最长时长限制</span>
-            </label>
-          </div>
-        </section>
-
-        <!-- 导出 -->
-        <section class="block">
-          <div class="block__head">
-            <Icon name="save" :size="14" />
-            <span class="block__title">导出</span>
-          </div>
-          <div class="block__body">
-            <div class="grid-2">
-              <label class="field">
-                <span class="field__label">默认格式</span>
-                <select v-model="settings.exportFormat" class="select">
-                  <option value="srt">SRT</option>
-                  <option value="vtt">VTT</option>
-                  <option value="ass">ASS</option>
-                  <option value="txt">TXT</option>
-                </select>
-              </label>
-
-              <label class="field">
-                <span class="field__label">默认编码</span>
-                <select v-model="settings.exportEncoding" class="select">
-                  <option value="utf-8">UTF-8</option>
-                  <option value="utf-8-bom">UTF-8 带 BOM</option>
-                  <option value="gbk">GBK</option>
-                </select>
-              </label>
-
-              <label class="field">
-                <span class="field__label">换行符</span>
-                <select v-model="settings.exportLineEnding" class="select">
-                  <option value="crlf">CRLF（Windows）</option>
-                  <option value="lf">LF（Unix）</option>
-                </select>
-              </label>
-
-              <label class="field">
-                <span class="field__label">输出位置</span>
-                <select v-model="settings.outputMode" class="select">
-                  <option value="follow-source">跟随音频所在目录</option>
-                  <option value="unified">统一输出到指定目录</option>
-                  <option value="per-file">每个文件分别指定</option>
-                </select>
-              </label>
-            </div>
-
-            <label class="switch limit-switch">
-              <input v-model="settings.openFolderAfterExport" type="checkbox" />
-              <span class="switch__track" />
-              <span>导出后打开所在文件夹</span>
-            </label>
-          </div>
-        </section>
-
-        <!-- 自定义替换词表 -->
-        <section class="block">
-          <div class="block__head">
-            <Icon name="book" :size="14" />
-            <span class="block__title">自定义替换词表</span>
-          </div>
-          <div class="block__body">
-            <p class="field__hint">
-              编辑器「工具」面板里的<b>词表替换</b>按这里的规则批量纠错。每行一条，
-              用 <code>=</code> 或 <code>=&gt;</code> 分隔「错词」与「正词」，
-              <code>#</code> 开头的行不参与替换。一次性替换请改用编辑器里的「查找替换」。
-            </p>
-            <textarea
-              v-model="settings.dictReplacements"
-              class="dict__area"
-              rows="6"
-              spellcheck="false"
-              placeholder="帐号=账号&#10;视屏 => 视频&#10;# 以井号开头的是注释"
-            ></textarea>
-            <p class="field__hint">
-              当前解析出 <b>{{ dictRuleCount }}</b> 条规则。典型用法：把识别常错的人名、
-              术语、同音字在此配好，之后在编辑器里批量纠正。
-            </p>
-          </div>
-        </section>
-
-        <!-- 快捷键 -->
-        <section class="block">
-          <div class="block__head">
-            <Icon name="keyboard" :size="14" />
-            <span class="block__title">快捷键</span>
-          </div>
-          <div class="block__body">
-            <ul class="shortcuts">
-              <li v-for="item in SHORTCUTS" :key="item.label" class="shortcuts__row">
-                <span class="shortcuts__keys">
-                  <kbd v-for="key in item.keys" :key="key">{{ key }}</kbd>
-                </span>
-                <span class="shortcuts__label">{{ item.label }}</span>
-              </li>
-            </ul>
-          </div>
-        </section>
-
-        <!-- 诊断 -->
-        <section class="block">
-          <div class="block__head">
-            <Icon name="info" :size="14" />
-            <span class="block__title">诊断信息</span>
-          </div>
-          <div class="block__body">
-            <p class="field__hint">
-              识别出错或引擎异常退出时，导出一份诊断文件发给开发者即可排查。文件包含系统与显卡环境、
-              引擎状态、最近一次退出码、Vulkan 层清单与引擎日志，<b>不含音频内容，也不含字幕文本</b>。
-            </p>
-            <div class="diag">
-              <button class="btn" type="button" :disabled="diagBusy" @click="exportDiag">
-                {{ diagBusy ? '正在收集…' : '导出诊断信息' }}
+        <div class="setnav__body scroll-y">
+          <ul class="setnav__list">
+            <li v-for="group in SETTINGS_GROUPS" :key="group.id">
+              <button
+                class="setnav__item"
+                :class="{ 'is-active': ui.settingsGroup === group.id }"
+                type="button"
+                @click="selectGroup(group.id)"
+              >
+                <Icon :name="group.icon" :size="13" class="setnav__icon" />
+                <span class="setnav__label">{{ group.label }}</span>
+                <span class="setnav__num">{{ entryCountOf(group.id) }}</span>
               </button>
-              <span v-if="diagNote" class="diag__note">{{ diagNote }}</span>
-            </div>
-          </div>
-        </section>
+            </li>
+          </ul>
+        </div>
+      </nav>
 
-        <div class="reset-row">
-          <button class="btn btn--danger" type="button" @click="reset">恢复所有默认设置</button>
+      <div ref="scroller" class="setmain">
+        <div class="setmain__inner">
+          <!-- ---------------------------------------------------------- 外观 -->
+          <div v-show="ui.settingsGroup === 'appearance'" class="setgroup">
+            <section id="sec-appearance" class="block">
+              <div class="block__head">
+                <Icon name="sun" :size="14" />
+                <span class="block__title">外观</span>
+              </div>
+              <div class="block__body">
+                <p class="field__label">主题</p>
+                <div id="field-theme" v-seg-thumb class="choice-row">
+                  <button
+                    v-for="item in THEME_OPTIONS"
+                    :key="item.value"
+                    class="choice"
+                    :class="{ 'is-active': settings.themeMode === item.value }"
+                    type="button"
+                    @click="settings.themeMode = item.value"
+                  >
+                    <Icon :name="item.icon" :size="16" />
+                    <span>{{ item.label }}</span>
+                  </button>
+                </div>
+                <label id="field-glass" class="switch glass-switch">
+                  <input v-model="settings.glassEnabled" type="checkbox" />
+                  <span class="switch__track" />
+                  <span>毛玻璃效果</span>
+                </label>
+                <p class="hint">Windows 11 22H2 及以上生效，其余环境自动使用纯色。</p>
+              </div>
+            </section>
+          </div>
+
+          <!-- ------------------------------------------------- 识别与性能 -->
+          <div v-show="ui.settingsGroup === 'engine'" class="setgroup">
+            <section id="sec-backend" class="block">
+              <div class="block__head">
+                <Icon name="cpu" :size="14" />
+                <span class="block__title">性能</span>
+              </div>
+              <div class="block__body">
+                <p class="field__label">推理后端</p>
+                <div id="field-backend" class="backend-list">
+                  <label
+                    v-for="item in BACKEND_OPTIONS"
+                    :key="item.value"
+                    class="backend"
+                    :class="{ 'is-active': settings.backend === item.value }"
+                  >
+                    <input v-model="settings.backend" type="radio" :value="item.value" />
+                    <span class="backend__body">
+                      <span class="backend__label">
+                        {{ item.label }}
+                        <Icon
+                          v-if="item.value === 'auto'"
+                          name="zap"
+                          :size="12"
+                          class="backend__zap"
+                        />
+                      </span>
+                      <span class="backend__hint">{{ item.hint }}</span>
+                    </span>
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <!-- 模型存储位置 -->
+            <section id="models-dir" class="block">
+              <div class="block__head">
+                <Icon name="folder" :size="14" />
+                <span class="block__title">模型存储位置</span>
+              </div>
+              <div class="block__body">
+                <p class="path-box mono">{{ effectiveModelsDir || '（正在读取…）' }}</p>
+                <div class="row-actions">
+                  <button
+                    class="btn btn--sm"
+                    type="button"
+                    :disabled="modelsDirBusy"
+                    @click="changeModelsDir"
+                  >
+                    <Icon name="folder" :size="13" />
+                    <span>更改位置</span>
+                  </button>
+                  <button
+                    v-if="settings.modelsDir"
+                    class="btn btn--sm"
+                    type="button"
+                    :disabled="modelsDirBusy"
+                    @click="resetModelsDir"
+                  >
+                    <span>恢复默认</span>
+                  </button>
+                  <button class="btn btn--sm" type="button" @click="openModelsDir">
+                    <Icon name="folder-open" :size="13" />
+                    <span>打开文件夹</span>
+                  </button>
+                </div>
+                <p class="hint">
+                  更改后<strong>只会</strong>从新位置查找，原位置已下载的模型需自行复制过去。
+                </p>
+              </div>
+            </section>
+
+            <!-- 识别相关的设置已整体移到「导入」页，方便每次导入前顺手调整 -->
+            <section id="sec-recognize" class="block">
+              <div class="block__head">
+                <Icon name="wave" :size="14" />
+                <span class="block__title">识别</span>
+              </div>
+              <div class="block__body">
+                <button class="btn btn--sm" type="button" @click="ui.navigate('home')">
+                  <Icon name="import" :size="13" />
+                  <span>前往导入页设置</span>
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <!-- ---------------------------------------------------- 字幕处理 -->
+          <div v-show="ui.settingsGroup === 'subtitle'" class="setgroup">
+            <!-- 标点处理 -->
+            <section id="sec-punctuation" class="block">
+              <div class="block__head">
+                <Icon name="spell-check" :size="14" />
+                <span class="block__title">标点处理</span>
+              </div>
+              <div class="block__body">
+                <div class="grid-2">
+                  <label id="field-punct-zh" class="field">
+                    <span class="field__label">中文字幕（含中日韩字符）</span>
+                    <select v-model="settings.punctuation.zh" class="select">
+                      <option v-for="item in PUNCT_OPTIONS" :key="item.value" :value="item.value">
+                        {{ item.label }}
+                      </option>
+                    </select>
+                    <span class="field__hint">
+                      默认去标点并切分。处理名单：{{ PAUSE_PUNCT_LABELS.zh }}
+                    </span>
+                  </label>
+
+                  <label id="field-punct-en" class="field">
+                    <span class="field__label">西文字幕</span>
+                    <select v-model="settings.punctuation.en" class="select">
+                      <option v-for="item in PUNCT_OPTIONS" :key="item.value" :value="item.value">
+                        {{ item.label }}
+                      </option>
+                    </select>
+                    <span class="field__hint">
+                      默认原样保留。处理名单：{{ PAUSE_PUNCT_LABELS.en }}
+                    </span>
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <!-- 字幕规格 -->
+            <section id="sec-spec" class="block">
+              <div class="block__head">
+                <Icon name="type" :size="14" />
+                <span class="block__title">字幕规格</span>
+              </div>
+              <div class="block__body">
+                <p class="punct-intro">
+                  同时作用于 <strong>AI 校对提示词</strong>与<strong>导出折行</strong>。
+                </p>
+                <div class="grid-2">
+                  <label id="field-maxCharsPerLine" class="field">
+                    <span class="field__label">中文单行上限</span>
+                    <input
+                      v-model.number="settings.maxCharsPerLine"
+                      class="input input--mono"
+                      type="number"
+                      min="8"
+                      max="40"
+                      step="1"
+                    />
+                    <span class="field__hint">单位字，行业惯例 14~16，上限 18</span>
+                  </label>
+
+                  <label id="field-maxCharsPerLineEn" class="field">
+                    <span class="field__label">英文单行上限</span>
+                    <input
+                      v-model.number="settings.maxCharsPerLineEn"
+                      class="input input--mono"
+                      type="number"
+                      min="20"
+                      max="80"
+                      step="1"
+                    />
+                    <span class="field__hint">单位字符（含空格），行业惯例 38~42</span>
+                  </label>
+
+                  <label id="field-maxLinesPerSegment" class="field">
+                    <span class="field__label">单条最多行数</span>
+                    <input
+                      v-model.number="settings.maxLinesPerSegment"
+                      class="input input--mono"
+                      type="number"
+                      min="1"
+                      max="4"
+                      step="1"
+                    />
+                    <span class="field__hint">再多会压屏，常用 2 行</span>
+                  </label>
+
+                  <label id="field-maxSegmentDuration" class="field">
+                    <span class="field__label">单条时长上限</span>
+                    <input
+                      v-model.number="settings.maxSegmentDuration"
+                      class="input input--mono"
+                      type="number"
+                      min="0"
+                      max="30"
+                      step="0.5"
+                    />
+                    <span class="field__hint">单位秒，0 表示不限；超过就该考虑拆开</span>
+                  </label>
+                </div>
+                <p class="punct-intro punct-intro--summary">
+                  按当前设置：中文单条不超过
+                  <strong>{{ settings.maxCharsPerLine * settings.maxLinesPerSegment }}</strong> 字，
+                  英文单条不超过
+                  <strong>{{ settings.maxCharsPerLineEn * settings.maxLinesPerSegment }}</strong> 字符。
+                </p>
+              </div>
+            </section>
+
+            <!-- 填充空隙 -->
+            <section id="sec-gapfill" class="block">
+              <div class="block__head">
+                <Icon name="wand" :size="14" />
+                <span class="block__title">填充空隙的默认参数</span>
+              </div>
+              <div class="block__body">
+                <div class="grid-3">
+                  <label id="field-gap-threshold" class="field">
+                    <span class="field__label">间隔阈值</span>
+                    <input
+                      v-model.number="settings.gapFill.thresholdSec"
+                      class="input input--mono"
+                      type="number"
+                      min="0.5"
+                      max="10"
+                      step="0.1"
+                    />
+                    <span class="field__hint">单位秒，超过则不填充</span>
+                  </label>
+
+                  <label id="field-gap-keep" class="field">
+                    <span class="field__label">保留间隙</span>
+                    <input
+                      v-model.number="settings.gapFill.keepGapSec"
+                      class="input input--mono"
+                      type="number"
+                      min="0"
+                      max="0.2"
+                      step="0.01"
+                    />
+                    <span class="field__hint">单位秒，防止边界闪烁</span>
+                  </label>
+
+                  <label id="field-gap-max" class="field">
+                    <span class="field__label">单条最长时长</span>
+                    <input
+                      v-model.number="settings.gapFill.maxDurationSec"
+                      class="input input--mono"
+                      type="number"
+                      min="1"
+                      max="60"
+                      step="0.5"
+                      :disabled="!settings.gapFill.limitEnabled"
+                    />
+                    <span class="field__hint">默认 2 秒</span>
+                  </label>
+                </div>
+
+                <label class="switch limit-switch">
+                  <input v-model="settings.gapFill.limitEnabled" type="checkbox" />
+                  <span class="switch__track" />
+                  <span>启用单条最长时长限制</span>
+                </label>
+              </div>
+            </section>
+          </div>
+
+          <!-- -------------------------------------------------------- 导出 -->
+          <div v-show="ui.settingsGroup === 'export'" class="setgroup">
+            <section id="sec-export" class="block">
+              <div class="block__head">
+                <Icon name="save" :size="14" />
+                <span class="block__title">导出</span>
+              </div>
+              <div class="block__body">
+                <div class="grid-2">
+                  <label id="field-export-format" class="field">
+                    <span class="field__label">默认格式</span>
+                    <select v-model="settings.exportFormat" class="select">
+                      <option value="srt">SRT</option>
+                      <option value="vtt">VTT</option>
+                      <option value="ass">ASS</option>
+                      <option value="txt">TXT</option>
+                    </select>
+                  </label>
+
+                  <label id="field-export-encoding" class="field">
+                    <span class="field__label">默认编码</span>
+                    <select v-model="settings.exportEncoding" class="select">
+                      <option value="utf-8">UTF-8</option>
+                      <option value="utf-8-bom">UTF-8 带 BOM</option>
+                      <option value="gbk">GBK</option>
+                    </select>
+                  </label>
+
+                  <label id="field-export-lineending" class="field">
+                    <span class="field__label">换行符</span>
+                    <select v-model="settings.exportLineEnding" class="select">
+                      <option value="crlf">CRLF（Windows）</option>
+                      <option value="lf">LF（Unix）</option>
+                    </select>
+                  </label>
+
+                  <label id="field-output-mode" class="field">
+                    <span class="field__label">输出位置</span>
+                    <select v-model="settings.outputMode" class="select">
+                      <option value="follow-source">跟随音频所在目录</option>
+                      <option value="unified">统一输出到指定目录</option>
+                      <option value="per-file">每个文件分别指定</option>
+                    </select>
+                  </label>
+                </div>
+
+                <label id="field-open-folder" class="switch limit-switch">
+                  <input v-model="settings.openFolderAfterExport" type="checkbox" />
+                  <span class="switch__track" />
+                  <span>导出后打开所在文件夹</span>
+                </label>
+              </div>
+            </section>
+          </div>
+
+          <!-- -------------------------------------------------------- 词表 -->
+          <div v-show="ui.settingsGroup === 'words'" class="setgroup">
+            <!-- 自定义替换词表 -->
+            <section id="sec-dict" class="block">
+              <div class="block__head">
+                <Icon name="replace" :size="14" />
+                <span class="block__title">自定义替换词表</span>
+              </div>
+              <div class="block__body">
+                <p class="field__hint">
+                  每行一条，用 <code>=</code> 或 <code>=&gt;</code> 分隔错词与正词，
+                  <code>#</code> 开头不生效。
+                </p>
+                <textarea
+                  v-model="settings.dictReplacements"
+                  class="dict__area"
+                  rows="6"
+                  spellcheck="false"
+                  placeholder="帐号=账号&#10;视屏 => 视频&#10;# 以井号开头的是注释"
+                ></textarea>
+                <p class="field__hint">
+                  当前解析出 <b>{{ dictRuleCount }}</b> 条规则。典型用法：把识别常错的人名、
+                  术语、同音字在此配好，之后在编辑器里批量纠正。
+                </p>
+              </div>
+            </section>
+
+            <!-- 内置词表（只读） -->
+            <section id="sec-wordbook" class="block">
+              <div class="block__head">
+                <Icon name="book" :size="14" />
+                <span class="block__title">内置词表</span>
+                <span class="block__badge">只读</span>
+              </div>
+              <div class="block__body">
+                <p class="punct-intro">
+                  断行切点靠它判断词边界，<strong>只参与断点判断</strong>，不发给识别引擎，也不改文字。
+                </p>
+                <div class="wb-stats">
+                  <div class="wb-stat">
+                    <span class="wb-stat__num">{{ commonWordCount }}</span>
+                    <span class="wb-stat__label">常用词</span>
+                  </div>
+                  <div class="wb-stat">
+                    <span class="wb-stat__num">{{ commonGroupCount }}</span>
+                    <span class="wb-stat__label">常用词类别</span>
+                  </div>
+                  <div class="wb-stat">
+                    <span class="wb-stat__num">{{ LEXICONS.length }}</span>
+                    <span class="wb-stat__label">领域词库</span>
+                  </div>
+                  <div class="wb-stat">
+                    <span class="wb-stat__num">{{ activeWrapCount }}</span>
+                    <span class="wb-stat__label">当前实际生效</span>
+                  </div>
+                </div>
+                <p class="field__hint">
+                  含已勾选词库与手填领域词，去重后统计。
+                </p>
+                <div class="row-actions">
+                  <button class="btn btn--sm" type="button" @click="wordbookOpen = true">
+                    <Icon name="search" :size="13" />
+                    <span>查看词表内容</span>
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <!-- ------------------------------------------------------ 快捷键 -->
+          <div v-show="ui.settingsGroup === 'shortcut'" class="setgroup">
+            <section id="sec-shortcuts" class="block">
+              <div class="block__head">
+                <Icon name="keyboard" :size="14" />
+                <span class="block__title">快捷键</span>
+              </div>
+              <div class="block__body">
+                <ul class="shortcuts">
+                  <li v-for="item in SHORTCUTS" :key="item.label" class="shortcuts__row">
+                    <span class="shortcuts__keys">
+                      <kbd v-for="key in item.keys" :key="key">{{ key }}</kbd>
+                    </span>
+                    <span class="shortcuts__label">{{ item.label }}</span>
+                  </li>
+                </ul>
+              </div>
+            </section>
+          </div>
+
+          <!-- -------------------------------------------------------- 其他 -->
+          <div v-show="ui.settingsGroup === 'other'" class="setgroup">
+            <section id="sec-diag" class="block">
+              <div class="block__head">
+                <Icon name="info" :size="14" />
+                <span class="block__title">诊断信息</span>
+              </div>
+              <div class="block__body">
+                <p class="field__hint">
+                  识别出错或引擎异常退出时导出，发给开发者即可排查。<b>不含音频内容与字幕文本</b>。
+                </p>
+                <div class="diag">
+                  <button class="btn" type="button" :disabled="diagBusy" @click="exportDiag">
+                    {{ diagBusy ? '正在收集…' : '导出诊断信息' }}
+                  </button>
+                  <span v-if="diagNote" class="diag__note">{{ diagNote }}</span>
+                </div>
+              </div>
+            </section>
+
+            <section id="sec-reset" class="block">
+              <div class="block__head">
+                <Icon name="refresh" :size="14" />
+                <span class="block__title">恢复默认</span>
+              </div>
+              <div class="block__body">
+                <p class="field__hint">
+                  把上面所有设置（含模型存储位置、词表与外观）恢复为出场状态。
+                  该操作不可撤销，已下载的模型文件不会被删除。
+                </p>
+                <div class="row-actions">
+                  <button class="btn btn--danger btn--sm" type="button" @click="reset">
+                    恢复所有默认设置
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
         </div>
       </div>
     </div>
+
+    <WordbookDialog v-if="wordbookOpen" @close="wordbookOpen = false" />
   </div>
 </template>
 
 <style scoped>
+/* ---- 侧栏顶端的搜索 ---- */
+/*
+ * 搜索框从页头搬到了分组栏顶端：占位提示也压成「搜索设置」四个字，
+ * 196px 的侧栏里放不下「搜索设置项，如 编码、毛玻璃、单行字数」那种举例式文案。
+ * 容器只留上方内边距，下方改用 margin —— 结果面板靠 top:100% 定位，
+ * 只有内边距为 0 时 100% 才正好是输入框的下沿。
+ */
+.setnav__search {
+  flex: none;
+  position: relative;
+  padding: var(--space-3) var(--space-2) 0;
+  margin-bottom: var(--space-2);
+}
+
+.setsearch__box {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-height);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  transition: border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.setsearch__box:hover {
+  border-color: var(--color-border-strong);
+}
+
+.setsearch__box:focus-within {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-subtle);
+}
+
+.setsearch__icon {
+  flex: none;
+  color: var(--color-text-tertiary);
+}
+
+.setsearch__input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+}
+
+.setsearch__input:focus {
+  outline: none;
+}
+
+.setsearch__input::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.setsearch__clear {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: var(--color-text-tertiary);
+}
+
+.setsearch__clear:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/*
+ * 结果面板比侧栏宽：条目标题 + 右侧分组说明挤在 196px 里必然被省略号吃掉，
+ * 让它按 300px 往内容区方向张开，左边缘与输入框对齐。
+ */
+.setsearch__panel {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: var(--space-2);
+  z-index: var(--z-dropdown, 40);
+  width: 300px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.setsearch__empty {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.setsearch__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+
+.setsearch__item.is-active {
+  background: var(--color-bg-hover);
+}
+
+.setsearch__label {
+  min-width: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setsearch__meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+/* ---- 二级菜单 + 内容区 ---- */
+.setbody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* 与编辑器左侧文件导航同一套观感：surface 底、右侧细边、条目选中填充 */
+.setnav {
+  width: 196px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--color-bg-surface);
+  border-right: 1px solid var(--color-border);
+}
+
+.setnav__body {
+  flex: 1;
+  min-height: 0;
+  padding: 0 var(--space-2) var(--space-3);
+}
+
+.setnav__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.setnav__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.setnav__item:hover:not(.is-active) {
+  background: var(--color-bg-hover);
+}
+
+.setnav__item.is-active {
+  background: var(--color-accent-subtle);
+  border-color: var(--color-accent-border);
+}
+
+.setnav__icon {
+  flex: none;
+  color: var(--color-text-tertiary);
+}
+
+.setnav__item.is-active .setnav__icon {
+  color: var(--color-text-primary);
+}
+
+.setnav__label {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setnav__num {
+  flex: none;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.setmain {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  /* 顶部取 space-3：与左侧搜索框的上内边距同值，两者顶边才对得齐 */
+  padding: var(--space-3) var(--space-6) var(--space-6);
+}
+
+.setmain__inner {
+  width: 100%;
+  /*
+   * 980px 不是随手取的：窗口 − 主侧栏 208 − 分组栏 196 − 左右内边距 48，
+   * 默认 1480 窗口下可用 1028 —— 取 980 让表单在常见宽度下不被拉成超长单行，
+   * 同时右侧仍留一点余量，窄窗自动收窄。
+   */
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.setgroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.block__badge {
+  margin-left: var(--space-1);
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+}
+
+/* 搜索跳转后的短暂高亮：目标区块描边 + 底色，1.6 秒后淡出 */
+.is-flash {
+  animation: settings-flash 1.6s var(--ease-out);
+}
+
+@keyframes settings-flash {
+  0%,
+  60% {
+    box-shadow: 0 0 0 2px var(--color-accent-border);
+    border-color: var(--color-accent-border);
+  }
+  100% {
+    box-shadow: none;
+  }
+}
+
+/* ---- 内置词表：数字概览 ---- */
+.wb-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+  margin: var(--space-3) 0;
+}
+
+.wb-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-inset);
+}
+
+.wb-stat__num {
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.wb-stat__label {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
 /* ---- 模型存储位置 ---- */
 .path-box {
   margin: 0;
@@ -657,6 +1177,7 @@ function reset(): void {
   display: flex;
   gap: var(--space-2);
   flex-wrap: wrap;
+  margin-top: var(--space-3);
 }
 
 .punct-intro {
@@ -664,6 +1185,12 @@ function reset(): void {
   font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
   line-height: var(--line-base);
+}
+
+/* 紧跟在表单网格后面的结论行：不留上间距会和上一行的字段说明连成一段 */
+.punct-intro--summary {
+  margin-top: var(--space-4);
+  margin-bottom: 0;
 }
 
 .field__label {
@@ -676,10 +1203,6 @@ function reset(): void {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-}
-
-.field--full {
-  margin-top: var(--space-4);
 }
 
 .field__hint {
@@ -703,6 +1226,7 @@ function reset(): void {
 .dict__area {
   width: 100%;
   min-height: 118px;
+  margin: var(--space-2) 0;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -875,14 +1399,7 @@ function reset(): void {
   color: var(--color-text-tertiary);
 }
 
-.reset-row {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: var(--space-2);
-}
-
-/* 通用开关布局（填充空隙与导出区块使用） */
-
+/* 通用开关布局 */
 .switch {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -900,5 +1417,54 @@ function reset(): void {
 
 .switch > span:first-of-type {
   font-size: var(--font-size-sm);
+}
+
+/* ---- 窄窗口：左列收起，分组改横向标签条 ---- */
+@media (max-width: 1080px) {
+  .setbody {
+    flex-direction: column;
+  }
+
+  .setnav {
+    width: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  /* 搜索框跟着内容一起收边：横向模式下它独占一行，内边距要与下方标签条一致 */
+  .setnav__search {
+    padding: var(--space-3) var(--space-4) 0;
+  }
+
+  .setsearch__panel {
+    left: var(--space-4);
+  }
+
+  /* 横向模式不要纵向滚动条，改成一条可横滚的标签带 */
+  .setnav__body {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: var(--space-2) var(--space-4);
+  }
+
+  .setnav__list {
+    flex-direction: row;
+    gap: var(--space-2);
+    width: max-content;
+  }
+
+  .setnav__item {
+    width: auto;
+    white-space: nowrap;
+  }
+
+  .setmain {
+    padding: var(--space-4) var(--space-4) var(--space-5);
+  }
+
+  .grid-3,
+  .wb-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 </style>

@@ -300,16 +300,6 @@ function goModelsDirSetting(): void {
 
 <template>
   <div class="view">
-    <header class="view__head">
-      <div class="view__head-inner">
-        <h1 class="view__title">模型管理</h1>
-        <p class="view__desc">
-          模型不随安装包分发，首次使用前需要先下载一个，或把自己的 ggml 模型放进模型文件夹。
-          识别全程在本机离线运行。
-        </p>
-      </div>
-    </header>
-
     <div class="view__body">
       <div class="view__body-inner">
         <div class="notice">
@@ -323,8 +313,7 @@ function goModelsDirSetting(): void {
               模型存储位置：<span class="mono">%APPDATA%\XBAOS\SubtitleGenerator\Models\</span
               ><br />
             </template>
-            下载源为 Hugging Face 官方仓库，失败时自动切换国内镜像（hf-mirror.com），
-            支持断点续传，下载完成会做文件完整性校验。
+            支持断点续传，失败时自动切换国内镜像（hf-mirror.com）。
           </p>
         </div>
 
@@ -460,18 +449,12 @@ function goModelsDirSetting(): void {
           <div class="own__warn">
             <Icon name="alert" :size="13" />
             <span>
-              只支持 whisper.cpp 的 ggml 格式。其他格式（如 <span class="mono">.pt</span> /
+              只支持 whisper.cpp 的 ggml 格式，其他格式（<span class="mono">.pt</span> /
               <span class="mono">.safetensors</span> / <span class="mono">ONNX</span>）
-              无法加载、也不会出现在列表里 —— 放进去了但不兼容的文件，识别时会报错，
-              那不是软件坏了，是格式不对。
+              不会出现在列表里，也无法加载。
             </span>
           </div>
         </section>
-
-        <p class="hint">
-          注：模型体积较大，纯 CPU 推理时大模型速度会明显下降。若机器支持 Vulkan，
-          可在设置中开启硬件加速。
-        </p>
       </div>
     </div>
   </div>

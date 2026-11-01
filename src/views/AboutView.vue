@@ -57,12 +57,6 @@ const LIBS = [
 
 <template>
   <div class="view">
-    <header class="view__head">
-      <div class="view__head-inner">
-        <h1 class="view__title">关于本软件</h1>
-      </div>
-    </header>
-
     <div class="view__body">
       <div class="view__body-inner">
         <section class="hero">
@@ -400,7 +394,14 @@ const LIBS = [
   font-size: var(--font-size-xs);
 }
 
-.licenses__row:nth-child(odd) {
+/*
+ * 斑马纹要按「行」算，不能按「项」算。
+ * 两列网格是行优先填充的 —— nth-child(odd) 命中的永远是**左列**，
+ * 于是左列整片有底色、右列整片裸着，两列看起来不像同一张表。
+ * 每一项占一个格子，一行两格，所以隔一行等价于每四项取前两项。
+ */
+.licenses__row:nth-child(4n + 1),
+.licenses__row:nth-child(4n + 2) {
   background: var(--color-bg-inset);
 }
 
