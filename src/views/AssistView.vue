@@ -26,7 +26,7 @@ import {
 import { buildReviewPrompt, buildTranslatePrompt, estimatePromptTokens } from '@/utils/llmPrompt'
 import { pickPresentTerms, splitTerms } from '@/utils/prompt'
 import { hasText } from '@/utils/segmentOps'
-import { containmentSimilarity } from '@/utils/transcriptMerge'
+import { containmentSimilarityPrepared, prepareText } from '@/utils/transcriptMerge'
 import { formatDuration } from '@/utils/format'
 import { toPlain } from '@/utils/plain'
 import { branding } from '@/branding'
@@ -145,6 +145,20 @@ function pairsOf(r: FileResult): { src: string; tr: string }[] {
 }
 /** 单文件时的前后对照概览 */
 const summary = ref<ReviewSummary | null>(null)
+
+/**
+ * 所有文件的解析提示（时间码重叠、倒流、超出片长……）。
+ *
+ * 原来这块挂在 `v-if="summary"` 里面，而 `summary` 只在**单文件校对**时才赋值 ——
+ * 多文件时警告一条都露不出来，用户看到的是「读取成功」，然后时间码坏了也没人告诉。
+ * 现在摊平成一份列表，多文件时带上文件名，一个不漏。
+ */
+const warningItems = computed(() =>
+  results.value
+    .filter((r) => !r.outcome.error && r.outcome.warnings.length > 0)
+    .map((r) => ({ fileId: r.fileId, fileName: r.fileName, text: r.outcome.warnings.join('；') })),
+)
+
 /** 多文件时当前展开查看的是哪个文件（null = 全部收起） */
 const expandedId = ref<string | null>(null)
 /** 多文件切块失败等原因的整体错误 */
@@ -266,12 +280,14 @@ const scriptSimilarity = computed<number | null>(() => {
   if (!script) return null
   const list = selectedTargets.value
   if (list.length === 0) return null
+  // 文案那一侧只准备一次：它对每个文件都相同，放进循环就是白算 N 遍
+  const prepared = prepareText(script)
   let best = 0
   for (const t of list) {
     // 用**整个文件**的文本比对，不看处理范围：这一步回答的是「有没有选错文件」，
     // 范围再小也不该让一份正确的稿子被误判成「对不上」
     const text = t.segments.map((s) => s.text).join('')
-    best = Math.max(best, containmentSimilarity(text, script))
+    best = Math.max(best, containmentSimilarityPrepared(text, prepared))
   }
   return best
 })
@@ -1083,6 +1099,21 @@ onBeforeUnmount(() => {
             </span>
           </p>
 
+          <!-- 时间码提示。放在 summary 之外：多文件时 summary 恒为 null，警告会整片消失 -->
+          <div v-if="!isTranslate && warningItems.length > 0" class="warn warn--soft">
+            <Icon name="alert" :size="14" />
+            <div class="warn__body">
+              <template v-if="warningItems.length === 1">
+                时间码提示：{{ warningItems[0].text }}。可以继续应用，也可以在编辑器里再手工微调。
+              </template>
+              <template v-else>
+                <p>时间码提示（{{ warningItems.length }} 个文件）：</p>
+                <p v-for="w in warningItems" :key="w.fileId">{{ w.fileName }}：{{ w.text }}</p>
+                <p>可以继续应用，也可以在编辑器里再手工微调。</p>
+              </template>
+            </div>
+          </div>
+
           <!-- 单文件：前后对照概览 -->
           <div v-if="summary" class="review">
             <div class="review__stat">
@@ -1099,14 +1130,6 @@ onBeforeUnmount(() => {
                 <span class="review__num mono">{{ summary.changed }}</span>
                 <span class="review__cap">处有变化</span>
               </div>
-            </div>
-
-            <div v-if="results[0] && results[0].outcome.warnings.length > 0" class="warn warn--soft">
-              <Icon name="alert" :size="14" />
-              <span>
-                时间码提示：{{ results[0].outcome.warnings.join('；') }}。可以继续应用，
-                也可以在编辑器里再手工微调。
-              </span>
             </div>
 
             <div v-if="summary.previews.length > 0" class="diffs">
@@ -1782,6 +1805,14 @@ onBeforeUnmount(() => {
 
 .warn--soft {
   margin-top: var(--space-3);
+}
+
+/* 多文件时一行一个文件，靠 grid 的 gap 撑开行距（全局 p 的 margin 是 0）。
+   min-width: 0 是必须的：flex 子项的默认最小宽度是内容宽度，长文件名会把整块顶出容器 */
+.warn__body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
 }
 
 /* ---- 提示词预览 ---- */

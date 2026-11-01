@@ -185,15 +185,59 @@ export function normalizeForCompare(text: string): string {
  * 而一旦有了一句话以上的长度，也就谈不上「长度差把分数压死」了。
  */
 export function containmentSimilarity(a: string, b: string): number {
+  return containmentSimilarityPrepared(a, prepareText(b))
+}
+
+/**
+ * 预处理好的一侧比较材料。
+ *
+ * 文案纠偏是「**一份文案**对**多个文件**」比：文案每敲一个字都要重算一遍，
+ * 而 `normalizeForCompare` 里的繁转简与正则替换是这条链上最贵的一步。
+ * 把它提到循环外面，N 个文件就只做一次而不是 N 次。
+ */
+export interface PreparedText {
+  /** 归一化后的文本（空串表示没有可比内容） */
+  text: string
+  /** 字符二元组计数表 */
+  grams: Map<string, number>
+  /** 二元组总数 */
+  total: number
+}
+
+export function prepareText(text: string): PreparedText {
+  const normalized = normalizeForCompare(text)
+  const grams = normalized ? gramsOf(normalized) : new Map<string, number>()
+  let total = 0
+  for (const n of grams.values()) total += n
+  return { text: normalized, grams, total }
+}
+
+/**
+ * 与 `containmentSimilarity(a, b)` 完全等价，只是 `b` 预先处理过：
+ *
+ * ```ts
+ * const prepared = prepareText(script)          // 循环外做一次
+ * for (const file of files) containmentSimilarityPrepared(fileText, prepared)
+ * ```
+ */
+export function containmentSimilarityPrepared(a: string, b: PreparedText): number {
   const na = normalizeForCompare(a)
-  const nb = normalizeForCompare(b)
-  if (!na && !nb) return 1
-  if (!na || !nb) return 0
-  if (na === nb) return 1
-  const { overlap, totalA, totalB } = gramOverlap(na, nb)
-  const shortSide = Math.min(totalA, totalB)
+  if (!na && !b.text) return 1
+  if (!na || !b.text) return 0
+  if (na === b.text) return 1
+
+  const ga = gramsOf(na)
+  let totalA = 0
+  for (const n of ga.values()) totalA += n
+  let overlap = 0
+  for (const [gram, n] of b.grams) {
+    const hit = ga.get(gram)
+    if (hit) overlap += Math.min(hit, n)
+  }
+
+  const shortSide = Math.min(totalA, b.total)
   if (shortSide === 0) return 0
-  if (shortSide < 3) return diceSimilarity(na, nb)
+  if (shortSide < 3) return diceSimilarity(na, b.text)
   return overlap / shortSide
 }
 

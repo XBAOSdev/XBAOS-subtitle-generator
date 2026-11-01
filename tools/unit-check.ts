@@ -43,9 +43,11 @@ import { decodeTextAuto, encodeSubtitle } from '../electron/encoding.js'
 import { LEXICONS } from '../src/data/lexicons'
 import {
   containmentSimilarity,
+  containmentSimilarityPrepared,
   diceSimilarity,
   mergeRuns,
   normalizeForCompare,
+  prepareText,
   repetitionPenalty,
   runText,
   scoreRun,
@@ -867,6 +869,28 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     normalizeForCompare('Hello World!'),
   )
 
+  /*
+   * 预处理版必须与「每次重算」逐位等价 —— 它只是把同样的活提前做了一次。
+   * 等价性靠这张表兜：空串、单字、繁简、大小写、超集/子集两个方向都过一遍。
+   */
+  const eqPairs: [string, string][] = [
+    [shortSubtitle, longScript],
+    [longScript, shortSubtitle],
+    [scriptZh, scriptTrad],
+    ['', 'abc'],
+    ['abc', ''],
+    ['', ''],
+    ['好', '好的'],
+    ['AbC', 'abc'],
+  ]
+  check(
+    '预处理版与重算版逐对等价',
+    eqPairs.every(([x, y]) => containmentSimilarity(x, y) === containmentSimilarityPrepared(x, prepareText(y))),
+    eqPairs
+      .map(([x, y]) => `${containmentSimilarity(x, y).toFixed(4)}/${containmentSimilarityPrepared(x, prepareText(y)).toFixed(4)}`)
+      .join(' '),
+  )
+
   // 反例：内容无关时必须仍然很低，否则这个门槛就白设了
   const unrelatedScore = containmentSimilarity(
     '今天我们来聊聊显卡的性能表现',
@@ -1013,8 +1037,71 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   check('每条都不超单行上限', one.segments.every((s) => widthUnits(s.text) <= 32))
   check('拆分条时间首尾相接', Math.abs(one.segments[0].end - one.segments[1].start) < 1e-9)
   check('拆分条时间不越界', one.segments[0].start === 0 && one.segments[1].end === 10)
-  check('拆分条按宽度分时长', one.segments[0].end - one.segments[0].start > one.segments[1].end - one.segments[1].start)
+  // 时长必须跟着宽度走。不再断言「第一条更长」：零头被匀走之后可能反过来
+  const expectedSpan = (s: (typeof one.segments)[number]): number =>
+    (10 * widthUnits(s.text)) / one.segments.reduce((sum, x) => sum + widthUnits(x.text), 0)
+  check(
+    '拆分条按宽度分时长',
+    one.segments.every((s) => Math.abs(s.end - s.start - expectedSpan(s)) < 0.005),
+    JSON.stringify(one.segments.map((s) => [s.text, s.end - s.start])),
+  )
   check('原条目文本不被就地改动', long.text.includes('没人知道吗'))
+
+  /*
+   * 硬切零头：比容量只多一个字时，旧实现切成 [16 字][1 字]，后者按宽度只能
+   * 分到 1/34 的时长 —— 观众看到的就是「一条 0.17 秒的单字字幕」。
+   */
+  const tailCase = seg(0, 3, '二经制并不适合我们日常的计算和交流') // 17 字
+  const tail = applyLineWrap([tailCase], SPEC)
+  check(
+    '多出一个字也不产生单字条',
+    tail.segments.length === 2 && tail.segments.every((s) => widthUnits(s.text) >= 16),
+    JSON.stringify(tail.segments.map((s) => [s.text, widthUnits(s.text)])),
+  )
+  check(
+    '零头条不再拿到零点几秒',
+    tail.segments.every((s) => s.end - s.start >= 1.2),
+    JSON.stringify(tail.segments.map((s) => Number((s.end - s.start).toFixed(3)))),
+  )
+  check(
+    '匀过之后两行宽度接近',
+    Math.abs(widthUnits(tail.segments[0].text) - widthUnits(tail.segments[1].text)) <= 4,
+    JSON.stringify(tail.segments.map((s) => widthUnits(s.text))),
+  )
+
+  // 匀行要搬英文单词时，词与词之间的空格不能丢，否则会粘成一个不存在的词
+  const enTail = applyLineWrap(
+    [seg(0, 8, 'the quick brown fox jumps over the lazy dog and x')],
+    { maxCharsPerLine: 8, maxCharsPerLineEn: 20, maxLinesPerSegment: 1 },
+  )
+  const enWords = enTail.segments.map((s) => s.text).join(' ').split(/\s+/)
+  check(
+    '匀行搬词不粘连',
+    'the quick brown fox jumps over the lazy dog and x'.split(' ').every((w) => enWords.includes(w)),
+    JSON.stringify(enTail.segments.map((s) => s.text)),
+  )
+  check(
+    '匀行不会造出超宽行',
+    enTail.segments.every((s) => s.text.length <= 20),
+    JSON.stringify(enTail.segments.map((s) => s.text.length)),
+  )
+
+  // 匀行不能把前一行末尾的标点搬到下一行开头：「览，很多人」比短尾行更刺眼
+  const punctTail = applyLineWrap([seg(0, 4, '我们今天聊聊无痕浏览，很多人其实都')], SPEC)
+  check(
+    '标点没被搬到行首或行中',
+    punctTail.segments.every((s) => !/[。！？；，、：…]/.test(s.text.slice(0, -1))),
+    JSON.stringify(punctTail.segments.map((s) => s.text)),
+  )
+
+  // 已含换行的条目按段处理：手调过的排版必须稳定，连点两次也不能变
+  const manual = seg(0, 4, '第一行内容\n第二行内容')
+  const manualKept = applyLineWrap([manual], { ...SPEC, maxLinesPerSegment: 2 })
+  check(
+    '手动换行不被重排',
+    manualKept.segments.length === 1 && manualKept.segments[0] === manual,
+    JSON.stringify(manualKept.segments.map((s) => s.text)),
+  )
 
   // 装得下 → 折行；再次运行 → 幂等，不能越折越碎
   const wrapCase = seg(0, 6, '很多人觉得打开这个模式就等于在互联网上穿上了隐身衣')
@@ -1147,6 +1234,8 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     mid.map((s) => s.text).join('|'),
   )
   check('分段校对：结果仍按时间排序', mid.every((s, i) => i === 0 || s.start >= mid[i - 1].start))
+  // id 是撤销栈、选中态、结果回填共同的记账单位，条数没变时不能整份换新
+  check('分段校对：条数不变时沿用原 id', mid[1].id === 'b' && mid[3].id === 'd', mid.map((s) => s.id).join(','))
 
   // 段内合并：AI 把三条并成两条，总条数应少一条，且不能把第四条挤掉
   const merged = mergeCuesIntoSelection(
@@ -1162,6 +1251,28 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '分段校对：合并后仍保留范围外的首尾条',
     merged[0].text === '第一条原文' && merged[merged.length - 1].text === '第五条原文',
     merged.map((s) => s.text).join('|'),
+  )
+
+  /*
+   * 范围外的时间码不许被挪。
+   *
+   * 旧实现是把整份列表交给 `enforceMonotonicCues` 一把梭：只要新的结尾压到范围外那条
+   * 头上，被推后的是**那条老条目**，而界面上写的是「其余 N 条保持不变」。
+   * 这里让 AI 把第四条写到 9.5 秒（第五条从 8 秒起），正确做法是截短新条目。
+   */
+  const overrun = mergeCuesIntoSelection(
+    base,
+    [
+      { start: 2, end: 4, text: '第二条改写' },
+      { start: 4, end: 6, text: '第三条改写' },
+      { start: 6, end: 9.5, text: '第四条改写' },
+    ],
+    ['b', 'c', 'd'],
+  )
+  check(
+    '分段校对：压到范围外时只截短新条目',
+    overrun[4] === base[4] && overrun[3].end === 8 && overrun[3].end > overrun[3].start,
+    `第五条 ${overrun[4].start}~${overrun[4].end} / 新条目 ${overrun[3].start}~${overrun[3].end}`,
   )
 
   // 反例对照：不传 ids 就是「整份重建」，条数少就会被截断 —— 这正是用户踩到的坑
@@ -1526,6 +1637,15 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '结束早于开始给出警告',
     parseModelOutput(reversed, 20).warnings.some((w) => w.includes('结束时间')),
   )
+  // 只警告不改是不够的：这条会被原样写进字幕，导出后播放器根本不显示
+  const reversedFixed = parseModelOutput(reversed, 20)
+  check(
+    '倒流时间码被补齐为有效时长',
+    reversedFixed.cues[0].end > reversedFixed.cues[0].start &&
+      reversedFixed.cues[0].start === 5 &&
+      reversedFixed.cues[0].end === 5.8,
+    `${reversedFixed.cues[0].start}~${reversedFixed.cues[0].end}`,
+  )
 
   const tooLong = ['1', '00:00:00,000 --> 00:00:50,000', '甲'].join('\n')
   check(
@@ -1533,6 +1653,9 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     parseModelOutput(tooLong, 10).warnings.some((w) => w.includes('多出')),
     parseModelOutput(tooLong, 10).warnings.join('；'),
   )
+  check('超出片长的结尾被夹到片尾', parseModelOutput(tooLong, 10).cues[0].end === 10)
+  // 片长未知（0）时不能瞎夹，否则会把整份时间码压成 0
+  check('片长未知时不夹取', parseModelOutput(tooLong, 0).cues[0].end === 50)
 }
 
 /* ---- AI 校对：写回转换与概览 ---- */

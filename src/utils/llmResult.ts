@@ -12,7 +12,7 @@
 
 import type { SubtitleSegment } from '@/types'
 import { uid } from '@/utils/id'
-import { clearStale, enforceMonotonicCues, hasText } from '@/utils/segmentOps'
+import { MIN_CUE_SEC, clearStale, hasText } from '@/utils/segmentOps'
 
 export interface ParsedCue {
   start: number
@@ -104,6 +104,72 @@ function parseCues(text: string): ParsedCue[] {
   return cues
 }
 
+/** 补齐倒流时间码时给的最短时长（秒） */
+const REPAIR_MIN_SEC = 0.8
+
+export interface CueRepair {
+  cues: ParsedCue[]
+  /** 结尾不晚于开头、被补齐的条数 */
+  badRange: number
+  /** 起点为负、被归零的条数 */
+  negative: number
+}
+
+/**
+ * 修掉模型给出的**不可用**时间码。
+ *
+ * 为什么不能只警告不改：这些值会被原样写进字幕。`end <= start` 在编辑器里是一条
+ * 零长度甚至倒流的坏数据，导出后播放器根本不显示，而界面上打的是「结果已应用」——
+ * 用户完全没有理由去怀疑它。所以宁可补一个保守的时长，也不能让它原样入库。
+ *
+ * 只做三件不会让内容变味的事：
+ *   1. 结尾不晚于开头 —— 补到「最短时长」，但绝不越过下一条的起点（那会造出新重叠）
+ *   2. 超出原片长 —— 夹到片尾
+ *   3. 起点是负数或非数 —— 归零
+ *
+ * 重叠**不在这里**处理：重叠本身不是坏数据，模型把两句并成一条就会合法地出现一点
+ * 交叠，能不能接受该由用户看着提示决定。这里只负责「结束早于开始」这种无论如何都
+ * 显示不出来的情况。
+ */
+function repairCues(cues: ParsedCue[], durationSec: number): CueRepair {
+  let badRange = 0
+  let negative = 0
+
+  const out = cues.map((cue, i) => {
+    let start = cue.start
+    let end = cue.end
+
+    if (!Number.isFinite(start) || start < 0) {
+      start = 0
+      negative += 1
+    }
+    if (!Number.isFinite(end)) {
+      end = start
+    }
+
+    if (durationSec > 0) {
+      // 先夹起点再夹终点。反过来的话 start 可能落在片尾之后，刚夹好的 end
+      // 又会立刻被判成「倒流」，白补一段到片长之外
+      if (start >= durationSec) start = Math.max(0, durationSec - REPAIR_MIN_SEC)
+      if (end > durationSec) end = durationSec
+    }
+
+    if (end <= start) {
+      // 下一条的起点是硬边界：这条最多补到那里，否则会把它顶走
+      const nextStart = cues[i + 1]?.start
+      const limit =
+        Number.isFinite(nextStart) && nextStart > start + 0.02 ? nextStart : start + REPAIR_MIN_SEC
+      end = Math.min(start + REPAIR_MIN_SEC, limit)
+      if (end <= start) end = start + REPAIR_MIN_SEC
+      badRange += 1
+    }
+
+    return start === cue.start && end === cue.end ? cue : { start, end, text: cue.text }
+  })
+
+  return { cues: out, badRange, negative }
+}
+
 /**
  * 解析并校验。
  *
@@ -127,27 +193,28 @@ export function parseModelOutput(raw: string, durationSec: number): ParseOutcome
     }
   }
 
-  // ---- 时间码校验
-  let lastEnd = -1
-  let overlap = 0
-  let badRange = 0
-  let maxEnd = 0
+  // ---- 时间码修复 + 校验
+  const maxEnd = cues.reduce((m, c) => Math.max(m, c.end), 0)
+  const fixed = repairCues(cues, durationSec)
 
-  for (const cue of cues) {
-    if (cue.end <= cue.start) badRange += 1
-    if (lastEnd >= 0 && cue.start < lastEnd - 0.05) overlap += 1
-    lastEnd = Math.max(lastEnd, cue.end)
-    maxEnd = Math.max(maxEnd, cue.end)
+  if (fixed.negative > 0) warnings.push(`${fixed.negative} 条的起点是负数，已归零`)
+  if (fixed.badRange > 0) {
+    warnings.push(`${fixed.badRange} 条的结束时间不晚于开始时间，已按 ${REPAIR_MIN_SEC} 秒补齐`)
   }
-
-  if (badRange > 0) warnings.push(`${badRange} 条的结束时间不晚于开始时间`)
-  if (overlap > 0) warnings.push(`${overlap} 处时间码与前一条重叠`)
   if (durationSec > 0 && maxEnd > durationSec + 1) {
     const over = Math.round(maxEnd - durationSec)
-    warnings.push(`最后一条比原片时长多出约 ${over} 秒`)
+    warnings.push(`最后一条比原片时长多出约 ${over} 秒，已夹到片尾`)
   }
 
-  return { cues, error: null, warnings }
+  let lastEnd = -1
+  let overlap = 0
+  for (const cue of fixed.cues) {
+    if (lastEnd >= 0 && cue.start < lastEnd - 0.05) overlap += 1
+    lastEnd = Math.max(lastEnd, cue.end)
+  }
+  if (overlap > 0) warnings.push(`${overlap} 处时间码与前一条重叠`)
+
+  return { cues: fixed.cues, error: null, warnings }
 }
 
 /**
@@ -189,19 +256,68 @@ export function mergeCuesIntoSelection(
   ids: string[],
 ): SubtitleSegment[] {
   const replaced = new Set(ids)
+  const picked = segments.filter((s) => replaced.has(s.id))
   const kept = segments.filter((s) => !replaced.has(s.id))
-  const built: SubtitleSegment[] = cues.map((cue) => ({
-    id: uid('seg'),
+  if (picked.length === 0) return segments
+
+  // 条数没变时沿用原 id。撤销栈、编辑器选中态、AI 结果回填都按 id 记账，
+  // 整份换新 id 会让「刚校对完的这一段」在编辑器里悄悄丢掉选中
+  const reuse = cues.length === picked.length
+  const built: SubtitleSegment[] = cues.map((cue, i) => ({
+    id: reuse ? picked[i].id : uid('seg'),
     start: Number(cue.start.toFixed(3)),
     end: Number(cue.end.toFixed(3)),
     text: cue.text,
     origin: cue.text,
     issues: [],
   }))
+  const builtIds = new Set(built.map((s) => s.id))
+
   // 按时间码归位：合并/拆分后条数可能变，靠位置插回去一定会错位
   const merged = [...kept, ...built].sort((a, b) => a.start - b.start || a.end - b.end)
-  // 段内重排后可能与相邻条重叠，用与识别管线相同的规则拉开
-  return enforceMonotonicCues(merged)
+  return fitBuiltIns(merged, builtIds)
+}
+
+/**
+ * 只调整**这次新写入**的条目，范围外的老条目一个字段都不动。
+ *
+ * 为什么不能用 `enforceMonotonicCues` 一把梭（原来就是这么写的）：它是全局的，
+ * 只要新条目压到范围外那条的头上，它就把**那条**往后推 —— 而用户在界面上看到的
+ * 是「其余 N 条保持不变」。两边对不上，用户没法知道范围外的时间码被动过。
+ *
+ * 所以这里换个方向：宁可把新条目截短，也不去挪老的。截短到连最短时长都放不下时，
+ * 才允许它压住下一条几毫秒（这种情况只会出现在模型把时间码写飞时）。
+ */
+function fitBuiltIns(merged: SubtitleSegment[], builtIds: Set<string>): SubtitleSegment[] {
+  const out: SubtitleSegment[] = []
+
+  for (let i = 0; i < merged.length; i += 1) {
+    const seg = merged[i]
+    if (!builtIds.has(seg.id)) {
+      out.push(seg)
+      continue
+    }
+
+    const prevEnd = out.length > 0 ? out[out.length - 1].end : Number.NEGATIVE_INFINITY
+    // 后面第一条「保留」条目的起点，就是这一串新条目的时间上限
+    let limit = Number.POSITIVE_INFINITY
+    for (let k = i + 1; k < merged.length; k += 1) {
+      if (!builtIds.has(merged[k].id)) {
+        limit = merged[k].start
+        break
+      }
+    }
+
+    const start = Math.max(seg.start, prevEnd)
+    const end = Math.max(Math.min(seg.end, limit), start + MIN_CUE_SEC)
+    out.push(
+      start === seg.start && end === seg.end
+        ? seg
+        : { ...seg, start: Number(start.toFixed(3)), end: Number(end.toFixed(3)) },
+    )
+  }
+
+  return out
 }
 
 /**

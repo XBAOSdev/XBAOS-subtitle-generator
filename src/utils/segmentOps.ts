@@ -371,7 +371,7 @@ export const MIN_SEGMENT_SEC = 0.05
  * 一条**本来有内容**的字幕被压到 0.05 秒，用户会以为它没被识别出来。
  * 0.2 秒短，但看得出来、点得到、也删得掉。
  */
-const MIN_CUE_SEC = 0.2
+export const MIN_CUE_SEC = 0.2
 
 /**
  * 把识别结果的时间轴夹成单调：后一条的起点不早于前一条的终点。
