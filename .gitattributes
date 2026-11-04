@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
-* text=auto
+#
+# `eol=lf` 不是多余的：本机 core.autocrlf 是 true，检出时会写成 CRLF，
+# 而 tools/ 下的守门脚本是按 `\n` 切源码做断言的 —— 文件一经 git 重写成
+# CRLF，那些断言会集体误报（表现为「样式明明还在，却找不到」）。
+* text=auto eol=lf

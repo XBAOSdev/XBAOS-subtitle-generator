@@ -31,6 +31,7 @@
 | kissfft | 2021 快照 | BSD-3-Clause | Mark Borgerding | 快速傅里叶变换 |
 | utf8proc | 2.12.0 | MIT | JuliaStrings 与贡献者 | Unicode 规范化 |
 | simple-sentencepiece | 0.7 | Apache-2.0 | k2-fsa | 分词 |
+| hclust-cpp（fastcluster） | 2026-02-25 | BSD-2-Clause | Daniel Müllner、Christoph Dalitz | 说话人分层聚类 |
 | nlohmann/json | 3.12.0 | MIT | Niels Lohmann | JSON 解析 |
 | dr_mp3 | 0.7.4 | MIT-0 / Unlicense | Mackie Lab（dr_libs） | MP3 音频解码 |
 | dr_flac | 0.13.4 | MIT-0 / Unlicense | Mackie Lab（dr_libs） | FLAC 音频解码 |
@@ -50,6 +51,22 @@
 | `resources/diarization/speaker-embedding.onnx` | [3D-Speaker](https://github.com/modelscope/3D-Speaker) CAM++ 中文版，经 sherpa-onnx 导出 | Apache-2.0 | 阿里巴巴通义实验室 | 声纹嵌入（判断两段是不是同一人） |
 
 许可证原文见 `pyannote.LICENSE.txt` 与 `Apache-2.0.LICENSE.txt`。
+
+### 随包分发的字体
+
+界面正文字体随安装包分发，**不依赖使用者机器上装没装**。Windows 默认不带思源黑体，
+不内嵌的话字体栈在绝大多数机器上一路落到微软雅黑 —— 同一行字幕在不同电脑上字宽不同，
+排版校验的「显示宽度」也就跟着不准。
+
+| 文件 | 来源 | 许可证 | 版权方 | 用途 |
+|---|---|---|---|---|
+| `assets/noto-sans-sc-subset-*.woff2` | Noto Sans SC 2.04（与 Adobe 思源黑体 Source Han Sans 同一套设计，两个发行名），按常用字集裁剪 | SIL Open Font License 1.1 | Adobe | 界面正文与字幕预览 |
+
+裁剪范围：U+4E00–9FFF 常用汉字、拉丁与拉丁补充、常用标点与数学符号、假名、全角形式，
+保留 `wght` 变量轴（100–900），因此 400 / 500 / 600 三档字重共用同一个文件（5.5 MB）。
+子集之外的生僻字（CJK 扩展 A/B 等）按字体栈逐字回退到系统字体，不影响整行。
+裁剪属于 OFL 定义的「修改版本」，未改动字形设计；许可证全文见 `Open-Font-License-1.1.txt`。
+
 
 
 **关于 Electron 自带的 ffmpeg**：Electron 默认分发的 `ffmpeg.dll` 含 H.264 / AAC 等

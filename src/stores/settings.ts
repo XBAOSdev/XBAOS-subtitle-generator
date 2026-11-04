@@ -80,8 +80,16 @@ export interface SettingsSnapshot {
    * 会让结果稳得多，所以把它做成设置项而不是藏起来。
    */
   speakerCount: number
-  /** 导出字幕时给每条加上「说话人 N」前缀（默认不加，避免污染原始文本） */
+  /** 导出字幕时给每条加上讲话人标签（默认不加，避免污染原始文本） */
   speakerPrefix: boolean
+  /**
+   * 讲话人称呼跨文件共用。
+   *
+   * 默认关：分离是对每份音频各跑一遍的，A 里的 0 号与 B 里的 0 号不必是同一个人。
+   * 只有同一场录制被拆成多个文件时，把它们当成同一批人才对 —— 那种情况下
+   * 开着它，改一次称呼所有文件一起变。
+   */
+  speakerNamesShared: boolean
   /**
    * 勾选的内置词库 id。与热词提示一起拼成提示词注入引擎，
    * 拼装规则见 utils/prompt.ts（优先级：热词 > 风格句 > 精选词 > 核心词 > 扩展词）
@@ -221,6 +229,8 @@ export const DEFAULT_SETTINGS: SettingsSnapshot = {
   speakerCount: 0,
   /** 默认不写前缀：字幕文本要保持干净，需要的人自己开 */
   speakerPrefix: false,
+  /** 默认每个文件各自一套称呼（纯新增字段，load() 合并即可，不需要升键） */
+  speakerNamesShared: false,
   lexiconIds: [],
   // 默认增强档：多跑两遍换来的准确率提升对交付质量更关键，标准档仍可选
   reasoningDepth: 'enhanced',
@@ -325,6 +335,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const speakerDiarization = ref(initial.speakerDiarization)
   const speakerCount = ref(initial.speakerCount)
   const speakerPrefix = ref(initial.speakerPrefix)
+  const speakerNamesShared = ref(initial.speakerNamesShared)
   const lexiconIds = ref<string[]>([...initial.lexiconIds])
   const reasoningDepth = ref<ReasoningDepth>(initial.reasoningDepth)
   const vadEnabled = ref(initial.vadEnabled)
@@ -372,6 +383,7 @@ export const useSettingsStore = defineStore('settings', () => {
       speakerDiarization: speakerDiarization.value,
       speakerCount: speakerCount.value,
       speakerPrefix: speakerPrefix.value,
+      speakerNamesShared: speakerNamesShared.value,
       lexiconIds: [...lexiconIds.value],
       reasoningDepth: reasoningDepth.value,
       vadEnabled: vadEnabled.value,
@@ -485,6 +497,7 @@ export const useSettingsStore = defineStore('settings', () => {
     speakerDiarization.value = d.speakerDiarization
     speakerCount.value = d.speakerCount
     speakerPrefix.value = d.speakerPrefix
+    speakerNamesShared.value = d.speakerNamesShared
     lexiconIds.value = [...d.lexiconIds]
     reasoningDepth.value = d.reasoningDepth
     vadEnabled.value = d.vadEnabled
@@ -532,6 +545,7 @@ export const useSettingsStore = defineStore('settings', () => {
     speakerDiarization,
     speakerCount,
     speakerPrefix,
+    speakerNamesShared,
     lexiconIds,
     reasoningDepth,
     vadEnabled,

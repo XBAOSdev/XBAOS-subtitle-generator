@@ -14,12 +14,14 @@ import type {
 } from '@/types'
 import { serializeSubtitle, applyLineEnding } from '@/utils/subtitle'
 import { planExport, translationLangsOf, type PlanSource } from '@/utils/exportPlan'
+import { useSpeakerStore } from '@/stores/speakers'
 import ModalDialog from './ModalDialog.vue'
 import Icon from '@/components/Icon.vue'
 
 const ui = useUiStore()
 const settings = useSettingsStore()
 const project = useProjectStore()
+const speakerStore = useSpeakerStore()
 
 const EXT: Record<SubtitleFormat, string> = {
   srt: 'srt',
@@ -43,7 +45,6 @@ const format = ref<SubtitleFormat>(settings.exportFormat)
 const encoding = ref<TextEncoding>(settings.exportEncoding)
 const lineEnding = ref<LineEnding>(settings.exportLineEnding)
 const openAfter = ref(settings.openFolderAfterExport)
-const collapsed = ref(false)
 
 /** 语言维度。默认沿用上次的选择（没选过时是「双语」，见 DEFAULT_SETTINGS 的说明） */
 const langMode = ref<ExportLangMode>(settings.exportLangMode)
@@ -54,20 +55,39 @@ const today = new Date().toISOString().slice(0, 10).replace(/-/g, '')
 
 const isMerge = computed(() => project.batchMode === 'merge')
 
-/**
- * 这批要导出的字幕里有没有说话人标签。
- *
- * 没跑过分离就整块不显示 —— 一个永远打不上标签的开关，只会让人以为
- * 「勾了却没生效」。
- */
-const hasSpeakers = computed(() =>
-  sources.value.some((s) => s.segments.some((seg) => typeof seg.speaker === 'number')),
-)
-
 function resolveDir(file: AudioFile): string {
   if (locationMode.value === 'unified') return unifiedDir.value
   if (locationMode.value === 'per-file') return perFileDirs.value[file.id] ?? file.dir
   return file.dir
+}
+
+/**
+ * 拉起系统的选文件夹框。
+ *
+ * 光给一个文本框是不行的 —— 用户得自己把 `D:\Podcast\第12期` 这种路径一字不差地敲进去，
+ * 敲错一个字符就是导出失败，而失败提示还只能说「目录不存在」。能选就让人选。
+ *
+ * `target` 传 `'unified'` 走统一目录，传文件 id 走那一行。选中之后顺手把输出模式切过去：
+ * 用户点这个按钮，本来就是想去那个目录。
+ */
+async function pickDir(target: 'unified' | string, current: string): Promise<void> {
+  const api = window.xbaos?.dialog
+  if (!api) {
+    ui.notify('info', '浏览器预览无法选择文件夹', '请在桌面应用中使用')
+    return
+  }
+  const dir = await api.pickDirectory({
+    title: target === 'unified' ? '选择输出目录' : '选择这个文件的输出目录',
+    defaultPath: current || undefined,
+  })
+  if (!dir) return
+
+  if (target === 'unified') {
+    unifiedDir.value = dir
+    locationMode.value = 'unified'
+    return
+  }
+  perFileDirs.value = { ...perFileDirs.value, [target]: dir }
 }
 
 /** 合并模式下导出的是那条拼接产物，不是随便某个音频 */
@@ -79,7 +99,8 @@ function mergedSegments(): SubtitleSegment[] {
   return project.mergedFile?.segments ?? []
 }
 
-const sources = computed<PlanSource[]>(() => {
+/** 未筛选的全部来源。筛选只影响真正写出去的内容，选项本身要一直看得见 */
+const baseSources = computed<PlanSource[]>(() => {
   const files = project.supportedFiles
   if (files.length === 0) return []
 
@@ -107,6 +128,142 @@ const sources = computed<PlanSource[]>(() => {
     outputDir: resolveDir(file),
     segments: file.segments,
   }))
+})
+
+/**
+ * 这批要导出的字幕里有没有讲话人标签。
+ *
+ * 没跑过分离就整块不显示 —— 一个永远打不上标签的开关，只会让人以为
+ * 「勾了却没生效」。
+ */
+const hasSpeakers = computed(() =>
+  baseSources.value.some((s) => s.segments.some((seg) => typeof seg.speaker === 'number')),
+)
+
+/**
+ * 可选（可按）的讲话人清单。
+ *
+ * 键是「来源文件 + 编号」而不是光一个编号：分别导出多个文件时，A 里的 0 号
+ * 和 B 里的 0 号未必是同一个人，只按编号勾会把两个人一起勾上。
+ */
+interface SpeakerOption {
+  key: string
+  index: number
+  name: string
+  count: number
+  sourceId: string
+  sourceName: string
+}
+
+const speakerOptions = computed<SpeakerOption[]>(() =>
+  baseSources.value.flatMap((source) =>
+    speakerStore
+      .speakersOf(source.id, source.segments)
+      .filter((entry) => entry.count > 0)
+      .map((entry) => ({
+        key: `${source.id}:${entry.index}`,
+        index: entry.index,
+        name: entry.name,
+        count: entry.count,
+        sourceId: source.id,
+        sourceName: source.name,
+      })),
+  ),
+)
+
+/** 勾了谁。缺省即「全选」—— 关掉对话框再打开不该丢掉上一次的选择也没意义，默认重新全选 */
+const speakerPicked = ref<Record<string, boolean>>({})
+
+function isPicked(option: SpeakerOption): boolean {
+  return speakerPicked.value[option.key] !== false
+}
+
+function toggleSpeaker(option: SpeakerOption): void {
+  speakerPicked.value = { ...speakerPicked.value, [option.key]: !isPicked(option) }
+}
+
+const pickedAll = computed(() => speakerOptions.value.every((o) => isPicked(o)))
+const pickedCount = computed(() => speakerOptions.value.filter(isPicked).length)
+
+/** 多文件时同名的「讲话人 1」会撞在一起，只有撞上了才在 chip 上带出处 */
+const multiSource = computed(() => baseSources.value.length > 1)
+
+const duplicateNames = computed(() => {
+  const counts = new Map<string, number>()
+  for (const option of speakerOptions.value) {
+    counts.set(option.name, (counts.get(option.name) ?? 0) + 1)
+  }
+  return new Set([...counts.entries()].filter(([, n]) => n > 1).map(([name]) => name))
+})
+
+function pickAllSpeakers(): void {
+  speakerPicked.value = {}
+}
+
+/** 全部取消：至少留一位，否则导出会变成一份空文件 */
+function pickNoneSpeakers(): void {
+  const next: Record<string, boolean> = {}
+  for (const option of speakerOptions.value) next[option.key] = false
+  speakerPicked.value = next
+}
+
+/** 每个来源里被筛掉的人数统计，用来给一句实话 */
+const filteredSummary = computed(() => {
+  let kept = 0
+  let dropped = 0
+  let unlabeled = 0
+  for (const source of baseSources.value) {
+    const options = speakerOptions.value.filter((o) => o.sourceId === source.id)
+    if (options.length === 0) {
+      kept += source.segments.length
+      continue
+    }
+    const allowed = new Set(options.filter(isPicked).map((o) => o.index))
+    const all = allowed.size === options.length
+    for (const seg of source.segments) {
+      if (typeof seg.speaker !== 'number') {
+        if (all) kept += 1
+        else unlabeled += 1
+        continue
+      }
+      if (allowed.has(seg.speaker)) kept += 1
+      else dropped += 1
+    }
+  }
+  return { kept, dropped, unlabeled }
+})
+
+/**
+ * 真正要写出去的来源。
+ *
+ * 筛选只在「没有全选」时生效；全选时原样放行，未标记的条目也一并留下 ——
+ * 用户什么都没取消，却少了几条，那是纯粹的惊吓。
+ */
+const sources = computed<PlanSource[]>(() => {
+  if (pickedAll.value) return baseSources.value
+  return baseSources.value.map((source) => {
+    const options = speakerOptions.value.filter((o) => o.sourceId === source.id)
+    if (options.length === 0) return source
+    const allowed = new Set(options.filter(isPicked).map((o) => o.index))
+    return {
+      ...source,
+      segments: source.segments.filter(
+        (seg) => typeof seg.speaker === 'number' && allowed.has(seg.speaker),
+      ),
+    }
+  })
+})
+
+/** 讲话人标签在所选格式里怎么落笔 —— 三种写法差别很大，必须说清楚 */
+const speakerStyleHint = computed(() => {
+  switch (format.value) {
+    case 'ass':
+      return 'ASS 有 Name 列，称呼写在那里，播放器能认出来'
+    case 'vtt':
+      return 'VTT 用 <v 称呼> 语音标签，符合 WebVTT 规范'
+    default:
+      return '这个格式没有讲话人字段，写成「称呼：字幕」'
+  }
 })
 
 /** 这批字幕里出现过的译文语言 */
@@ -246,6 +403,8 @@ async function doExport(): Promise<void> {
   if (activeTrLang.value) settings.translationLang = activeTrLang.value
 
   const segmentsOf = new Map(sources.value.map((s) => [s.id, s.segments]))
+  // 称呼跟着来源走：分别导出时每个文件的讲话人各有一套名字
+  const namesOf = new Map(sources.value.map((s) => [s.id, speakerStore.namesOf(s.id)]))
   const written: string[] = []
   const records = new Map<string, ExportRecord[]>()
   let missing = 0
@@ -256,7 +415,8 @@ async function doExport(): Promise<void> {
         lang: entry.bundle,
         translationLang: entry.lang,
         sourceFirst: sourceFirst.value,
-        speakerPrefix: settings.speakerPrefix,
+        speakerPrefix: hasSpeakers.value && settings.speakerPrefix,
+        speakerNames: namesOf.get(entry.fileId) ?? {},
       })
       const content = applyLineEnding(body, lineEnding.value)
 
@@ -312,23 +472,6 @@ function close(): void {
     @close="close"
   >
     <div class="export">
-      <!-- 多目录时的汇总条 -->
-      <div v-if="dirCount > 1" class="export__summary">
-        <Icon name="folder" :size="14" />
-        <span class="export__summary-text">
-          将输出到 <strong>{{ dirCount }}</strong> 个目录，共
-          <strong>{{ outputs.length }}</strong> 个文件
-        </span>
-        <button
-          class="export__summary-toggle"
-          type="button"
-          @click="collapsed = !collapsed"
-        >
-          {{ collapsed ? '展开清单' : '收起清单' }}
-          <Icon :name="collapsed ? 'chevron-down' : 'chevron-up'" :size="13" />
-        </button>
-      </div>
-
       <!-- 语言维度 -->
       <section class="export__section">
         <h3 class="export__section-title">
@@ -387,6 +530,56 @@ function close(): void {
         </div>
       </section>
 
+      <!-- 讲话人 -->
+      <section v-if="hasSpeakers" class="export__section">
+        <h3 class="export__section-title">
+          讲话人
+          <span class="export__section-note">{{ speakerOptions.length }} 位</span>
+        </h3>
+
+        <label class="checkbox export__spk-toggle">
+          <input v-model="settings.speakerPrefix" type="checkbox" />
+          <span>导出讲话人标签</span>
+        </label>
+        <p class="hint export__spk-hint">{{ speakerStyleHint }}</p>
+
+        <div class="spkfilter">
+          <div class="spkfilter__head">
+            <span class="spkfilter__label">导出哪些人</span>
+            <button class="spkfilter__act" type="button" @click="pickAllSpeakers">全选</button>
+            <button class="spkfilter__act" type="button" @click="pickNoneSpeakers">全不选</button>
+            <span class="spacer" />
+            <span class="hint">
+              {{ pickedAll ? '全部' : `已选 ${pickedCount} / ${speakerOptions.length}` }}
+            </span>
+          </div>
+
+          <div class="spkchips">
+            <label
+              v-for="opt in speakerOptions"
+              :key="opt.key"
+              class="spkchip"
+              :class="{ 'is-on': isPicked(opt) }"
+              :title="multiSource ? `${opt.name}｜${opt.sourceName}` : opt.name"
+            >
+              <input type="checkbox" :checked="isPicked(opt)" @change="toggleSpeaker(opt)" />
+              <span class="spkchip__name">{{ opt.name }}</span>
+              <span v-if="multiSource && duplicateNames.has(opt.name)" class="spkchip__src">
+                {{ opt.sourceName.replace(/\.[^.]+$/, '') }}
+              </span>
+              <span class="spkchip__count">{{ opt.count }}</span>
+            </label>
+          </div>
+
+          <p v-if="!pickedAll" class="hint spkfilter__warn">
+            将筛掉 {{ filteredSummary.dropped }} 条字幕<template
+              v-if="filteredSummary.unlabeled > 0"
+              >，另有 {{ filteredSummary.unlabeled }} 条未标记的不导出</template
+            >。
+          </p>
+        </div>
+      </section>
+
       <!-- 输出位置 -->
       <section class="export__section">
         <h3 class="export__section-title">输出位置</h3>
@@ -410,13 +603,23 @@ function close(): void {
             <input v-model="locationMode" type="radio" value="unified" />
             <span class="radio__body">
               <span class="radio__label">统一输出到指定目录</span>
-              <input
-                v-model="unifiedDir"
-                class="input input--mono export__dir-input"
-                type="text"
-                spellcheck="false"
-                :disabled="locationMode !== 'unified'"
-              />
+              <span class="export__dirrow">
+                <input
+                  v-model="unifiedDir"
+                  class="input input--mono export__dir-input"
+                  type="text"
+                  spellcheck="false"
+                  :disabled="locationMode !== 'unified'"
+                />
+                <button
+                  class="btn btn--sm btn--icon"
+                  type="button"
+                  title="选择文件夹"
+                  @click.stop.prevent="pickDir('unified', unifiedDir)"
+                >
+                  <Icon name="folder" :size="13" />
+                </button>
+              </span>
             </span>
           </label>
 
@@ -431,7 +634,7 @@ function close(): void {
       </section>
 
       <!-- 输出清单 -->
-      <section v-if="!collapsed" class="export__section">
+      <section class="export__section">
         <h3 class="export__section-title">
           输出清单
           <span class="export__section-note">
@@ -468,14 +671,26 @@ function close(): void {
                   {{ item.bundle === 'both' ? '双语' : '译文' }}
                 </span>
 
-                <input
+                <span
                   v-if="locationMode === 'per-file' && item.firstOfSource"
-                  v-model="perFileDirs[item.fileId]"
-                  class="input input--mono plan__dir"
-                  type="text"
-                  :placeholder="item.sourceDir"
-                  spellcheck="false"
-                />
+                  class="plan__dirrow"
+                >
+                  <input
+                    v-model="perFileDirs[item.fileId]"
+                    class="input input--mono plan__dir"
+                    type="text"
+                    :placeholder="item.sourceDir"
+                    spellcheck="false"
+                  />
+                  <button
+                    class="btn btn--sm btn--icon"
+                    type="button"
+                    title="选择文件夹"
+                    @click.stop.prevent="pickDir(item.fileId, perFileDirs[item.fileId] ?? item.sourceDir)"
+                  >
+                    <Icon name="folder" :size="12" />
+                  </button>
+                </span>
               </li>
             </ul>
           </div>
@@ -531,11 +746,6 @@ function close(): void {
           </label>
         </div>
 
-        <label v-if="hasSpeakers" class="checkbox export__open">
-          <input v-model="settings.speakerPrefix" type="checkbox" />
-          <span>在每条字幕开头标注说话人</span>
-        </label>
-
         <label class="checkbox export__open">
           <input v-model="openAfter" type="checkbox" />
           <span>导出后打开所在文件夹</span>
@@ -557,35 +767,6 @@ function close(): void {
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
-}
-
-.export__summary {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-info-border);
-  border-radius: var(--radius-md);
-  background: var(--color-info-subtle);
-  font-size: var(--font-size-xs);
-  color: var(--color-text-secondary);
-}
-
-.export__summary-text {
-  flex: 1;
-}
-
-.export__summary-text strong {
-  color: var(--color-text-primary);
-  font-variant-numeric: tabular-nums;
-}
-
-.export__summary-toggle {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  font-size: var(--font-size-xs);
-  color: var(--color-accent-text);
 }
 
 .export__section-title {
@@ -683,9 +864,19 @@ function close(): void {
   font-variant-numeric: tabular-nums;
 }
 
-.export__dir-input {
-  max-width: 460px;
+/* 路径框和「选文件夹」按钮同一行：按钮贴着输入框，别让它飘到右边去 */
+.export__dirrow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   margin-top: var(--space-1);
+  max-width: 460px;
+}
+
+.export__dir-input {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
 }
 
 .plan {
@@ -788,11 +979,24 @@ function close(): void {
   border: 1px solid var(--color-border-subtle);
 }
 
+.plan__dirrow {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
 .plan__dir {
   flex: none;
-  width: 180px;
+  width: 168px;
   height: 24px;
   font-size: 11px;
+}
+
+/* 行内的选目录按钮跟着 24px 的输入框走，别用默认 28px 把行撑高 */
+.plan__dirrow .btn--icon {
+  width: 24px;
+  height: 24px;
 }
 
 .export__conflict {
@@ -820,6 +1024,105 @@ function close(): void {
 .field__hint {
   font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
+}
+
+/* ---- 讲话人 ---- */
+.export__spk-toggle {
+  margin-bottom: 2px;
+}
+
+.export__spk-hint {
+  margin-left: 23px;
+}
+
+.spkfilter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.spkfilter__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.spkfilter__label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.spkfilter__act {
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--color-accent-text);
+}
+
+.spkfilter__act:hover {
+  background: var(--color-bg-hover);
+}
+
+.spkfilter__warn {
+  color: var(--color-warning);
+}
+
+.spkchips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.spkchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.spkchip:hover {
+  border-color: var(--color-border-strong);
+}
+
+.spkchip.is-on {
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+  color: var(--color-text-primary);
+}
+
+.spkchip input[type='checkbox'] {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.spkchip__src {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+}
+
+.spkchip__count {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 .export__open {

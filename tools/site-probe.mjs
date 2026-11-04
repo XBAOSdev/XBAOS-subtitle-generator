@@ -160,11 +160,31 @@ function main() {
   const pages = ['index.html', 'changelog.html']
   const originalManifest = JSON.parse(readFileSync(join(root, 'data', 'subtitle.json'), 'utf8'))
 
+  /*
+   * 页面里那份「读不到清单时」的版本号兜底值，先自己读出来再断言它被替换掉。
+   * 写死成某个版本号不行：正式版一升，这条断言就变成永远成立的空话。
+   */
+  const fallbackVersion = (readFileSync(join(root, 'index.html'), 'utf8').match(
+    /id="dl-version"[^>]*>([^<]+)</,
+  ) || [])[1]
+
   const sentinelManifest = {
     ...originalManifest,
     latest: SENTINEL_VERSION,
     updated: SENTINEL_DATE,
-    download: { ...(originalManifest.download || {}), url: SENTINEL_DOWNLOAD },
+    download: {
+      ...(originalManifest.download || {}),
+      url: SENTINEL_DOWNLOAD,
+      /*
+       * 首页的下载入口渲染的是 **mirrors**，不是 `url`：`url` 是给软件自己的
+       * 更新流程用的（带 `?download=1` 回到这个页面再弹出弹窗），页面上没有
+       * 它的落点。要验「下载入口由清单驱动」，哨兵就得塞进 mirrors 里。
+       */
+      mirrors: [
+        { label: 'PROBE 镜像一', url: 'https://example.com/PROBE-SENTINEL-MIRROR-1', hint: '哨兵' },
+        { label: 'PROBE 镜像二', url: 'https://example.com/PROBE-SENTINEL-MIRROR-2', hint: '哨兵' },
+      ],
+    },
     releases: [
       { version: SENTINEL_VERSION, title: SENTINEL_TITLE, date: SENTINEL_DATE, items: ['哨兵条目一', '哨兵条目二'] },
       { version: '0.0.9', title: OLD_TITLE, date: '2026-01-01', items: ['旧版本占位'] },
@@ -198,13 +218,26 @@ function main() {
     const home = render(chrome, join(root, 'index.html'))
     check('首页版本号来自清单', home.includes(SENTINEL_VERSION), `哨兵值 ${SENTINEL_VERSION}`)
     check('首页更新日期来自清单', home.includes(SENTINEL_DATE))
-    check('首页下载链接被清单的 download.url 覆盖', home.includes(SENTINEL_DOWNLOAD))
     check(
-      '首页写死的兜底下载链接已被覆盖',
-      !home.includes('example.com/xbaos-subtitle-download'),
-      '没被覆盖 = 清单没生效',
+      '首页下载入口由清单的 download.mirrors 渲染',
+      home.includes('PROBE-SENTINEL-MIRROR-1') && home.includes('PROBE-SENTINEL-MIRROR-2'),
+      '两条都要在：清单里几条镜像，弹窗里就该有几个入口',
     )
-    check('首页兜底的旧版本号已被替换', !/id="dl-version"[^>]*>0\.1\.0</.test(home))
+    /*
+     * 只查弹窗里那一份。页面别处还有 `<noscript>` 的直链 —— 那是「脚本没跑起来也
+     * 得能下载」的兜底，本来就不该被清单覆盖，拿整页去匹配会误报。
+     */
+    const dlgMirrors = (home.match(/<ul[^>]*id="dlg-mirrors"[^>]*>[\s\S]*?<\/ul>/) || [''])[0]
+    check(
+      '弹窗里写死的兜底下载入口已被清单覆盖',
+      dlgMirrors.includes('PROBE-SENTINEL-MIRROR-1') && !dlgMirrors.includes('feijipan'),
+      '替换而不是追加：旧的两条兜底不该还留在列表里',
+    )
+    check(
+      '首页兜底的版本号已被清单值替换',
+      !!fallbackVersion && !home.includes(fallbackVersion),
+      `HTML 里的兜底是 ${fallbackVersion || '(没读到)'}，渲染后不该还留着`,
+    )
 
     // ---- 更新日志页：条目、顺序、当前版本标签
     const log = render(chrome, join(root, 'changelog.html'))

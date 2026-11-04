@@ -60,21 +60,32 @@ const LIBS = [
   { name: 'Vue.js', license: 'MIT License' },
   { name: 'Pinia', license: 'MIT License' },
   { name: 'whisper.cpp', license: 'MIT License' },
+  { name: 'ggml（whisper.cpp 的张量后端）', license: 'MIT License' },
   { name: 'sherpa-onnx', license: 'Apache License 2.0' },
   { name: 'ONNX Runtime', license: 'MIT License' },
-  { name: 'kaldi-native-fbank / kaldifst / OpenFst', license: 'Apache License 2.0' },
+  { name: 'kaldi-native-fbank / kaldifst / kaldi-decoder', license: 'Apache License 2.0' },
+  { name: 'OpenFst / simple-sentencepiece', license: 'Apache License 2.0' },
+  // fastcluster 是 BSD 两条款，**明文要求二进制分发时在文档里带上署名**，
+  // 所以它必须出现在这里，不能只躺在 licenses 文件夹里
+  { name: 'hclust-cpp / fastcluster（说话人聚类）', license: 'BSD 2-Clause License' },
   { name: 'Eigen', license: 'Mozilla Public License 2.0' },
   { name: 'kissfft', license: 'BSD 3-Clause License' },
   { name: 'utf8proc / nlohmann/json', license: 'MIT License' },
-  { name: 'OpenAI Whisper 模型权重', license: 'MIT License' },
-  { name: 'BELLE 中文微调模型权重', license: 'Apache License 2.0' },
-  { name: 'SenseVoice-Small 模型权重', license: 'FunASR Model License 1.1' },
   { name: 'dr_libs（WAV / MP3 / FLAC 解码）', license: 'MIT-0 或 Public Domain' },
   { name: 'stb_vorbis（OGG Vorbis 解码）', license: 'MIT-0 或 Public Domain' },
   { name: 'libopus / libogg', license: 'BSD 3-Clause License' },
   { name: 'FFmpeg（non-proprietary 构建）', license: 'LGPL-2.1-or-later' },
   { name: 'Vulkan-Headers', license: 'Apache License 2.0' },
-  { name: '思源黑体 Source Han Sans SC', license: 'SIL Open Font License 1.1' },
+  // 随包分发的两个声纹模型。它们不是代码而是模型权重，但确实在安装包里，
+  // 与「用户自行获取的识别模型」不是一回事，必须单独列出来。
+  { name: 'pyannote 声纹切分模型', license: 'MIT License' },
+  { name: '3D-Speaker CAM++ 声纹模型', license: 'Apache License 2.0' },
+  { name: '思源黑体（内嵌 Noto Sans SC 子集）', license: 'SIL Open Font License 1.1' },
+  // 以下三个是识别模型，**不随安装包分发**，由使用者自行获取。列在这里是因为
+  // 它们的许可各不相同，用户下载时用得上；权利归各自发布者，不在本软件范围内。
+  { name: 'OpenAI Whisper 模型权重（自行获取）', license: 'MIT License' },
+  { name: 'BELLE 中文微调模型权重（自行获取）', license: 'Apache License 2.0' },
+  { name: 'SenseVoice-Small 模型权重（自行获取）', license: 'FunASR Model License 1.1' },
 ]
 </script>
 

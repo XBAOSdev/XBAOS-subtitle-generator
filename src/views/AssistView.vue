@@ -552,7 +552,10 @@ async function loadPayload(): Promise<void> {
       Number.isFinite(n) && n >= 1
         ? { ...DEMO_PAYLOAD, targets: DEMO_PAYLOAD.targets.slice(0, n) }
         : DEMO_PAYLOAD
-    payload.value = params.has('task') ? { ...base, task: 'translate' } : base
+    // 只有明确写 `task=translate` 才切翻译。早先写成 `params.has('task')`，
+    // 于是 `task=review` 也被当成翻译 —— 官网那张图因此拍成了翻译窗口，
+    // 而图注讲的是校对，谁也没看出来
+    payload.value = params.get('task') === 'translate' ? { ...base, task: 'translate' } : base
   }
   selectedIds.value = payload.value ? payload.value.targets.map((t) => t.fileId) : []
   resetPicks()

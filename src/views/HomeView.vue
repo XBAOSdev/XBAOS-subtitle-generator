@@ -4,20 +4,18 @@ import { useProjectStore } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
 import { useSettingsStore } from '@/stores/settings'
 import { useModelStore } from '@/stores/model'
-import { useI18n } from '@/composables/useI18n'
-import type { BatchMode, FileStatus } from '@/types'
-import { formatBytes, formatDuration, formatEstimate } from '@/utils/format'
+import type { BatchMode } from '@/types'
+import { formatDuration, formatEstimate } from '@/utils/format'
 import { LEXICONS, lexiconWordCount } from '@/data/lexicons'
 import { DEPTH_ORDER, DEPTH_PRESETS, estimateSeconds } from '@/utils/reasoningDepth'
 import { PROMPT_BUDGET_CHARS, buildPrompt } from '@/utils/prompt'
-import DropZone from '@/components/DropZone.vue'
+import MaterialBoard from '@/components/MaterialBoard.vue'
 import Icon from '@/components/Icon.vue'
 
 const project = useProjectStore()
 const ui = useUiStore()
 const settings = useSettingsStore()
 const model = useModelStore()
-const { t } = useI18n()
 
 /**
  * 架构能力。不支持的项一律**留在原位、变灰、写明原因** —— 直接藏掉会让用户
@@ -35,7 +33,7 @@ const LANGUAGE_OPTIONS = [
 ]
 
 /**
- * 说话人数上限只到 6。
+ * 讲话人数上限只到 6。
  *
  * 不是技术限制，是「报的人数越多、每个声纹样本越少」的取舍：6 个人分摊一段
  * 对话，每人常常只剩十几秒，再往上分就主要是在噪声里找人了。真要更多，用户
@@ -51,25 +49,6 @@ const promptPreview = computed(() =>
 function toggleLexicon(id: string): void {
   const ids = settings.lexiconIds
   settings.lexiconIds = ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]
-}
-
-const STATUS_ICON: Record<FileStatus, string> = {
-  queued: 'clock',
-  processing: 'spinner',
-  pending: 'dot',
-  reviewed: 'check',
-  edited: 'check',
-  issue: 'alert',
-  failed: 'alert',
-  unsupported: 'ban',
-}
-
-function statusIcon(status: FileStatus): string {
-  return STATUS_ICON[status]
-}
-
-function statusLabel(status: FileStatus): string {
-  return t(`status.${status}`)
 }
 
 const pendingFiles = computed(() =>
@@ -99,54 +78,6 @@ const depthHint = computed(() => {
   return model.caps.decode ? preset : { ...preset, timeFactor: 1 }
 })
 
-function move(index: number, delta: number): void {
-  project.reorder(index, index + delta)
-}
-
-/**
- * 从队列移除单个文件。
- *
- * 该文件**已经有识别结果**时才确认一次 —— 移除按钮和上移/下移挤在一起，
- * 误触概率不低，而这一下会连带丢掉那个文件的所有字幕。没有结果的文件
- * 直接删，不打扰。
- */
-async function remove(id: string, name: string): Promise<void> {
-  const file = project.files.find((f) => f.id === id)
-  const count = file?.segments.length ?? 0
-
-  if (count > 0) {
-    const message = `「${name}」已经识别出 ${count} 条字幕，移除后这些字幕会一并丢失，且无法恢复。`
-    const detail = '磁盘上的原始文件不会被删除，只是从队列里移出。'
-    const bridge = window.xbaos
-    if (bridge) {
-      const ok = await bridge.dialog.confirm({
-        title: '从队列移除',
-        message,
-        detail,
-        buttons: ['取消', '移除'],
-        defaultId: 0,
-        cancelId: 0,
-      })
-      if (ok !== 1) return
-    } else if (!window.confirm(`${message}\n\n${detail}`)) {
-      return
-    }
-  }
-
-  project.removeFile(id)
-  ui.notify('info', '已从队列移除', name)
-}
-
-/**
- * 点队列里的条目 = 切预览目标。
- * 合并模式下编辑器里只有一条拼接产物，这里切换只会把画面换掉，
- * 所以合并模式直接忽略。
- */
-function pickFile(id: string): void {
-  if (project.isMerge) return
-  project.setActiveFile(id)
-}
-
 /**
  * 选批量处理模式。
  *
@@ -162,58 +93,6 @@ function pickMode(mode: BatchMode): void {
       '已经在识别的批次里生效了，切换会让已识别的内容归属发生变化。请先清空队列再重新选择。',
     )
   }
-}
-
-/** 清空队列。会把已经识别出来的内容一起删掉，所以必须把风险讲清楚 */
-async function clearAll(): Promise<void> {
-  const total = project.files.length
-  const withResult = project.supportedFiles.filter((f) => f.segments.length > 0)
-  const segmentCount = withResult.reduce((n, f) => n + f.segments.length, 0)
-
-  const detail =
-    (withResult.length > 0
-      ? `队列里有 ${withResult.length} 个文件已经识别出 ${segmentCount} 条字幕，清空会把它们一并删除且无法恢复，未导出的内容会丢失。批量处理模式的锁定也会一并解除。`
-      : '清空后可以重新导入文件，批量处理模式的锁定也会一并解除。') +
-    '调整导入顺序、移除单个文件都不会影响已经识别出来的内容，只有清空会。'
-
-  const bridge = window.xbaos
-  if (bridge) {
-    const ok = await bridge.dialog.confirm({
-      title: '清空队列',
-      message: `确定要清空队列中的 ${total} 个文件吗？`,
-      detail,
-      buttons: ['取消', '清空'],
-      defaultId: 0,
-      cancelId: 0,
-    })
-    if (ok !== 1) return
-  } else if (!window.confirm(`确定要清空队列中的 ${total} 个文件吗？\n\n${detail}`)) {
-    return
-  }
-
-  project.clearAll()
-  ui.notify(
-    'info',
-    '队列已清空',
-    segmentCount > 0 ? `同时删除了 ${segmentCount} 条识别结果` : undefined,
-  )
-}
-
-/** 导入已有字幕文件直接进编辑器（SRT / VTT / ASS） */
-async function importSubtitle(): Promise<void> {
-  const bridge = window.xbaos
-  if (!bridge) {
-    ui.notify('info', '浏览器预览无法读取文件', '请在桌面应用中使用')
-    return
-  }
-  const paths = await bridge.dialog.pickSubtitle()
-  if (paths.length === 0) return
-  let ok = 0
-  for (const p of paths) {
-    const done = await project.addSubtitleFromPath(p)
-    if (done) ok += 1
-  }
-  if (ok > 0) ui.navigate('editor')
 }
 
 async function start(event?: MouseEvent): Promise<void> {
@@ -249,127 +128,186 @@ async function start(event?: MouseEvent): Promise<void> {
 </script>
 
 <template>
-  <div class="view">
+  <div class="view view--fill">
+    <!--
+      两栏：素材在左、设置在右，页面本身不滚，卡片各自滚。
+
+      为什么不是单栏纵向流：单栏里「放入内容」和「调参数」只能靠上下顺序区分，
+      而这两类东西本来就不该并排出现在同一条阅读流里 —— 内容是有身份的物件，
+      参数是跨会话的配置。左右分栏同时给出「位置」和「容器」两重区分，
+      这是单栏做不到的。
+
+      这条注释必须留在**根元素内部**：根元素外面哪怕只多一个注释节点，组件就变成
+      多根片段，`<Transition mode="out-in">` 等不到离场回调 —— 切页会整页空白，
+      且不报任何错。unit-check 里有对应的守门。
+    -->
     <div class="view__body">
       <div class="view__body-inner">
-        <div class="io">
-          <!-- 主列：导入 → 队列 → 批量方式，按操作顺序排列 -->
-          <div class="io__main">
-            <section class="block">
-              <div class="block__head">
-                <span class="step">1</span>
-                <span class="block__title">导入音频</span>
-              </div>
-              <div class="block__body">
-                <DropZone />
+        <MaterialBoard />
 
-                <div class="sub-import">
-                  <button class="btn btn--sm" type="button" @click="importSubtitle">
-                    <Icon name="type" :size="13" />
-                    <span>导入字幕文件</span>
-                  </button>
-                  <span class="hint">编辑已有字幕文件，可覆盖保存</span>
-                </div>
-              </div>
-            </section>
+        <section class="col">
+          <header class="col__head">
+            <Icon name="sliders" :size="14" class="set__headicon" />
+            <span class="col__title">识别设置</span>
+            <span class="spacer" />
+            <span class="hint">即时生效</span>
+          </header>
 
-            <!-- 音频队列 -->
-            <section v-if="project.hasFiles" class="block">
-              <div class="block__head">
-                <span class="step">2</span>
-                <span class="block__title">确认队列</span>
-                <span class="hint">{{ project.files.length }} 个文件</span>
-                <span class="spacer" />
-                <button class="btn btn--ghost btn--sm" type="button" @click="clearAll">
-                  清空
+          <div class="settings">
+            <label class="field">
+              <span class="field__label">识别语言</span>
+              <select v-model="settings.language" class="select">
+                <option
+                  v-for="item in LANGUAGE_OPTIONS"
+                  :key="item.value"
+                  :value="item.value"
+                >
+                  {{ item.label }}
+                </option>
+              </select>
+            </label>
+
+            <div class="field" :class="{ 'is-off': !canTune }">
+              <div class="field__head">
+                <span class="field__label">推理深度</span>
+                <span class="field__tag mono">约 ×{{ depthHint.timeFactor }} 耗时</span>
+              </div>
+              <div v-seg-thumb class="seg">
+                <button
+                  v-for="id in DEPTH_ORDER"
+                  :key="id"
+                  class="choice"
+                  :class="{ 'is-active': settings.reasoningDepth === id }"
+                  type="button"
+                  :disabled="!canTune"
+                  @click="settings.reasoningDepth = id"
+                >
+                  {{ DEPTH_PRESETS[id].label }}
                 </button>
               </div>
+              <span class="field__hint">
+                <template v-if="!canTune">当前模型不支持多遍解码，固定单遍识别</template>
+                <template v-else>{{ depthHint.hint }}</template>
+              </span>
+            </div>
 
-              <ul class="queue">
-                <li
-                  v-for="(file, index) in project.files"
-                  :key="file.id"
-                  class="queue__row"
-                  :class="{
-                    'is-unsupported': file.status === 'unsupported',
-                    'is-active': !project.isMerge && project.activeFileId === file.id,
-                    'is-static': project.isMerge,
-                  }"
-                  @click="pickFile(file.id)"
+            <div class="field field--wide">
+              <div class="field__head">
+                <span class="field__label">领域词库</span>
+                <span
+                  v-if="canPrompt"
+                  class="lex-budget mono"
+                  :class="{ 'is-over': promptPreview.truncated }"
                 >
-                  <span class="queue__index mono">{{ index + 1 }}</span>
-
-                  <span class="queue__status" :class="`queue__status--${file.status}`">
-                    <Icon :name="statusIcon(file.status)" :size="14" />
-                  </span>
-
-                  <div class="queue__main">
-                    <div class="queue__line">
-                      <span class="queue__name">{{ file.name }}</span>
-                      <span class="queue__badge">{{ statusLabel(file.status) }}</span>
-                    </div>
-                    <div class="queue__meta">
-                      <span>{{ file.ext.toUpperCase() }}</span>
-                      <span class="queue__dot" aria-hidden="true">|</span>
-                      <span>{{ formatBytes(file.sizeBytes) }}</span>
-                      <span class="queue__dot" aria-hidden="true">|</span>
-                      <span>{{ formatDuration(file.durationSec) }}</span>
-                      <template v-if="file.segments.length > 0">
-                        <span class="queue__dot" aria-hidden="true">|</span>
-                        <span>{{ file.segments.length }} 条字幕</span>
-                      </template>
-                    </div>
-                    <p v-if="file.message" class="queue__message">{{ file.message }}</p>
-                  </div>
-
-                  <span class="queue__dir mono" :title="file.dir">{{ file.dir }}</span>
-
-                  <div class="queue__actions">
-                    <button
-                      class="queue__btn"
-                      type="button"
-                      title="上移"
-                      :disabled="index === 0"
-                      @click.stop="move(index, -1)"
-                    >
-                      <Icon name="arrow-up" :size="13" />
-                    </button>
-                    <button
-                      class="queue__btn"
-                      type="button"
-                      title="下移"
-                      :disabled="index === project.files.length - 1"
-                      @click.stop="move(index, 1)"
-                    >
-                      <Icon name="arrow-down" :size="13" />
-                    </button>
-                    <button
-                      class="queue__btn queue__btn--danger"
-                      type="button"
-                      title="移除"
-                      @click.stop="remove(file.id, file.name)"
-                    >
-                      <Icon name="trash" :size="13" />
-                    </button>
-                  </div>
-                </li>
-              </ul>
-            </section>
-
-            <!-- 批量处理方式 -->
-            <section v-if="project.supportedFiles.length > 1" class="block">
-              <div class="block__head">
-                <span class="step">3</span>
-                <span class="block__title">批量处理方式</span>
-                <span class="spacer" />
-                <span class="hint">
-                  <template v-if="project.batchModeLocked">
-                    已锁定，切换需先清空队列
-                  </template>
-                  <template v-else>导入顺序即拼接顺序，开始识别后锁定</template>
+                  {{ promptPreview.chars }} / {{ PROMPT_BUDGET_CHARS }}
                 </span>
               </div>
-              <div class="block__body block__body--modes">
+              <div class="lex-list">
+                <label
+                  v-for="lex in LEXICONS"
+                  :key="lex.id"
+                  class="lex"
+                  :class="{ 'is-active': settings.lexiconIds.includes(lex.id) }"
+                  :title="lex.note"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="settings.lexiconIds.includes(lex.id)"
+                    @change="toggleLexicon(lex.id)"
+                  />
+                  <span class="lex__name">{{ lex.name }}</span>
+                  <span class="lex__count mono">{{ lexiconWordCount(lex) }}</span>
+                </label>
+              </div>
+              <span class="field__hint">
+                <!-- 不支持提示词注入时，词库仍然生效 —— 它还要参与识别后的断句，
+                     所以勾选保持可用，只把「注入」这件事讲清楚 -->
+                <template v-if="!canPrompt">
+                  当前模型不接收提示词，所选词库仍用于字幕断句与识别后的同音纠正
+                </template>
+                <template v-else-if="promptPreview.truncated">
+                  核心词已超出预算，被舍弃的前几个：{{
+                    promptPreview.droppedCore.slice(0, 6).join('、')
+                  }}
+                </template>
+                <template v-else>
+                  将注入 {{ promptPreview.usedTerms.length }} 个词
+                  <template v-if="promptPreview.dropped.length > 0">
+                    （另有 {{ promptPreview.dropped.length }} 个扩展词超出预算，深度模式按
+                    音频实际出现过的词挑选）
+                  </template>
+                </template>
+              </span>
+            </div>
+
+            <div class="field field--wide">
+              <div class="field__head">
+                <span class="field__label">热词提示</span>
+                <label
+                  class="switch switch--sm"
+                  title="全量热词参与，字数相同、读音一致才替换"
+                >
+                  <input v-model="settings.termFix" type="checkbox" />
+                  <span class="switch__track" />
+                  <span>识别后纠正同音字</span>
+                </label>
+              </div>
+              <textarea
+                v-model="settings.promptTerms"
+                class="textarea"
+                rows="2"
+                placeholder="节目名、人名、专业术语，用换行或逗号分隔"
+              />
+              <span class="field__hint">
+                <!-- 输入框在任何模型下都可编辑：不支持提示词的模型虽然收不到这些词，
+                     它们仍要参与断句与识别后的同音纠正，禁掉等于把这条路也堵死 -->
+                <template v-if="canPrompt">
+                  注入模型受 {{ PROMPT_BUDGET_CHARS }} 字预算限制，超出的词仍全部参与识别后的同音纠正
+                </template>
+                <template v-else>
+                  当前模型不接收提示词，全部热词用于断句与识别后的同音纠正
+                </template>
+              </span>
+            </div>
+
+            <!--
+              讲话人单独成条，不再塞进折叠的高级选项：
+              它是「这一段音频里到底有几个人」这种一眼就该看见的决定，
+              和归一化、滤波那些调参不是一类东西。
+            -->
+            <div class="field field--wide speakers">
+              <div class="speakers__body">
+                <label class="switch">
+                  <input v-model="settings.speakerDiarization" type="checkbox" />
+                  <span class="switch__track" />
+                  <span>区分不同的讲话人</span>
+                </label>
+                <span class="field__hint">
+                  识别后按音色分出不同的人，编辑页里可以逐个改称呼
+                </span>
+              </div>
+              <label v-if="settings.speakerDiarization" class="speakers__count">
+                <span>人数</span>
+                <select v-model.number="settings.speakerCount" class="select">
+                  <option :value="0">自动</option>
+                  <option v-for="n in SPEAKER_COUNT_OPTIONS" :key="n" :value="n">
+                    {{ n }}
+                  </option>
+                </select>
+              </label>
+            </div>
+
+            <!--
+              批量处理方式放这里，因为它本来就是「设置」：它描述的是这一批文件
+              怎么被合成结果，不是某个文件的状态。放在素材区下面时，它看起来像
+              第三个区块，实际上和文件列表没有从属关系。
+            -->
+            <div v-if="project.supportedFiles.length > 1" class="field field--wide">
+              <div class="field__head">
+                <span class="field__label">批量处理方式</span>
+                <span v-if="project.batchModeLocked" class="field__tag">已锁定</span>
+              </div>
+              <div class="modes">
                 <button
                   class="mode"
                   :class="{
@@ -379,7 +317,7 @@ async function start(event?: MouseEvent): Promise<void> {
                   type="button"
                   @click="pickMode('merge')"
                 >
-                  <span class="mode__icon"><Icon name="layers" :size="18" /></span>
+                  <span class="mode__icon"><Icon name="layers" :size="16" /></span>
                   <span class="mode__body">
                     <span class="mode__title">合并为一条时间轴</span>
                     <span class="mode__hint">拼成一条时间轴，输出单个文件</span>
@@ -398,7 +336,7 @@ async function start(event?: MouseEvent): Promise<void> {
                   type="button"
                   @click="pickMode('separate')"
                 >
-                  <span class="mode__icon"><Icon name="list" :size="18" /></span>
+                  <span class="mode__icon"><Icon name="list" :size="16" /></span>
                   <span class="mode__body">
                     <span class="mode__title">各自独立处理</span>
                     <span class="mode__hint">各自输出多个文件</span>
@@ -408,202 +346,65 @@ async function start(event?: MouseEvent): Promise<void> {
                   </span>
                 </button>
               </div>
-            </section>
-          </div>
+              <span class="field__hint">
+                <template v-if="project.batchModeLocked">
+                  已锁定，切换需先清空队列
+                </template>
+                <template v-else>导入顺序即拼接顺序，开始识别后锁定</template>
+              </span>
+            </div>
 
-          <!-- 侧列：识别设置。落点固定，方便每次导入前顺手调一下 -->
-          <aside class="io__side">
-            <section class="block">
-              <div class="block__head">
-                <Icon name="sliders" :size="14" />
-                <span class="block__title">识别设置</span>
-                <span class="spacer" />
-                <span class="hint">即时生效</span>
-              </div>
-              <div class="block__body recog">
-                <label class="field">
-                  <span class="field__label">识别语言</span>
-                  <select v-model="settings.language" class="select">
-                    <option
-                      v-for="item in LANGUAGE_OPTIONS"
-                      :key="item.value"
-                      :value="item.value"
-                    >
-                      {{ item.label }}
-                    </option>
-                  </select>
-                </label>
-
-                <div class="field" :class="{ 'is-off': !canTune }">
-                  <div class="field__head">
-                    <span class="field__label">推理深度</span>
-                    <span class="field__tag mono">约 ×{{ depthHint.timeFactor }} 耗时</span>
-                  </div>
-                  <div v-seg-thumb class="seg">
-                    <button
-                      v-for="id in DEPTH_ORDER"
-                      :key="id"
-                      class="choice"
-                      :class="{ 'is-active': settings.reasoningDepth === id }"
-                      type="button"
-                      :disabled="!canTune"
-                      @click="settings.reasoningDepth = id"
-                    >
-                      {{ DEPTH_PRESETS[id].label }}
-                    </button>
-                  </div>
-                  <span class="field__hint">
-                    <template v-if="!canTune">当前模型不支持多遍解码，固定单遍识别</template>
-                    <template v-else>{{ depthHint.hint }}</template>
-                  </span>
-                </div>
-
-                <div class="field">
-                  <div class="field__head">
-                    <span class="field__label">领域词库</span>
-                    <span
-                      v-if="canPrompt"
-                      class="lex-budget mono"
-                      :class="{ 'is-over': promptPreview.truncated }"
-                    >
-                      {{ promptPreview.chars }} / {{ PROMPT_BUDGET_CHARS }}
-                    </span>
-                  </div>
-                  <div class="lex-list">
-                    <label
-                      v-for="lex in LEXICONS"
-                      :key="lex.id"
-                      class="lex"
-                      :class="{ 'is-active': settings.lexiconIds.includes(lex.id) }"
-                      :title="lex.note"
-                    >
-                      <input
-                        type="checkbox"
-                        :checked="settings.lexiconIds.includes(lex.id)"
-                        @change="toggleLexicon(lex.id)"
-                      />
-                      <span class="lex__name">{{ lex.name }}</span>
-                      <span class="lex__count mono">{{ lexiconWordCount(lex) }}</span>
-                    </label>
-                  </div>
-                  <span class="field__hint">
-                    <!-- 不支持提示词注入时，词库仍然生效 —— 它还要参与识别后的断句，
-                         所以勾选保持可用，只把「注入」这件事讲清楚 -->
-                    <template v-if="!canPrompt">
-                      当前模型不接收提示词，所选词库仍用于字幕断句与识别后的同音纠正
-                    </template>
-                    <template v-else-if="promptPreview.truncated">
-                      核心词已超出预算，被舍弃的前几个：{{
-                        promptPreview.droppedCore.slice(0, 6).join('、')
-                      }}
-                    </template>
-                    <template v-else>
-                      将注入 {{ promptPreview.usedTerms.length }} 个词
-                      <template v-if="promptPreview.dropped.length > 0">
-                        （另有 {{ promptPreview.dropped.length }} 个扩展词超出预算，深度模式按
-                        音频实际出现过的词挑选）
-                      </template>
-                    </template>
-                  </span>
-                </div>
-
-                <label class="field">
-                  <span class="field__label">热词提示</span>
-                  <textarea
-                    v-model="settings.promptTerms"
-                    class="textarea"
-                    rows="2"
-                    placeholder="节目名、人名、专业术语，用换行或逗号分隔"
-                  />
-                  <span class="field__hint">
-                    <!-- 输入框在任何模型下都可编辑：不支持提示词的模型虽然收不到这些词，
-                         它们仍要参与断句与识别后的同音纠正，禁掉等于把这条路也堵死 -->
-                    <template v-if="canPrompt">
-                      注入模型受 {{ PROMPT_BUDGET_CHARS }} 字预算限制，超出的词仍全部参与识别后的同音纠正
-                    </template>
-                    <template v-else>
-                      当前模型不接收提示词，全部热词用于断句与识别后的同音纠正
-                    </template>
-                  </span>
-                </label>
-
-                <div class="fix">
-                  <label class="switch">
-                    <input v-model="settings.termFix" type="checkbox" />
-                    <span class="switch__track" />
-                    <span>识别后按热词纠正同音字</span>
+            <details class="adv field--wide">
+              <summary class="adv__sum">
+                <Icon name="chevron-right" :size="13" class="adv__caret" />
+                <span>高级选项</span>
+              </summary>
+              <div class="adv__body">
+                <div class="adv__grid">
+                  <label class="field">
+                    <span class="field__label">单行最大字数</span>
+                    <input
+                      v-model.number="settings.maxCharsPerLine"
+                      class="input input--mono"
+                      type="number"
+                      min="6"
+                      max="60"
+                    />
                   </label>
-                  <span class="fix__note">全量热词参与，字数相同、读音一致才替换</span>
+                  <label class="field">
+                    <span class="field__label">单条最多行数</span>
+                    <input
+                      v-model.number="settings.maxLinesPerSegment"
+                      class="input input--mono"
+                      type="number"
+                      min="1"
+                      max="4"
+                    />
+                  </label>
                 </div>
-
-                <details class="adv">
-                  <summary class="adv__sum">
-                    <Icon name="chevron-right" :size="13" class="adv__caret" />
-                    <span>高级选项</span>
-                    <span class="adv__hint">字幕排版与音质前处理</span>
-                  </summary>
-                  <div class="adv__body">
-                    <div class="adv__grid">
-                      <label class="field">
-                        <span class="field__label">单行最大字数</span>
-                        <input
-                          v-model.number="settings.maxCharsPerLine"
-                          class="input input--mono"
-                          type="number"
-                          min="6"
-                          max="60"
-                        />
-                      </label>
-                      <label class="field">
-                        <span class="field__label">单条最多行数</span>
-                        <input
-                          v-model.number="settings.maxLinesPerSegment"
-                          class="input input--mono"
-                          type="number"
-                          min="1"
-                          max="4"
-                        />
-                      </label>
-                    </div>
-                    <!-- 束搜索宽度 / 采样候选数 / 场景切分 / 束搜索 / 低置信度复核
-                         已整体隐藏（实测降质，见 settings.ts 的强制复位注释），代码保留 -->
-                    <div class="adv__switches">
-                      <label class="switch">
-                        <input v-model="settings.normalizeAudio" type="checkbox" />
-                        <span class="switch__track" />
-                        <span>识别前电平归一化</span>
-                      </label>
-                      <label class="switch">
-                        <input v-model="settings.highPassFilter" type="checkbox" />
-                        <span class="switch__track" />
-                        <span>高通滤波（80Hz 低频噪声）</span>
-                      </label>
-                      <label class="switch">
-                        <input v-model="settings.vadEnabled" type="checkbox" />
-                        <span class="switch__track" />
-                        <span>静音检测与长音频切分</span>
-                      </label>
-                      <label class="switch">
-                        <input v-model="settings.speakerDiarization" type="checkbox" />
-                        <span class="switch__track" />
-                        <span>识别后分析说话人</span>
-                      </label>
-                    </div>
-
-                    <!-- 分离模型随包，不需要下载；人数留白就按音色聚类自动判断 -->
-                    <label v-if="settings.speakerDiarization" class="speaker-count">
-                      <span>说话人数</span>
-                      <select v-model.number="settings.speakerCount" class="select">
-                        <option :value="0">自动</option>
-                        <option v-for="n in SPEAKER_COUNT_OPTIONS" :key="n" :value="n">{{ n }}</option>
-                      </select>
-                    </label>
-                  </div>
-                </details>
+                <!-- 束搜索宽度 / 采样候选数 / 场景切分 / 束搜索 / 低置信度复核
+                     已整体隐藏（实测降质，见 settings.ts 的强制复位注释），代码保留 -->
+                <div class="adv__switches">
+                  <label class="switch">
+                    <input v-model="settings.normalizeAudio" type="checkbox" />
+                    <span class="switch__track" />
+                    <span>识别前电平归一化</span>
+                  </label>
+                  <label class="switch">
+                    <input v-model="settings.highPassFilter" type="checkbox" />
+                    <span class="switch__track" />
+                    <span>高通滤波（80Hz 低频噪声）</span>
+                  </label>
+                  <label class="switch">
+                    <input v-model="settings.vadEnabled" type="checkbox" />
+                    <span class="switch__track" />
+                    <span>静音检测与长音频切分</span>
+                  </label>
+                </div>
               </div>
-            </section>
-          </aside>
-        </div>
+            </details>
+          </div>
+        </section>
       </div>
     </div>
 
@@ -655,77 +456,54 @@ async function start(event?: MouseEvent): Promise<void> {
 </template>
 
 <style scoped>
-/* ---- 两栏骨架 ---- */
-.io {
+/* ---- 两栏外壳：页面不滚，卡片自己滚 ---- */
+.view--fill .view__body {
+  /* 这一页的高度由窗口决定，内容再多也不许把整页顶出去 */
+  overflow: hidden;
+  padding-bottom: var(--space-4);
+}
+
+.view--fill .view__body-inner {
+  height: 100%;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 336px;
-  gap: var(--space-5);
-  align-items: start;
-}
-
-.io__main {
-  display: flex;
-  flex-direction: column;
+  /* 右侧固定宽、左侧吃掉剩下的：素材区的信息密度更高，宽度该给它 */
+  grid-template-columns: minmax(0, 1fr) clamp(300px, 24vw, 368px);
   gap: var(--space-4);
-  min-width: 0;
-}
-
-.io__side {
-  position: sticky;
-  top: 0;
-  min-width: 0;
+  align-items: stretch;
 }
 
 /*
- * 两栏骨架需要「主列 + 336px 设置面板 + 间距」都放得下才不挤。
- * 窗口内容宽度低于 1200px 时主列会被压到 500px 以下，DropZone 的按钮、
- * 词库胶囊、双列输入框全都开始互相倾轧 —— 此时直接收成单栏，
- * 设置面板排到主列下方（sticky 也一并撤掉，避免盖不住滚动）。
+ * 窗口窄到两栏挤不下时退回整页滚动。
+ * 此时两个卡片上下叠放、各自按内容撑开 —— 硬撑着并排只会让素材方块
+ * 缩到一行一个，还不如让它滚。
  */
-@media (max-width: 1200px) {
-  .io {
+@media (max-width: 940px) {
+  .view--fill .view__body {
+    overflow-y: auto;
+  }
+
+  .view--fill .view__body-inner {
+    height: auto;
     grid-template-columns: minmax(0, 1fr);
   }
-
-  .io__side {
-    position: static;
-  }
 }
 
-/* ---- 步骤序号 ---- */
-.step {
+/* ---- 设置面板 ---- */
+.set__headicon {
   flex: none;
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: var(--radius-pill);
-  background: var(--color-accent-subtle);
-  color: var(--color-accent-text);
-  font-size: 11px;
-  font-weight: var(--weight-semibold);
-  font-variant-numeric: tabular-nums;
+  color: var(--color-text-tertiary);
 }
 
-/* ---- 导入区的字幕入口 ---- */
-.sub-import {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--color-border-subtle);
-}
-
-/* 「开始识别」按钮在圆点飞出去的那 460ms 里隐去自己。
-   用 visibility 而不是 display / v-if：**布局不能动** —— 按钮一消失，
-   同一行的「去预览」会往右滑一格，看起来像是页面抖了一下。 */
-.btn.is-flying {
-  visibility: hidden;
-}
-
-/* ---- 识别设置面板 ---- */
-.recog {
+/*
+ * 单栏纵向排列。
+ * 这块从「整页两栏」变成「卡片里的一列」之后，内部横向再分两栏就太窄了 ——
+ * 300~368px 里塞两个输入框，每个只剩 140px，标签都放不下。
+ */
+.settings {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -735,13 +513,20 @@ async function start(event?: MouseEvent): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  min-width: 0;
+}
+
+/* 单栏下这个类不再产生布局效果，保留是为了让「整行」的语义在结构上仍然可见 */
+.field--wide {
+  min-width: 0;
 }
 
 .field__head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
+  min-height: 20px;
 }
 
 .field__label {
@@ -805,7 +590,7 @@ async function start(event?: MouseEvent): Promise<void> {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  padding: 4px var(--space-2) 4px var(--space-2);
+  padding: 4px var(--space-2);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
   cursor: pointer;
@@ -854,6 +639,49 @@ async function start(event?: MouseEvent): Promise<void> {
   color: var(--color-warning);
 }
 
+/* 热词行右上角的开关：跟标题同一行，不额外占一块 */
+.switch--sm {
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+/* ---- 讲话人 ---- */
+.speakers {
+  /* 窄栏里横排会把「人数」挤到换行，改成上下两段 */
+  align-items: stretch;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  /* 用 surface 而不是 inset：开关轨道是 border-strong，压在 inset 上几乎看不见 ——
+     「区分不同的讲话人」是这块的主角，不能是唯一一个看不清开关状态的开关 */
+  background: var(--color-bg-surface);
+}
+
+.speakers__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.speakers__count {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.speakers__count .select {
+  flex: 1;
+  min-width: 0;
+}
+
 /* ---- 高级折叠 ---- */
 .adv {
   border-top: 1px solid var(--color-border-subtle);
@@ -883,12 +711,6 @@ async function start(event?: MouseEvent): Promise<void> {
   transform: rotate(90deg);
 }
 
-.adv__hint {
-  margin-left: auto;
-  font-weight: var(--weight-regular);
-  color: var(--color-text-tertiary);
-}
-
 .adv__body {
   display: flex;
   flex-direction: column;
@@ -908,225 +730,18 @@ async function start(event?: MouseEvent): Promise<void> {
   gap: var(--space-2);
 }
 
-/* 人数选择：跟在开关后面，同一行对齐，不另起一块 */
-.speaker-count {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-  font-size: var(--font-size-sm);
-  color: var(--color-text-secondary);
-}
-
-.speaker-count .select {
-  width: 88px;
-}
-
-/* 热词纠正开关：与上面的输入框同属一组，但不受模型能力限制，永远可点 */
-.fix {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2) var(--space-3);
-}
-
-.fix__note {
-  flex-shrink: 0;
-  font-size: var(--font-size-xs);
-  color: var(--color-text-tertiary);
-  white-space: nowrap;
-}
-
-/* ---- 队列 ---- */
-.queue {
-  padding: var(--space-2);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.queue__row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-1);
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out);
-}
-
-.queue__row:hover {
-  background: var(--color-bg-hover);
-}
-
-.queue__row.is-active {
-  background: var(--color-bg-selected);
-  border-color: var(--color-accent-border);
-}
-
-.queue__row.is-unsupported {
-  opacity: 0.72;
-}
-
-/* 合并模式下点队列不切预览，就不要给出可点的光标暗示 */
-.queue__row.is-static {
-  cursor: default;
-}
-
-.queue__row.is-static:hover {
-  background: none;
-}
-
-.queue__index {
-  flex: none;
-  width: 20px;
-  text-align: center;
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-}
-
-.queue__status {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-subtle);
-  color: var(--color-text-tertiary);
-}
-
-.queue__status--processing {
-  color: var(--color-accent);
-}
-
-.queue__status--processing :deep(.icon) {
-  animation: spin 900ms linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.queue__status--edited,
-.queue__status--reviewed {
-  color: var(--color-success);
-}
-
-.queue__status--issue,
-.queue__status--failed {
-  color: var(--color-warning);
-}
-
-.queue__status--unsupported {
-  color: var(--color-text-disabled);
-}
-
-.queue__main {
-  flex: 1;
-  min-width: 0;
-}
-
-.queue__line {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.queue__name {
-  font-size: var(--font-size-sm);
-  font-weight: var(--weight-medium);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.queue__badge {
-  flex: none;
-  padding: 0 6px;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-subtle);
-  color: var(--color-text-tertiary);
-  font-size: 11px;
-}
-
-.queue__meta {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: 2px;
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-}
-
-.queue__dot {
-  color: var(--color-border-strong);
-}
-
-.queue__message {
-  margin-top: 3px;
-  font-size: 11px;
-  color: var(--color-warning);
-}
-
-.queue__dir {
-  flex: none;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-  direction: rtl;
-  text-align: left;
-}
-
-.queue__actions {
-  flex: none;
-  display: flex;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease-out);
-}
-
-.queue__row:hover .queue__actions,
-.queue__row.is-active .queue__actions {
-  opacity: 1;
-}
-
-.queue__btn {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-sm);
-  color: var(--color-text-tertiary);
-}
-
-.queue__btn:hover:not(:disabled) {
-  background: var(--color-bg-active);
-  color: var(--color-text-primary);
-}
-
-.queue__btn:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-
-.queue__btn--danger:hover:not(:disabled) {
-  background: var(--color-danger-subtle);
-  color: var(--color-danger);
+/* 「开始识别」按钮在圆点飞出去的那 460ms 里隐去自己。
+   用 visibility 而不是 display / v-if：**布局不能动** —— 按钮一消失，
+   同一行的「去预览」会往右滑一格，看起来像是页面抖了一下。 */
+.btn.is-flying {
+  visibility: hidden;
 }
 
 /* ---- 批量方式 ---- */
-.block__body--modes {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-3);
+.modes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
 .mode {
@@ -1134,8 +749,8 @@ async function start(event?: MouseEvent): Promise<void> {
   width: 100%;
   display: flex;
   align-items: flex-start;
-  gap: var(--space-3);
-  padding: var(--space-3);
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: none;
@@ -1183,9 +798,9 @@ async function start(event?: MouseEvent): Promise<void> {
   flex: none;
   display: grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-md);
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
   background: var(--color-bg-subtle);
   color: var(--color-text-secondary);
 }
@@ -1198,17 +813,17 @@ async function start(event?: MouseEvent): Promise<void> {
 .mode__body {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
 }
 
 .mode__title {
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-xs);
   font-weight: var(--weight-medium);
 }
 
 .mode__hint {
-  font-size: var(--font-size-xs);
+  font-size: 11px;
   color: var(--color-text-tertiary);
   line-height: var(--line-base);
 }

@@ -11,7 +11,7 @@ import type {
   SubtitleSegment,
   SubtitleFormat,
 } from '@/types'
-import { speakerLabel } from '@/utils/speaker'
+import { speakerName } from '@/utils/speaker'
 
 function pad(n: number, len = 2): string {
   return String(Math.floor(n)).padStart(len, '0')
@@ -66,13 +66,20 @@ export interface SerializeOptions {
    */
   sourceFirst?: boolean
   /**
-   * 在每条字幕开头加 `[说话人 N]` 标记。默认不加。
+   * 在每条字幕上带出讲话人。默认不带。
    *
-   * 默认不加是有意的：说话人编号只对做后期的人有意义，加到成片字幕里就是
-   * 噪声。需要它的人（比如交给剪辑师对齐音轨）自己勾。
-   * 双语时只加在**第一行**，不在两种语言上各加一遍。
+   * 默认不带是有意的：讲话人只对做后期的人有意义，加到成片字幕里就是噪声。
+   * 需要它的人（比如交给剪辑师对齐音轨）自己勾。
+   *
+   * **写法随格式走**，不是一律塞在文本里：
+   *   ASS  用 Name 列（本来就有一个「演员」字段，播放器能认）
+   *   VTT  用 `<v 称呼>` 语音标签（WebVTT 规范里就是干这个的）
+   *   SRT / TXT 没有这个字段，只能硬编成「称呼：字幕」
+   * 双语时只标注一次，不挂在两种语言上各来一遍。
    */
   speakerPrefix?: boolean
+  /** 讲话人称呼表（编号 → 称呼）。缺省时用「讲话人 N」 */
+  speakerNames?: Record<string, string>
 }
 
 /** 导出时的一条字幕：文本已按语言维度合好 */
@@ -80,6 +87,8 @@ export interface ExportLine {
   start: number
   end: number
   text: string
+  /** 讲话人称呼。为空表示这条没标，或用户没勾「导出讲话人标签」 */
+  speaker?: string
 }
 
 export interface ExportComposition {
@@ -139,11 +148,12 @@ export function composeForExport(
     }
 
     if (text.trim() === '') continue
-    // 说话人标记只加在首行：双语时两行属于同一条字幕，重复标注没有意义
-    if (opts.speakerPrefix && typeof seg.speaker === 'number') {
-      text = `[${speakerLabel(seg.speaker)}] ${text}`
-    }
-    lines.push({ start: seg.start, end: seg.end, text })
+    // 讲话人只在这条字幕上记一次：双语两行属于同一条，重复标注没有意义
+    const speaker =
+      opts.speakerPrefix && typeof seg.speaker === 'number'
+        ? speakerName(seg.speaker, opts.speakerNames)
+        : undefined
+    lines.push(speaker ? { start: seg.start, end: seg.end, text, speaker } : { start: seg.start, end: seg.end, text })
   }
 
   return { lines, missing }
@@ -178,12 +188,17 @@ export function bundleLangTag(
 
 /* ---------------------------------------------------------- 各格式序列化 */
 
+/** SRT / TXT 这类没有讲话人字段的格式：退化成「称呼：字幕」，只加在首行 */
+function withPrefix(line: ExportLine): string {
+  return line.speaker ? `${line.speaker}：${line.text}` : line.text
+}
+
 export function serializeSrt(
   segments: SubtitleSegment[],
   opts: SerializeOptions = {},
 ): string {
   const blocks = composeForExport(segments, opts).lines.map(
-    (l, i) => `${i + 1}\n${srtTime(l.start)} --> ${srtTime(l.end)}\n${l.text}`,
+    (l, i) => `${i + 1}\n${srtTime(l.start)} --> ${srtTime(l.end)}\n${withPrefix(l)}`,
   )
   return blocks.join('\n\n') + (blocks.length > 0 ? '\n' : '')
 }
@@ -192,9 +207,11 @@ export function serializeVtt(
   segments: SubtitleSegment[],
   opts: SerializeOptions = {},
 ): string {
-  const body = composeForExport(segments, opts).lines.map(
-    (l) => `${vttTime(l.start)} --> ${vttTime(l.end)}\n${l.text}`,
-  )
+  const body = composeForExport(segments, opts).lines.map((l) => {
+    // VTT 有 `<v 名称>` 语音标签，比在文本里硬编一截「称呼：」干净
+    const text = l.speaker ? `<v ${l.speaker}>${l.text}` : l.text
+    return `${vttTime(l.start)} --> ${vttTime(l.end)}\n${text}`
+  })
   return `WEBVTT\n\n${body.join('\n\n')}${body.length > 0 ? '\n' : ''}`
 }
 
@@ -231,10 +248,11 @@ export function serializeAss(
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
   ]
 
-  const events = composeForExport(segments, opts).lines.map(
-    (l) =>
-      `Dialogue: 0,${assTime(l.start)},${assTime(l.end)},Default,,0,0,0,,${assEscape(l.text)}`,
-  )
+  const events = composeForExport(segments, opts).lines.map((l) => {
+    // ASS 的 Name 列就是「谁在说」：逗号是字段分隔符，称呼里的逗号必须抹掉
+    const name = l.speaker ? assEscape(l.speaker).replace(/,/g, ' ') : ''
+    return `Dialogue: 0,${assTime(l.start)},${assTime(l.end)},Default,${name},0,0,0,,${assEscape(l.text)}`
+  })
 
   return `${header.join('\n')}\n${events.join('\n')}${events.length > 0 ? '\n' : ''}`
 }
@@ -245,7 +263,7 @@ export function serializeTxt(
   opts: SerializeOptions = {},
 ): string {
   const lines = composeForExport(segments, opts)
-    .lines.map((l) => l.text)
+    .lines.map((l) => withPrefix(l))
     .filter(Boolean)
   return lines.join('\n') + (lines.length > 0 ? '\n' : '')
 }

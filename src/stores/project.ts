@@ -1345,7 +1345,7 @@ const MIME_BY_EXT: Record<string, string> = {
         let baseline = alignOrigin(wrapped.segments)
 
         /*
-         * ---- 说话人分离 ----
+         * ---- 讲话人分离 ----
          *
          * 放在整条流水线的**最后**：它既不读文本也不改文本，只按音色给每个条目
          * 补一个编号。放前面的话，后面按标点切分、按规格折行都会重排条目，
@@ -1356,9 +1356,9 @@ const MIME_BY_EXT: Record<string, string> = {
          */
         if (settings.speakerDiarization && !cancelRequested && !file.demo && file.path) {
           const owner = `diarize:${file.id}`
-          ui.beginTask(owner, '分析说话人')
+          ui.beginTask(owner, '分析讲话人')
           const offProgress = window.xbaos?.engine.onDiarizeProgress?.(({ percent }) => {
-            ui.updateTask(owner, percent, '分析说话人')
+            ui.updateTask(owner, percent, '分析讲话人')
           })
           try {
             const diar = await engine.diarize({
@@ -1371,14 +1371,14 @@ const MIME_BY_EXT: Record<string, string> = {
             if (assigned.speakers > 1) {
               ui.notify(
                 'info',
-                '说话人分析完成',
-                `${file.name}：${assigned.speakers} 位说话人，${assigned.tagged} 条已标注`,
+                '讲话人分析完成',
+                `${file.name}：${assigned.speakers} 位讲话人，${assigned.tagged} 条已标注`,
               )
             }
           } catch (err) {
             ui.notify(
               'warning',
-              '说话人分析未完成',
+              '讲话人分析未完成',
               `${file.name}：${err instanceof Error ? err.message : String(err)}`,
             )
           } finally {

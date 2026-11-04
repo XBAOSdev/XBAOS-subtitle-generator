@@ -1186,7 +1186,7 @@ const scenarios = {
 
     // 提示只在点「载入演示数据」时出现，?demo=1 本身不会触发
     const clicked = await cdp.evaluate(`(() => {
-      const btn = document.querySelector('.dropzone__dev')
+      const btn = document.querySelector('.board__dev')
       if (!btn) return false
       btn.click()
       return true
@@ -1605,31 +1605,72 @@ const scenarios = {
    * 识别时读不到，功能等于没做（模型页的假下载就是这么来的）。
    */
   async 'import-narrow'(cdp) {
-    // 响应式回归：DropZone 文字列曾被 flex 压到零宽，中文一字一行竖排，
-    // 整条虚线框被自己的竖排文字撑到半屏高。两个断言管住两道防线：
-    // 窄窗收单栏（媒体查询）与文字列保底宽度（flex-wrap + min-width）。
-    await goto(cdp, BASE + '/')
-    await sleep(300)
+    /*
+     * 导入页的布局回归：两栏并排、页面本身不滚、卡片各自滚。
+     *
+     * 这三条互相牵制，必须一起量：少了 `min-height: 0`，卡片会被内容撑高，
+     * 页面又滚起来；少了卡片内的 `overflow-y: auto`，「页面不滚」就变成
+     * 「下半截直接看不见」——后者比前者更糟，因为它连滚动条都不给。
+     */
+    await goto(cdp, BASE + '/?demo=1')
+    await sleep(400)
+
+    /*
+     * 内嵌字体：安装包里带着 Noto Sans SC（与思源黑体同源）的变量子集，不依赖用户机器
+     * 装没装。这里量三件事 —— 字体被真的解析并进入 loaded 状态、正文栈以它打头、
+     * 中文确实落在它上面（`check()` 带文本参数才是「能不能显示这段字」的意思）。
+     * 只断言「CSS 里写了 font-family」是不够的：那正是这次改动之前的状态。
+     */
+    const font = await cdp.evaluate(`(() => {
+      const faces = [...document.fonts].map((f) => ({
+        family: f.family, weight: f.weight, status: f.status,
+      }))
+      return {
+        faces,
+        body: getComputedStyle(document.body).fontFamily,
+        cjk: document.fonts.check('400 14px "Noto Sans SC"', '中文字幕'),
+        weights: [400, 500, 600].every((w) => document.fonts.check(w + ' 14px "Noto Sans SC"', '中')),
+      }
+    })()`)
+    check(
+      '内嵌字体已解析，且覆盖 400 / 500 / 600 三档字重',
+      font?.cjk === true &&
+        font?.weights === true &&
+        font.faces.some((f) => f.status === 'loaded' && f.family.includes('Noto Sans SC')),
+      `${JSON.stringify(font?.faces)} cjk=${font?.cjk} weights=${font?.weights}`,
+    )
+    check(
+      '正文以「内嵌字体」打头，不再一路回退到系统字体',
+      /^"?Noto Sans SC"?/.test(font?.body ?? ''),
+      font?.body,
+    )
 
     const measure = `(() => {
-      const main = document.querySelector('.io__main')
-      const side = document.querySelector('.io__side')
-      const title = document.querySelector('.dropzone__title')
-      if (!main || !side || !title) return null
-      const m = main.getBoundingClientRect()
-      const s = side.getBoundingClientRect()
-      const t = title.getBoundingClientRect()
+      const body = document.querySelector('.view__body')
+      const inner = document.querySelector('.view__body-inner')
+      const panes = [...document.querySelectorAll('.view__body-inner > .col')]
+      if (!body || !inner || panes.length < 2) return null
+      const l = panes[0].getBoundingClientRect()
+      const r = panes[1].getBoundingClientRect()
+      const settings = panes[1].querySelector('.settings')
+      const grid = panes[0].querySelector('.board__grid')
       return {
-        twoCol: Math.abs(s.top - m.top) < 80,
-        mainW: Math.round(m.width),
-        titleH: Math.round(t.height),
-        titleW: Math.round(t.width),
+        cols: getComputedStyle(inner).gridTemplateColumns.trim().split(/\\s+/).filter(Boolean).length,
+        sideBySide: Math.round(l.right) <= Math.round(r.left) + 1,
+        leftW: Math.round(l.width),
+        pageOverflow: body.scrollHeight - body.clientHeight,
+        innerH: Math.round(inner.getBoundingClientRect().height),
+        paneH: Math.round(l.height),
+        settingsScroll: settings ? getComputedStyle(settings).overflowY : '',
+        gridScroll: grid ? getComputedStyle(grid).overflowY : '',
+        addTile: !!document.querySelector('.tile--add'),
+        tiles: document.querySelectorAll('.tile:not(.tile--add)').length,
       }
     })()`
 
     for (const size of [
-      { w: 1480, h: 940, wide: true },
-      { w: 1000, h: 720, wide: false },
+      { w: 1480, h: 940 },
+      { w: 1040, h: 720 },
     ]) {
       await cdp.send('Emulation.setDeviceMetricsOverride', {
         width: size.w,
@@ -1637,18 +1678,503 @@ const scenarios = {
         deviceScaleFactor: 1,
         mobile: false,
       })
-      await sleep(300)
+      await sleep(340)
       const m = await cdp.evaluate(measure)
-      if (size.wide) {
-        check(`宽窗保持两栏 — ${size.w}px`, m?.twoCol === true, JSON.stringify(m))
-        check(`宽窗主列宽度充足 — ${size.w}px`, (m?.mainW ?? 0) > 600, String(m?.mainW))
-      } else {
-        check(`窄窗收成单栏 — ${size.w}px`, m?.twoCol === false, JSON.stringify(m))
-        check(`窄窗文字不竖排 — ${size.w}px`, (m?.titleH ?? 99) < 60 && (m?.titleW ?? 0) >= 150, JSON.stringify(m))
-      }
+      check(`两栏并排 — ${size.w}px`, m?.cols === 2 && m?.sideBySide === true, JSON.stringify(m))
+      check(
+        `卡片撑满可用高度 — ${size.w}px`,
+        Math.abs((m?.paneH ?? 0) - (m?.innerH ?? -99)) <= 1,
+        `pane=${m?.paneH} inner=${m?.innerH}`,
+      )
+      check(
+        `页面本身不滚动 — ${size.w}px`,
+        Math.abs(m?.pageOverflow ?? 99) <= 1,
+        `溢出 ${m?.pageOverflow}px`,
+      )
+      check(
+        `设置区与素材区各自可滚 — ${size.w}px`,
+        m?.settingsScroll === 'auto' && m?.gridScroll === 'auto',
+        `${m?.settingsScroll}/${m?.gridScroll}`,
+      )
+      check(`素材区有常驻加号入口 — ${size.w}px`, m?.addTile === true, JSON.stringify(m))
     }
+
+    // 素材方块必须在卡片内换行，而不是把卡片撑宽（溢出会把右侧那栏挤出去）
+    const overflow = await cdp.evaluate(`(() => {
+      const grid = document.querySelector('.board__grid')
+      return grid ? grid.scrollWidth - grid.clientWidth : -1
+    })()`)
+    check('素材方块在卡片内换行，不撑宽', overflow <= 1, `横向溢出 ${overflow}px`)
+
     await shot(cdp, 'probe-import-narrow.png')
     await cdp.send('Emulation.clearDeviceMetricsOverride')
+  },
+
+  /*
+   * 素材区：一个文件一个方块、末尾常驻「+」、按住可拖排序、一个入口通吃。
+   *
+   * 拖放用合成事件而不是真实鼠标序列：HTML5 拖拽在 CDP 里要 interceptDrags +
+   * dispatchDragEvent 才能跑通，而这里要验的是**我自己的接线**（dragstart 记源、
+   * dragover 算插入位、drop 换算成 reorder），合成事件足够，而且稳定得多。
+   */
+  async 'material-board'(cdp) {
+    const names = `(() => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+      return pinia.get('project').files.map((f) => f.name)
+    })()`
+
+    /*
+     * 空队列先看一眼：那个「+」必须是**和文件方块同样大小的一个小方块**。
+     * 曾经为了让空状态更好点，把它拉成铺满一整行的大框 —— 于是「导入之后长什么样」
+     * 和「没导入之前长什么样」完全不是一回事，用户第一眼看到的落点和真实方块对不上。
+     */
+    await goto(cdp, BASE + '/')
+    await sleep(400)
+    const emptyBox = await cdp.evaluate(`(() => {
+      const add = document.querySelector('.tile--add')
+      const grid = document.querySelector('.board__grid')
+      if (!add || !grid) return null
+      const r = add.getBoundingClientRect()
+      const g = grid.getBoundingClientRect()
+      return { w: Math.round(r.width), h: Math.round(r.height), grid: Math.round(g.width), files: document.querySelectorAll('.tile:not(.tile--add)').length }
+    })()`)
+    check(
+      '空队列时「+」也是一个小方块，不铺满整行',
+      emptyBox !== null &&
+        emptyBox.files === 0 &&
+        emptyBox.w <= 230 &&
+        emptyBox.h <= 110 &&
+        emptyBox.w < emptyBox.grid * 0.6,
+      JSON.stringify(emptyBox),
+    )
+    await shot(cdp, 'probe-material-empty.png')
+
+    await goto(cdp, BASE + '/?demo=1')
+    await sleep(450)
+
+    const board = await cdp.evaluate(`(() => ({
+      tiles: [...document.querySelectorAll('.tile:not(.tile--add)')].map((t) => ({
+        no: t.querySelector('.tile__no')?.textContent.trim() ?? '',
+        name: t.querySelector('.tile__name')?.textContent.trim() ?? '',
+      })),
+      addLast: (() => {
+        const all = [...document.querySelectorAll('.board__grid > *')]
+        return all.length > 0 && all[all.length - 1].classList.contains('tile--add')
+      })(),
+      draggable: [...document.querySelectorAll('.tile:not(.tile--add)')].every(
+        (t) => t.getAttribute('draggable') === 'true',
+      ),
+      accept: document.querySelector('.board input[type=file]')?.accept ?? '',
+    }))()`)
+
+    check(
+      '一个文件一个方块，且都写着文件名',
+      (board?.tiles.length ?? 0) > 0 && board.tiles.every((t) => t.name.length > 0),
+      JSON.stringify(board?.tiles),
+    )
+    check(
+      '序号从 1 连续排（顺序就是拼接顺序）',
+      board?.tiles.every((t, i) => t.no === String(i + 1)),
+      JSON.stringify(board?.tiles.map((t) => t.no)),
+    )
+    check('「+」方块常驻在最后', board?.addLast === true, JSON.stringify(board?.addLast))
+    check('方块可拖动', board?.draggable === true)
+    check(
+      '同一个入口也吃得下字幕',
+      /\.srt/.test(board?.accept ?? '') && /\.mp3/.test(board?.accept ?? ''),
+      board?.accept,
+    )
+
+    const before = await cdp.evaluate(names)
+    await cdp.evaluate(`(() => {
+      const tiles = [...document.querySelectorAll('.tile:not(.tile--add)')]
+      const dt = new DataTransfer()
+      const fire = (el, type, x) =>
+        el.dispatchEvent(new DragEvent(type, {
+          dataTransfer: dt, bubbles: true, cancelable: true, clientX: x, clientY: 0,
+        }))
+      fire(tiles[0], 'dragstart', 0)
+      // 落在第 3 块右半边 = 插到它后面
+      fire(tiles[2], 'dragover', tiles[2].getBoundingClientRect().right - 2)
+      fire(tiles[2], 'drop', tiles[2].getBoundingClientRect().right - 2)
+      return true
+    })()`)
+    await sleep(350)
+    const after = await cdp.evaluate(names)
+    check(
+      '按住方块拖动就能调整顺序',
+      before.length >= 3 && after[0] === before[1] && after[2] === before[0],
+      `${before.join(' | ')} -> ${after.join(' | ')}`,
+    )
+
+    // 拖完序号必须跟着重排，否则「第几段」与顺序对不上
+    const renumbered = await cdp.evaluate(
+      `[...document.querySelectorAll('.tile:not(.tile--add) .tile__no')].map((n) => n.textContent.trim())`,
+    )
+    check(
+      '重排后序号跟着变',
+      renumbered.every((n, i) => n === String(i + 1)),
+      JSON.stringify(renumbered),
+    )
+
+    /*
+     * 增删动画是「看着才对」的东西，截图上根本看不出来，但接线有没有通可以量：
+     * 离场方块必须**立刻脱离布局**（否则后面的方块要等它消失完才动，两段动作），
+     * 邻居必须挂上 FLIP 的 `mtile-move`。
+     * 用 MutationObserver 在真实点击里抓 —— 立刻读 class 只能撞上一帧不到的窗口，必然抓空。
+     */
+    await cdp.evaluate(`(() => {
+      window.__anim = []
+      const grid = document.querySelector('.board__grid')
+      window.__mo = new MutationObserver((records) => {
+        for (const r of records) {
+          if (r.type !== 'attributes') continue
+          const el = r.target
+          if (el.classList.contains('mtile-move')) window.__anim.push('move')
+          if (el.classList.contains('mtile-leave-active')) {
+            window.__anim.push('leave:' + getComputedStyle(el).position)
+          }
+        }
+      })
+      window.__mo.observe(grid, { attributes: true, subtree: true, attributeFilter: ['class'] })
+      return true
+    })()`)
+
+    const beforeRemove = await cdp.evaluate(
+      `document.querySelectorAll('.tile:not(.tile--add)').length`,
+    )
+    await cdp.evaluate(`(() => {
+      window.confirm = () => true
+      document.querySelector('.tile:not(.tile--add) .tile__del').click()
+      return true
+    })()`)
+    await sleep(400)
+
+    const removed = await cdp.evaluate(`({
+      log: window.__anim ?? [],
+      left: document.querySelectorAll('.tile:not(.tile--add)').length,
+      lastIsAdd: (() => {
+        const all = [...document.querySelector('.board__grid').children]
+        return all.length > 0 && all[all.length - 1].classList.contains('tile--add')
+      })(),
+    })`)
+    check(
+      '移除方块时它先脱离布局、邻居同时滑过去（一段动画，不是两段）',
+      removed.log.includes('leave:absolute') && removed.log.includes('move'),
+      JSON.stringify(removed.log),
+    )
+    check('移除之后队列少一个', removed.left === beforeRemove - 1, `${beforeRemove} -> ${removed.left}`)
+    check('移除之后「+」仍排在最后', removed.lastIsAdd === true)
+
+    await shot(cdp, 'probe-material-board.png')
+  },
+
+  /*
+   * 讲话人：改称呼、点格子换人、右键批处理、导出筛选。
+   *
+   * 这几条串在一起守的是「改完之后真的写进了数据」—— 面板上多一个名字、
+   * 菜单能点开，都不等于字幕的归属变了。所以每一步都回头读一次 store。
+   */
+  async 'speaker-tools'(cdp) {
+    const centerOf = (js) =>
+      cdp.evaluate(`(() => {
+        const el = ${js}
+        if (!el) return null
+        el.scrollIntoView({ block: 'center' })
+        const r = el.getBoundingClientRect()
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      })()`)
+
+    const store = (body) =>
+      cdp.evaluate(`(() => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        const editor = pinia.get('editor')
+        const speakers = pinia.get('speakers')
+        ${body}
+      })()`)
+
+    const rightClick = async (x, y) => {
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await cdp.send('Input.dispatchMouseEvent', {
+          type,
+          x,
+          y,
+          button: 'right',
+          buttons: 2,
+          clickCount: 1,
+        })
+      }
+      await sleep(260)
+    }
+
+    const menuState = () =>
+      cdp.evaluate(`(() => [...document.querySelectorAll('.menu__item')].map((b) => ({
+        label: b.textContent.trim(),
+        disabled: b.disabled,
+      })))()`)
+
+    await goto(cdp, BASE + '/?demo=1&view=editor')
+    await sleep(400)
+
+    const seed = await store(`
+      const f = project.viewFile
+      if (!f) return 'no-file'
+      f.durationSec = 30
+      const mk = (id, start, end, text, speaker) => ({ id, start, end, text, origin: text, issues: [], speaker })
+      f.segments = [
+        mk('a', 0, 4, '第一条', 0),
+        mk('b', 4, 8, '第二条', 1),
+        mk('c', 8, 12, '第三条', 0),
+      ]
+      editor.clearSelection()
+      speakers.rename(f.id, 0, '张三')
+      speakers.rename(f.id, 1, '李四')
+      return [f.id, f.segments.length]
+    `)
+    check('注入带讲话人的条目', seed?.[1] === 3, JSON.stringify(seed))
+    await sleep(250)
+
+    const panel = await cdp.evaluate(`(() => {
+      const el = document.querySelector('.speakers')
+      if (!el) return null
+      return {
+        names: [...el.querySelectorAll('.spkrow__name')].map((n) => n.textContent.trim()),
+        counts: [...el.querySelectorAll('.spkrow__count')].map((n) => n.textContent.trim()),
+      }
+    })()`)
+    check('侧栏出现讲话人面板', panel?.names.length === 2, JSON.stringify(panel))
+    check(
+      '面板按称呼与条数展示',
+      panel?.names[0] === '张三' && panel?.counts[0] === '2 条' && panel?.counts[1] === '1 条',
+      JSON.stringify(panel),
+    )
+
+    const cells = await cdp.evaluate(
+      `(() => [...document.querySelectorAll('.row .spk')].map((c) => c.textContent.trim()))()`,
+    )
+    check(
+      '表格里显示的是称呼而不是编号',
+      JSON.stringify(cells) === JSON.stringify(['张三', '李四', '张三']),
+      JSON.stringify(cells),
+    )
+
+    // ---- 点称呼换人 ----
+    const cellPoint = await centerOf(`document.querySelectorAll('.row .spk')[0]`)
+    await cdp.click(cellPoint.x, cellPoint.y)
+    await sleep(250)
+    const speakerMenu = await menuState()
+    check(
+      '点称呼弹出换人菜单',
+      speakerMenu.some((m) => m.label.includes('李四')) &&
+        speakerMenu.some((m) => m.label.includes('清除标识')),
+      JSON.stringify(speakerMenu),
+    )
+
+    const toLi = await centerOf(
+      `[...document.querySelectorAll('.menu__item')].find((b) => b.textContent.includes('李四'))`,
+    )
+    await cdp.click(toLi.x, toLi.y)
+    await sleep(300)
+    const afterPick = await store(`return project.viewFile.segments.map((s) => s.speaker)`)
+    check('点一下就把这一条换给另一个人', JSON.stringify(afterPick) === '[1,1,0]', JSON.stringify(afterPick))
+
+    // ---- 右键菜单 ----
+    const rowPoint = await centerOf(`document.querySelectorAll('.row')[2]`)
+    await rightClick(rowPoint.x, rowPoint.y)
+    const ctx = await menuState()
+    const label = (needle) => ctx.find((m) => m.label.includes(needle))
+    check(
+      '右键菜单给出常用动作',
+      Boolean(label('更改讲话人') && label('删除') && label('编辑文本') && label('复制')),
+      JSON.stringify(ctx.map((m) => m.label)),
+    )
+    check('单选时「合并选中」不可用', label('合并选中')?.disabled === true, JSON.stringify(label('合并选中')))
+    check('单选时「编辑文本」可用', label('编辑文本')?.disabled === false, JSON.stringify(label('编辑文本')))
+
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', windowsVirtualKeyCode: 27 })
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', windowsVirtualKeyCode: 27 })
+    await sleep(200)
+    check('Esc 关掉菜单', (await cdp.evaluate(`document.querySelectorAll('.menu').length`)) === 0)
+
+    /*
+     * 时间轴上的字幕条：右键弹的必须是同一套菜单。
+     *
+     * 差别只允许一处 —— 时间轴没有输入框，所以没有「编辑文本」。这条断言同时
+     * 盯住「有没有菜单」和「有没有混进做不到的项」：少了前者，多选后只能回表格；
+     * 多了后者，点了不会有任何反应。
+     */
+    const clipPoint = await centerOf(`document.querySelectorAll('.tl-clip')[1]`)
+    await rightClick(clipPoint.x, clipPoint.y)
+    const tlCtx = await menuState()
+    check(
+      '时间轴上右键也是同一套菜单',
+      tlCtx.some((m) => m.label.includes('更改讲话人')) &&
+        tlCtx.some((m) => m.label.includes('删除')) &&
+        tlCtx.some((m) => m.label.includes('复制')),
+      JSON.stringify(tlCtx.map((m) => m.label)),
+    )
+    check(
+      '时间轴上不出现做不到的「编辑文本」',
+      !tlCtx.some((m) => m.label.includes('编辑文本')),
+      JSON.stringify(tlCtx.map((m) => m.label)),
+    )
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', windowsVirtualKeyCode: 27 })
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', windowsVirtualKeyCode: 27 })
+    await sleep(200)
+
+    // 多选后右键：删除项要说明「几条」，编辑文本要灰掉
+    await store(`
+      const f = project.viewFile
+      editor.setSelection([f.segments[1].id, f.segments[2].id])
+      return true
+    `)
+    await sleep(200)
+    const rowPoint2 = await centerOf(`document.querySelectorAll('.row')[1]`)
+    await rightClick(rowPoint2.x, rowPoint2.y)
+    const ctx2 = await menuState()
+    check(
+      '多选时右键作用于整片选区',
+      ctx2.some((m) => m.label.includes('删除选中的 2 条')) &&
+        ctx2.some((m) => m.label.includes('编辑文本') && m.disabled),
+      JSON.stringify(ctx2),
+    )
+
+    // 批量改讲话人：子菜单里选张三
+    const toSpk = await centerOf(
+      `[...document.querySelectorAll('.menu__item')].find((b) => b.textContent.includes('更改讲话人'))`,
+    )
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: toSpk.x, y: toSpk.y })
+    await sleep(300)
+    const subItems = await cdp.evaluate(
+      `(() => [...document.querySelectorAll('.menu--sub .menu__item')].map((b) => b.textContent.trim()))()`,
+    )
+    check('子菜单列出可选的讲话人', subItems.some((t) => t.includes('张三')), JSON.stringify(subItems))
+
+    const pickZhang = await centerOf(
+      `[...document.querySelectorAll('.menu--sub .menu__item')].find((b) => b.textContent.includes('张三'))`,
+    )
+    await cdp.click(pickZhang.x, pickZhang.y)
+    await sleep(320)
+    const afterBatch = await store(`return project.viewFile.segments.map((s) => s.speaker)`)
+    check('右键批量改讲话人生效', JSON.stringify(afterBatch) === '[1,0,0]', JSON.stringify(afterBatch))
+
+    await shot(cdp, 'probe-speaker-panel.png')
+
+    // ---- 导出：标签与筛选 ----
+    const exportBtn = await centerOf(
+      `[...document.querySelectorAll('.editor__foot .btn')].find((b) => b.textContent.includes('导出字幕'))`,
+    )
+    await cdp.click(exportBtn.x, exportBtn.y)
+    await sleep(400)
+
+    const exportView = await cdp.evaluate(`(() => {
+      const chips = [...document.querySelectorAll('.spkchip')]
+      const note = [...document.querySelectorAll('.export__section-note')]
+        .map((n) => n.textContent.trim())
+        .join('|')
+      return {
+        chips: chips.map((c) => c.textContent.replace(/\\s+/g, ' ').trim()),
+        note,
+        hint: document.querySelector('.export__spk-hint')?.textContent.trim() ?? '',
+        toggle: !!document.querySelector('.export__spk-toggle input'),
+      }
+    })()`)
+    check(
+      '导出里有讲话人一栏与标签开关',
+      exportView?.toggle === true && exportView.chips.length === 2,
+      JSON.stringify(exportView),
+    )
+    check(
+      'SRT 说明写明要硬编成「称呼：字幕」',
+      exportView?.hint.includes('称呼：字幕'),
+      exportView?.hint,
+    )
+
+    const liChip = await centerOf(
+      `[...document.querySelectorAll('.spkchip')].find((c) => c.textContent.includes('李四'))`,
+    )
+    const countOf = (note) => Number((/共 (\d+) 条字幕/.exec(note ?? '') ?? [])[1] ?? -1)
+    const beforeCount = countOf(exportView.note)
+    await cdp.click(liChip.x, liChip.y)
+    await sleep(320)
+    const filtered = await cdp.evaluate(`(() => {
+      const head = [...document.querySelectorAll('.spkfilter__head .hint')]
+        .map((n) => n.textContent.trim())[0] ?? ''
+      const warn = document.querySelector('.spkfilter__warn')?.textContent.replace(/\\s+/g, '') ?? ''
+      const note = [...document.querySelectorAll('.export__section-note')]
+        .map((n) => n.textContent.trim()).join('|')
+      return { head, warn, note }
+    })()`)
+    check('取消勾选后人数与条数同步变化', filtered.head.includes('已选 1 / 2'), JSON.stringify(filtered))
+    check('筛掉的条数写清楚了', filtered.warn.includes('筛掉'), JSON.stringify(filtered))
+    check(
+      '输出清单的条数跟着筛选走',
+      beforeCount > 0 && countOf(filtered.note) === beforeCount - 1,
+      `${beforeCount} → ${countOf(filtered.note)}`,
+    )
+
+    await shot(cdp, 'probe-export-speaker.png')
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', windowsVirtualKeyCode: 27 })
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', windowsVirtualKeyCode: 27 })
+    await sleep(250)
+
+    // ---- 删除讲话人：并入他人 ----
+    const delBtn = await centerOf(
+      `[...document.querySelectorAll('.spkrow')].find((r) => r.textContent.includes('张三'))?.querySelector('.spkrow__del')`,
+    )
+    await cdp.click(delBtn.x, delBtn.y)
+    await sleep(350)
+    const dialog = await cdp.evaluate(`(() => {
+      const opts = [...document.querySelectorAll('.del__opt')].map((o) => ({
+        text: o.textContent.replace(/\\s+/g, ' ').trim(),
+        checked: o.querySelector('input')?.checked ?? false,
+        off: o.classList.contains('is-off'),
+      }))
+      return { opts, hasMergeSelect: !!document.querySelector('.del__select') }
+    })()`)
+    check(
+      '删除时给出去向选择（并入 / 只删标识）',
+      dialog?.opts.length === 2 && dialog.opts[0].checked === true && dialog.hasMergeSelect === true,
+      JSON.stringify(dialog),
+    )
+
+    const confirmed = await centerOf(`document.querySelector('.modal__panel .btn--danger')`)
+    await cdp.click(confirmed.x, confirmed.y)
+    await sleep(400)
+    const afterMerge = await store(`
+      const f = project.viewFile
+      return {
+        speakers: f.segments.map((s) => s.speaker),
+        names: [...document.querySelectorAll('.spkrow__name')].map((n) => n.textContent.trim()),
+      }
+    `)
+    check(
+      '并入之后只剩一位讲话人',
+      afterMerge?.speakers.every((s) => s === 1) === true &&
+        JSON.stringify(afterMerge.names) === JSON.stringify(['李四']),
+      JSON.stringify(afterMerge),
+    )
+
+    // 撤销要把归属还原（这一步走的是 history，撤销栈里必须有它）
+    await store(`return project.viewFile.id`)
+    await cdp.send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'z',
+      code: 'KeyZ',
+      modifiers: 2,
+      windowsVirtualKeyCode: 90,
+    })
+    await cdp.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'z',
+      code: 'KeyZ',
+      modifiers: 2,
+      windowsVirtualKeyCode: 90,
+    })
+    await sleep(320)
+    const undone = await store(`return project.viewFile.segments.map((s) => s.speaker)`)
+    check('删除讲话人可以撤销', JSON.stringify(undone) === '[1,0,0]', JSON.stringify(undone))
   },
 
   async 'glass-setting'(cdp) {
@@ -2245,7 +2771,7 @@ const scenarios = {
     await sleep(200)
 
     // ---- 实验增强三件套已从 UI 隐藏（2026-10-11 实测降质）----
-    // 只允许剩下 5 个开关（归一化 / 高通 / 静音切分 / 识别后热词纠正 / 识别后分析说话人），
+    // 只允许剩下 5 个开关（归一化 / 高通 / 静音切分 / 识别后热词纠正 / 区分不同的讲话人），
     // 且隐藏的三项必须真的找不到 —— 哪天有人把它们加回 UI，这里要拦住。
     // 第 4 个是 2026-11-04 新增的本地同音纠正，默认开启、两套架构都能用。
     // 第 5 个是 2026-11-05 新增的说话人分离，默认关闭（要额外跑一遍声纹）。
@@ -2262,12 +2788,12 @@ const scenarios = {
     check('可见开关恰好 5 个', switches.list.length === 5, JSON.stringify(texts))
     check(
       '说话人分离开关可见且默认关闭',
-      switches.list.some((s) => s.text.includes('识别后分析说话人') && s.checked === false),
+      switches.list.some((s) => s.text.includes('区分不同的讲话人') && s.checked === false),
       JSON.stringify(texts),
     )
     check(
       '热词同音纠正开关可见',
-      texts.some((t) => t.includes('识别后按热词纠正同音字')),
+      texts.some((t) => t.includes('识别后纠正同音字')),
       JSON.stringify(texts),
     )
     for (const hidden of ['按录音场景切分', '束搜索', '低置信度段落复核']) {
@@ -2275,7 +2801,7 @@ const scenarios = {
     }
     for (const s of switches.list) {
       // 说话人分离是唯一一个默认关闭的保留开关：它要多跑一遍声纹模型，不该白花时间
-      const expected = s.text.includes('识别后分析说话人') ? false : true
+      const expected = s.text.includes('区分不同的讲话人') ? false : true
       check(`保留开关默认${expected ? '开启' : '关闭'} — ${s.text}`, s.checked === expected, String(s.checked))
     }
     check('场景下拉不再渲染', switches.sceneSelect === false)
@@ -2438,7 +2964,7 @@ const scenarios = {
     await goto(cdp, BASE + '/?demo=1')
     await sleep(400)
 
-    const modeCards = await cdp.evaluate(`document.querySelectorAll('.block__body--modes .mode').length`)
+    const modeCards = await cdp.evaluate(`document.querySelectorAll('.modes .mode').length`)
     check('批量处理方式渲染两张模式卡', modeCards === 2, `实际 ${modeCards}`)
 
     // 选「合并为一条时间轴」（真实鼠标点击）
@@ -2461,8 +2987,8 @@ const scenarios = {
 
     // 合并模式下队列条目应被标记为不可切换（点了不换预览）
     const rowsInfo = await cdp.evaluate(`({
-      total: document.querySelectorAll('.queue__row').length,
-      statics: document.querySelectorAll('.queue__row.is-static').length,
+      total: document.querySelectorAll('.tile:not(.tile--add)').length,
+      statics: document.querySelectorAll('.tile:not(.tile--add).is-static').length,
     })`)
     check(
       '合并模式下队列条目全部标记为不可切换',
@@ -2540,7 +3066,7 @@ const scenarios = {
     await cdp.click(homeNav.x, homeNav.y)
     await sleep(400)
 
-    const thirdRow = await centerOf(`document.querySelectorAll('.queue__row')[2]`)
+    const thirdRow = await centerOf(`document.querySelectorAll('.tile:not(.tile--add)')[2]`)
     await cdp.click(thirdRow.x, thirdRow.y)
     await sleep(300)
 
@@ -2745,22 +3271,25 @@ const scenarios = {
 
     // 无桥环境下清空走 window.confirm，先让它自动通过
     await cdp.evaluate(`(() => { window.confirm = () => true; return true })()`)
-    await clickByText('button.btn--ghost', '清空')
+    // 清空是图标按钮（title 写着「清空队列」），只有图标没有文字
+    const clearPos = await centerOf(`document.querySelector('.board__iconbtn')`)
+    if (!clearPos) throw new Error('找不到清空按钮（.board__iconbtn）')
+    await cdp.click(clearPos.x, clearPos.y)
     await sleep(400)
 
-    const clearedRows = await cdp.evaluate(`document.querySelectorAll('.queue__row').length`)
+    const clearedRows = await cdp.evaluate(`document.querySelectorAll('.tile:not(.tile--add)').length`)
     check('清空队列后队列为空', clearedRows === 0, String(clearedRows))
 
     // 空队列时模式卡片整个不渲染（v-if="supportedFiles.length > 1"），所以
     // 重新载入一份演示数据再看模式落在哪个选项 —— 这是「清空有没有复位模式」
     // 唯一可观察的角度。复位掉了，下一次导入字幕文件才不会掉进空的合并视图。
-    const devBtn = await centerOf(`document.querySelector('.dropzone__dev')`)
-    if (!devBtn) throw new Error('找不到演示数据按钮（.dropzone__dev）')
+    const devBtn = await centerOf(`document.querySelector('.board__dev')`)
+    if (!devBtn) throw new Error('找不到演示数据按钮（.board__dev）')
     await cdp.click(devBtn.x, devBtn.y)
     await sleep(500)
 
     const afterReload = await cdp.evaluate(`({
-      rows: document.querySelectorAll('.queue__row').length,
+      rows: document.querySelectorAll('.tile:not(.tile--add)').length,
       active: (document.querySelector('.mode.is-active')?.textContent ?? '').replace(/\\s+/g, ''),
       locked: document.querySelectorAll('.mode.is-locked').length,
     })`)
@@ -2996,6 +3525,86 @@ const scenarios = {
     await clickByText('.editor__foot button', '导出字幕')
     const hasDialog = await cdp.evaluate(`!!document.querySelector('.modal__panel')`)
     check('点「导出字幕」打开了导出对话框', hasDialog === true)
+
+    /*
+     * 目录两处都得能调起系统选框 —— 手输一整条 `D:\...` 谁都会敲错，
+     * 而敲错的后果只有一句「目录不存在」。顺带守住顶部那条汇总条：
+     * 它已经删了，「将输出到 N 个目录」+「收起清单」回来就是又摆一块没人看的栏目。
+     */
+    const exportHead = await cdp.evaluate(`(() => {
+      const dlg = document.querySelector('.modal__panel')
+      return {
+        summary: !!dlg.querySelector('.export__summary'),
+        collapseText: dlg.textContent.includes('收起清单'),
+        unified: !!dlg.querySelector('.export__dirrow .btn--icon'),
+      }
+    })()`)
+    check(
+      '导出弹窗顶部不再有汇总条',
+      exportHead?.summary === false && exportHead?.collapseText === false,
+      JSON.stringify(exportHead),
+    )
+    check('统一目录旁有「选文件夹」按钮', exportHead?.unified === true, JSON.stringify(exportHead))
+
+    await cdp.evaluate(`(() => {
+      const radios = [...document.querySelectorAll('.modal__panel .radio')]
+      radios.find((r) => r.textContent.includes('每个文件分别指定'))?.querySelector('input')?.click()
+      return true
+    })()`)
+    await sleep(200)
+    const perFilePickers = await cdp.evaluate(`(() => {
+      const dlg = document.querySelector('.modal__panel')
+      return {
+        dirs: dlg.querySelectorAll('.plan__dir').length,
+        btns: dlg.querySelectorAll('.plan__dirrow .btn--icon').length,
+      }
+    })()`)
+    check(
+      '每个文件的目录框旁也各有一个「选文件夹」按钮',
+      perFilePickers.dirs > 0 && perFilePickers.btns === perFilePickers.dirs,
+      JSON.stringify(perFilePickers),
+    )
+    await shot(cdp, 'probe-export-dirs.png')
+
+    /*
+     * 选框按钮塞在 `<label class="radio">` 里：如果没拦住默认行为，标签会把这次点击
+     * 转发给单选，顺手把输出模式改掉。把桥的 `pickDirectory` 换成桩，一次验两件事 ——
+     * 选完的路径真的写回控件里、点按钮本身不会挪动单选。
+     */
+    const picked = 'D:\\探针选中的目录'
+    const dirBtnGuard = await cdp.evaluate(`(async () => {
+      const dlg = document.querySelector('.modal__panel')
+      window.xbaos.dialog.pickDirectory = async () => ${JSON.stringify(picked)}
+      const wait = () => new Promise((r) => setTimeout(r, 200))
+      const checked = (v) => dlg.querySelector('.radio input[type=radio][value="' + v + '"]')?.checked ?? null
+
+      dlg.querySelector('.export__dirrow .btn--icon')?.click()
+      await wait()
+      const unified = {
+        value: dlg.querySelector('.export__dir-input')?.value ?? '',
+        mode: checked('unified'),
+        perFileMode: checked('per-file'),
+      }
+
+      dlg.querySelector('.radio input[type=radio][value="per-file"]')?.click()
+      await wait()
+      dlg.querySelector('.plan__dirrow .btn--icon')?.click()
+      await wait()
+      return { unified, row: dlg.querySelector('.plan__dir')?.value ?? '' }
+    })()`)
+    check(
+      '统一目录：选完写回输入框，并把模式切到「统一输出」',
+      dirBtnGuard?.unified?.value === picked && dirBtnGuard?.unified?.mode === true,
+      JSON.stringify(dirBtnGuard?.unified),
+    )
+    check('逐文件清单：选完写回那一行的目录框', dirBtnGuard?.row === picked, String(dirBtnGuard?.row))
+    // 切回来：后面几步要按「跟随音频所在目录」写文件
+    await cdp.evaluate(`(() => {
+      const radios = [...document.querySelectorAll('.modal__panel .radio')]
+      radios.find((r) => r.textContent.includes('跟随音频文件所在目录'))?.querySelector('input')?.click()
+      return true
+    })()`)
+    await sleep(150)
 
     await clickByText('.modal__foot .btn--primary', '导出')
     await sleep(600)

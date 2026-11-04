@@ -22,8 +22,10 @@ import { assignLanes, exceedsLaneLimit, laneNeighbours, MAX_LANES } from '@/util
 import { MIN_SEGMENT_SEC } from '@/utils/segmentOps'
 import { noticeBlocked } from '@/utils/confirm'
 import { toTimecode } from '@/utils/format'
+import { useSegmentMenu } from '@/composables/useSegmentMenu'
 import type { AudioPeaks, SubtitleSegment } from '@/types'
 import Icon from '@/components/Icon.vue'
+import UiMenu from '@/components/UiMenu.vue'
 
 const project = useProjectStore()
 const editor = useEditorStore()
@@ -553,6 +555,30 @@ function onBarClick(event: MouseEvent, seg: SubtitleSegment): void {
    */
 }
 
+/* ------------------------------------------------------------ 右键菜单 */
+
+/*
+ * 与字幕表格共用同一份菜单实现（`useSegmentMenu`）。
+ *
+ * 时间轴这里**不给** `beginEdit`：条上没有输入框，把「编辑文本」摆出来点了
+ * 只能干瞪眼。表格那边传了，所以同一个菜单在表格里多一项 —— 这是两边唯一
+ * 允许存在的差别，且差别来自「有没有编辑入口」这个事实，不是各写各的。
+ */
+const {
+  menu,
+  openAt: openBarMenu,
+  onPick: onBarMenuPick,
+  close: closeBarMenu,
+} = useSegmentMenu()
+
+function onBarContextMenu(event: MouseEvent, seg: SubtitleSegment): void {
+  // 必须两道都拦：不 preventDefault 会弹出 Chromium 自己的页面菜单，
+  // 不 stopPropagation 会让 stage 的「点空白处定位播放头」跟着跑一次
+  event.preventDefault()
+  event.stopPropagation()
+  openBarMenu(event.clientX, event.clientY, seg)
+}
+
 /* -------------------------------------------------------------- 滚轮交互 */
 
 /**
@@ -930,6 +956,7 @@ const playedWidth = computed(() => Math.max(0, Math.min(stageW.value, playheadX.
           "
           @pointerdown="startMove($event, bar.seg)"
           @click="onBarClick($event, bar.seg)"
+          @contextmenu="onBarContextMenu($event, bar.seg)"
         >
           <span class="tl-clip__text">{{ clipText(bar.seg) }}</span>
           <span
@@ -981,6 +1008,15 @@ const playedWidth = computed(() => Math.max(0, Math.min(stageW.value, playheadX.
 
       <p v-if="duration <= 0" class="timeline__empty">还没有可显示的波形数据</p>
     </div>
+
+    <UiMenu
+      v-if="menu"
+      :x="menu.x"
+      :y="menu.y"
+      :items="menu.items"
+      @close="closeBarMenu"
+      @pick="onBarMenuPick"
+    />
   </div>
 </template>
 

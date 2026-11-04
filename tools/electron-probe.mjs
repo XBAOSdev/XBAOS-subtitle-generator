@@ -34,6 +34,8 @@ const require = createRequire(import.meta.url)
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PORT = 9444
 const OUT_DIR = path.join(repoRoot, '.workbuddy', 'shots')
+/** 官网素材目录：`site-models` 场景直接写进去，省掉手工复制改名的那一步 */
+const SITE_ASSETS = process.env.XBAOS_SITE_ASSETS || 'D:/Code/Website/Subtitle/assets'
 const SHOW_WINDOW = process.argv.includes('--show')
 
 mkdirSync(OUT_DIR, { recursive: true })
@@ -1616,6 +1618,62 @@ const scenarios = {
     check('主题与底色已生效', !!state.bg, `${state.theme} bg=${state.bg} accent=${state.accent}`)
 
     await shot(cdp, 'electron-window.png')
+  },
+
+  /**
+   * 官网的模型页截图。
+   *
+   * 这一张**必须**从真实应用里出：可下载的模型清单由主进程给
+   * （`bridge.models.catalog()`），浏览器预览里根本拿不到，拍出来是一张
+   * 「未检测到可用模型」的空壳 —— 官网要讲的恰恰是「几档可选、体积多少」。
+   *
+   * 用一次性的 user-data-dir 启动，等于一台干净的机器：能看到首次启动时
+   * 模型页真实的样子。尺寸与官网 `<img width height>` 对齐（1454×840 @2x）。
+   */
+  async 'site-models'({ cdp }) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 1454,
+      height: 840,
+      deviceScaleFactor: 2,
+      mobile: false,
+    })
+
+    await cdp.evaluate(`(() => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+      pinia.get('ui').navigate('models')
+      document.documentElement.dataset.theme = 'light'
+      return true
+    })()`)
+
+    /*
+     * 等清单卡片渲染出来。主进程的 catalog 是一次异步 IPC，页面先画空壳再填卡片，
+     * 直接截会截到空的那一帧 —— 而这张图恰恰是要给人看「几档可选、各多大」。
+     */
+    let ready = false
+    for (let i = 0; i < 40; i++) {
+      if (await cdp.evaluate(`document.querySelectorAll('.model__name').length >= 3`)) {
+        ready = true
+        break
+      }
+      await sleep(300)
+    }
+    check(
+      '模型页列出可下载的档位',
+      ready,
+      String(await cdp.evaluate(`document.querySelectorAll('.model__name').length`)),
+    )
+
+    // 通知条是探针环境的产物（连不上更新服务器之类），不该出现在官网上
+    await cdp.evaluate(`(() => {
+      const style = document.createElement('style')
+      style.textContent = '.toasts { display: none !important; }'
+      document.head.appendChild(style)
+      return true
+    })()`)
+
+    const target = path.join(SITE_ASSETS, 'shot-models.png')
+    await capture(cdp, target)
+    check('官网模型页截图已更新', true, target)
   },
 }
 

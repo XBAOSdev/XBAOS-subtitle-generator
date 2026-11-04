@@ -103,7 +103,138 @@ export function assignSpeakers<T extends { start: number; end: number; speaker?:
   return { segments: out, tagged, untouched, speakers: maxSpeaker + 1 }
 }
 
-/** 导出时加在文本前的说话人标签 */
+/** 默认称呼：分离结果只给编号，称呼由用户自己改 */
+export function defaultSpeakerName(index: number): string {
+  return `讲话人 ${index + 1}`
+}
+
+/** 导出用的称呼（没人改过时退回默认） */
+export function speakerName(
+  index: number | undefined,
+  names: Record<string, string> = {},
+): string {
+  if (typeof index !== 'number') return ''
+  const custom = names[index]?.trim()
+  return custom || defaultSpeakerName(index)
+}
+
+/** 导出时加在文本前的说话人标签（旧接口，保留给不需要自定义称呼的调用点） */
 export function speakerLabel(speaker: number | undefined): string {
-  return typeof speaker === 'number' ? `说话人 ${speaker + 1}` : ''
+  return typeof speaker === 'number' ? defaultSpeakerName(speaker) : ''
+}
+
+export interface SpeakerEntry {
+  index: number
+  name: string
+  /** 这个称呼下有多少条字幕 */
+  count: number
+}
+
+/**
+ * 列出当前文件里有哪些讲话人。
+ *
+ * 取「条目里出现过的编号」与「用户手动新增过的编号」的并集：
+ * 只按条目算的话，刚新增的讲话人在列表里根本不出现，用户会以为按钮没反应。
+ * 编号一律不重排 —— 删掉中间一个，后面几位仍然叫原来的名字，否则用户改好的
+ * 称呼会跟着错位。
+ */
+export function listSpeakers(
+  segments: { speaker?: number }[],
+  names: Record<string, string> = {},
+  declared: number[] = [],
+): SpeakerEntry[] {
+  const counts = new Map<number, number>()
+  for (const seg of segments) {
+    if (typeof seg.speaker !== 'number') continue
+    counts.set(seg.speaker, (counts.get(seg.speaker) ?? 0) + 1)
+  }
+  for (const index of declared) {
+    if (!counts.has(index)) counts.set(index, 0)
+  }
+  for (const key of Object.keys(names)) {
+    const index = Number(key)
+    if (Number.isInteger(index) && !counts.has(index)) counts.set(index, 0)
+  }
+  return [...counts.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([index, count]) => ({ index, name: speakerName(index, names), count }))
+}
+
+/** 下一位的编号：不复用已删除的编号，避免「刚删掉的人又冒出来」 */
+export function nextSpeakerIndex(
+  segments: { speaker?: number }[],
+  declared: number[] = [],
+): number {
+  let max = -1
+  for (const seg of segments) {
+    if (typeof seg.speaker === 'number' && seg.speaker > max) max = seg.speaker
+  }
+  for (const index of declared) {
+    if (index > max) max = index
+  }
+  return max + 1
+}
+
+export interface SpeakerPatchResult<T> {
+  segments: T[]
+  changed: number
+}
+
+/**
+ * 把一批条目改成某个讲话人（`speaker` 传 undefined 即清除标识）。
+ *
+ * 返回**新数组**：调用点要拿它进撤销栈，就地改会让「撤销」拿到一份已经被改过
+ * 的快照。没命中的条目原样返回引用，避免整表重新 patch。
+ */
+export function setSpeakerFor<T extends { id: string; speaker?: number }>(
+  segments: T[],
+  ids: string[],
+  speaker: number | undefined,
+): SpeakerPatchResult<T> {
+  const targets = new Set(ids)
+  let changed = 0
+  const out = segments.map((seg) => {
+    if (!targets.has(seg.id)) return seg
+    if (seg.speaker === speaker) return seg
+    changed += 1
+    if (speaker === undefined) {
+      const next = { ...seg }
+      delete next.speaker
+      return next
+    }
+    return { ...seg, speaker }
+  })
+  return { segments: changed > 0 ? out : segments, changed }
+}
+
+/** 把 `from` 的所有条目并到 `to` 名下 */
+export function mergeSpeakerInto<T extends { speaker?: number }>(
+  segments: T[],
+  from: number,
+  to: number,
+): SpeakerPatchResult<T> {
+  if (from === to) return { segments, changed: 0 }
+  let changed = 0
+  const out = segments.map((seg) => {
+    if (seg.speaker !== from) return seg
+    changed += 1
+    return { ...seg, speaker: to }
+  })
+  return { segments: changed > 0 ? out : segments, changed }
+}
+
+/** 清除某个讲话人的全部标识（条目回到「未标记」） */
+export function clearSpeaker<T extends { speaker?: number }>(
+  segments: T[],
+  index: number,
+): SpeakerPatchResult<T> {
+  let changed = 0
+  const out = segments.map((seg) => {
+    if (seg.speaker !== index) return seg
+    changed += 1
+    const next = { ...seg }
+    delete next.speaker
+    return next
+  })
+  return { segments: changed > 0 ? out : segments, changed }
 }

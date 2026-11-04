@@ -559,6 +559,47 @@ body.is-dragging {
   border-radius: var(--radius-md);
 }
 
+/*
+ * 分栏卡片：头部固定、内容区自己滚。
+ *
+ * 为什么要有这一层：导入页改成「两张大卡片不随页面滚动」之后，卡片的
+ * 高度由窗口决定，内容超出时必须**在卡片内部**滚，而不是把整页顶出去。
+ * 三句关键样式缺一不可 —— `min-height: 0` 让 flex 子项允许收缩，
+ * `overflow: hidden` 把圆角裁住（否则内部滚动区的直角会顶破圆角），
+ * 内容区的 `flex: 1 + min-height: 0` 才真的产生滚动条。
+ *
+ * 名字刻意不叫 `.pane`：AI 辅助窗口里 `.pane` 指的是「一个步骤的内容」，
+ * 只是个无边框竖排容器。名字一撞，这里加的边框与底色会顺着 scoped 的缝隙
+ * 漏进去（组件没声明的属性挡不住全局），表现为整段内容被框住、标题顶格。
+ * 全局类名与组件本地类名重名这件事由 `npm run unit` 守着，见 unit-check.ts。
+ */
+.col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.col__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 40px;
+  padding: 0 var(--space-2) 0 var(--space-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.col__title {
+  flex: none;
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
 .section-title {
   font-size: var(--font-size-sm);
   font-weight: var(--weight-semibold);

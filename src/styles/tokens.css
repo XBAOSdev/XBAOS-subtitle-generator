@@ -4,8 +4,13 @@
    ========================================================================== */
 
 :root {
-  /* 字体族：思源黑体优先，逐级回退。字体文件不嵌入，仅声明回退栈 */
-  --font-sans: "Source Han Sans SC", "Noto Sans SC", "PingFang SC",
+  /*
+   * 字体族：**内嵌的 Noto Sans SC 子集打头**（与思源黑体同源，见 `fonts.css`），
+   * 子集外的生僻字逐字回退到系统里可能存在的思源黑体 / 苹方 / 雅黑。
+   * 把内嵌那条放在最前，才不会被「用户刚好装了思源黑体」反过来盖掉 ——
+   * 同一台机器上界面字宽必须可复现。
+   */
+  --font-sans: "Noto Sans SC", "Source Han Sans SC", "PingFang SC",
     "HarmonyOS Sans SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
   --font-mono: "Cascadia Mono", "JetBrains Mono", "Consolas", "Courier New",
     monospace;

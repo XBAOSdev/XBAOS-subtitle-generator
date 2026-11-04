@@ -29,6 +29,11 @@ Belle 中文微调版、SenseVoice 等多种模型。模型文件不随本软件
 本软件包含第三方开源组件，其许可声明见软件「关于」页面的「许可与合规声明」，
 或安装目录下的 licenses 文件夹。
 
+界面正文字体内嵌 Noto Sans SC 的子集（与 Adobe 思源黑体 Source Han Sans 同一套设计），
+采用 SIL Open Font License 1.1，版权归 Adobe，文件未改动字形设计；裁剪范围见
+licenses 文件夹下的 THIRD-PARTY.md，许可原文见同一文件夹下的
+Open-Font-License-1.1.txt。
+
 四、完整协议
 《用户协议》与《隐私政策》全文可在软件「关于」页面随时查看。
 安装、复制或以其他方式使用本软件，即表示你已阅读并同意上述协议的全部内容。

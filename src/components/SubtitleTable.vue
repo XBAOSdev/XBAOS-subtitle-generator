@@ -23,8 +23,11 @@ import { visibleIssues } from '@/utils/validate'
 import { noticeBlocked } from '@/utils/confirm'
 import { isTypingTarget } from '@/utils/typing'
 import { useSplitAtPlayhead } from '@/composables/useSplitAtPlayhead'
+import { useSegmentMenu } from '@/composables/useSegmentMenu'
 import { useUiStore } from '@/stores/ui'
+import { useSpeakerStore } from '@/stores/speakers'
 import TimecodeInput from '@/components/TimecodeInput.vue'
+import UiMenu from '@/components/UiMenu.vue'
 import Icon from '@/components/Icon.vue'
 
 const project = useProjectStore()
@@ -32,6 +35,7 @@ const editor = useEditorStore()
 const settings = useSettingsStore()
 const history = useHistoryStore()
 const ui = useUiStore()
+const speakerStore = useSpeakerStore()
 
 /** 滚动容器。编辑态取输入框、后续「播放时自动滚动到当前句」都基于它 */
 const bodyRef = ref<HTMLDivElement | null>(null)
@@ -39,12 +43,16 @@ const bodyRef = ref<HTMLDivElement | null>(null)
 const segments = computed(() => project.viewFile?.segments ?? [])
 
 /*
- * 整张表里只要有一条带说话人编号，才腾出一列。
+ * 整张表里只要有一条带讲话人编号（或者用户手动新增过一位），才腾出一列。
  *
- * 常驻一列 52px 对没开分离的用户是纯粹的空间浪费 —— 那一列永远是空的，
+ * 常驻一列 92px 对没开分离的用户是纯粹的空间浪费 —— 那一列永远是空的，
  * 还要用户自己猜它为什么空着。列随数据出现，比「灰着等你去开启」干净。
  */
-const hasSpeakers = computed(() => segments.value.some((s) => typeof s.speaker === 'number'))
+const hasSpeakers = computed(
+  () =>
+    segments.value.some((s) => typeof s.speaker === 'number') ||
+    speakerStore.speakersOf(project.viewFileId ?? '', segments.value).length > 0,
+)
 const allIds = computed(() => segments.value.map((s) => s.id))
 
 const allChecked = computed(
@@ -142,6 +150,51 @@ function toggleAck(seg: SubtitleSegment, event: MouseEvent): void {
 function onRowClick(event: MouseEvent, id: string): void {
   const mode = event.shiftKey ? 'range' : event.ctrlKey || event.metaKey ? 'toggle' : 'replace'
   editor.select(id, mode, allIds.value)
+}
+
+/* ------------------------------------------------------------ 讲话人 */
+
+/** 这一条该显示什么称呼（未标记时返回空串） */
+function speakerText(seg: SubtitleSegment): string {
+  if (typeof seg.speaker !== 'number') return ''
+  return speakerStore.nameOf(project.viewFileId ?? '', seg.speaker)
+}
+
+/**
+ * 右键菜单与「更换讲话人」下拉统一由 `useSegmentMenu` 提供。
+ *
+ * 时间轴上的字幕条用的是同一份实现 —— 两个组件各写一遍的话，迟早会出现
+ * 「表格里能合并、时间轴上合并是灰的」这种说不清原因的差异。
+ * 只有表格给得起 `beginEdit`：这里有一个真的输入框能把光标放进去。
+ */
+const {
+  menu,
+  openAt,
+  openSpeakerAt,
+  onPick: onMenuPick,
+  close: closeMenu,
+} = useSegmentMenu({
+  beginEdit: (seg) => void beginEdit(seg.id, SOURCE_SLOT),
+})
+
+/**
+ * 右键一行。坐标交给 composable 自己去夹取，这里只把事件翻成「弹在哪、对谁」，
+ * 顺手拦掉浏览器自己的页面菜单。
+ */
+function openRowMenu(event: MouseEvent, seg: SubtitleSegment): void {
+  event.preventDefault()
+  openAt(event.clientX, event.clientY, seg)
+}
+
+/**
+ * 点讲话人那一格：就地换人。
+ *
+ * 必须 stopPropagation —— 否则这一次点击会冒泡到行上，被当成「选中这一行」，
+ * 而它真正想表达的是「我要改这一条的讲话人」。选中由 composable 顺手做掉。
+ */
+function openSpeakerMenu(event: MouseEvent, seg: SubtitleSegment): void {
+  event.stopPropagation()
+  openSpeakerAt(event.clientX, event.clientY, seg)
 }
 
 /* ------------------------------------------------------------ 时间码 */
@@ -735,7 +788,7 @@ function onKeydown(event: KeyboardEvent): void {
       <span class="cell cell--index">#</span>
       <span class="cell cell--time">开始</span>
       <span class="cell cell--time">结束</span>
-      <span v-if="hasSpeakers" class="cell cell--spk">说话人</span>
+      <span v-if="hasSpeakers" class="cell cell--spk">讲话人</span>
       <span class="cell cell--text">字幕文本</span>
       <span class="cell cell--flag" />
     </div>
@@ -757,6 +810,7 @@ function onKeydown(event: KeyboardEvent): void {
           'is-drop-target': dragOverIndex === index && dragFrom !== null && dragFrom !== index,
         }"
         @click="onRowClick($event, seg.id)"
+        @contextmenu="openRowMenu($event, seg)"
         @dragover="onReorderOver($event, index)"
         @drop="onReorderDrop($event, index)"
       >
@@ -796,17 +850,24 @@ function onKeydown(event: KeyboardEvent): void {
         </span>
 
         <!--
-          说话人只是一条标注：没有分离结果时整列都不渲染，也不占位成「未识别」
+          讲话人只是一条标注：没有分离结果时整列都不渲染，也不占位成「未识别」
           之类的字，免得每条都顶着四个没用的字。
+          有数据之后每一格都可点：点开就是换人（或清除标识）。
         -->
         <span v-if="hasSpeakers" class="cell cell--spk">
-          <span
-            v-if="typeof seg.speaker === 'number'"
+          <button
             class="spk"
-            :title="`说话人 ${seg.speaker + 1}`"
+            :class="{ 'is-empty': typeof seg.speaker !== 'number', 'is-current': selectedSet.has(seg.id) }"
+            type="button"
+            :title="
+              typeof seg.speaker === 'number'
+                ? `${speakerText(seg)}，点击更换`
+                : '还没有标注讲话人，点击选择'
+            "
+            @click="openSpeakerMenu($event, seg)"
           >
-            {{ seg.speaker + 1 }}
-          </span>
+            {{ typeof seg.speaker === 'number' ? speakerText(seg) : '未标记' }}
+          </button>
         </span>
 
         <span class="cell cell--text">
@@ -907,6 +968,15 @@ function onKeydown(event: KeyboardEvent): void {
         <template v-else>这个文件还没有字幕内容</template>
       </p>
     </div>
+
+    <UiMenu
+      v-if="menu"
+      :x="menu.x"
+      :y="menu.y"
+      :items="menu.items"
+      @close="closeMenu"
+      @pick="onMenuPick"
+    />
   </section>
 </template>
 
@@ -935,10 +1005,11 @@ function onKeydown(event: KeyboardEvent): void {
   gap: var(--space-2);
 }
 
-/* 有说话人编号时才多一列，位置固定在「结束」与「字幕文本」之间 */
+/* 有讲话人编号时才多一列，位置固定在「结束」与「字幕文本」之间。
+   宽度按称呼给（92px 大约放得下四个汉字），称呼长了就省略号 + 悬停看全称 */
 .subtable__head.has-spk,
 .row.has-spk {
-  grid-template-columns: 28px 44px 104px 104px 52px minmax(0, 1fr) 78px;
+  grid-template-columns: 28px 44px 104px 104px 92px minmax(0, 1fr) 78px;
 }
 
 /* 编辑操作栏 */
@@ -1095,29 +1166,48 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 /*
- * 说话人标：纯数字 + 中性底，不按人分色。
+ * 讲话人标：中性底、单行省略，不按人分色。
  *
- * 配色规范里只有 AI 那套允许出彩色，而数字本身已经足够区分 —— 硬造六种
+ * 配色规范里只有 AI 那套允许出彩色，而称呼本身已经足够区分 —— 硬造六种
  * 灰阶或彩色，收益是「扫一眼」，代价是整张表开始花，不值。
  */
 .cell--spk {
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  color: var(--color-text-secondary);
+  min-width: 0;
 }
 
 .spk {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 20px;
-  height: 18px;
-  padding: 0 4px;
+  display: block;
+  max-width: 100%;
+  height: 20px;
+  padding: 0 6px;
   border-radius: var(--radius-sm);
   background: var(--color-bg-inset);
-  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.spk:hover {
+  background: var(--color-bg-active);
+  color: var(--color-text-primary);
+}
+
+/* 还没归属的条目：虚线感靠留白表达，不额外加边框（加边框整列会变得很吵） */
+.spk.is-empty {
+  background: transparent;
+  color: var(--color-text-disabled);
+}
+
+.spk.is-empty:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
 }
 
 /* 抓取点平时几乎看不见，悬停或拖动时才亮 —— 编号本身才是这一列的主角 */

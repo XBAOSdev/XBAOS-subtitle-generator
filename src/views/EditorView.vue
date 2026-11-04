@@ -5,6 +5,7 @@ import { useEditorStore } from '@/stores/editor'
 import { useUiStore } from '@/stores/ui'
 import { useSettingsStore } from '@/stores/settings'
 import { useHistoryStore } from '@/stores/history'
+import { useSpeakerStore } from '@/stores/speakers'
 import { formatDuration } from '@/utils/format'
 import { serializeSubtitle, applyLineEnding } from '@/utils/subtitle'
 import { mergeSelected } from '@/utils/segmentOps'
@@ -19,6 +20,7 @@ import TimelineTrack from '@/components/TimelineTrack.vue'
 import SubtitleTable from '@/components/SubtitleTable.vue'
 import AudioPlayer from '@/components/AudioPlayer.vue'
 import ToolPanel from '@/components/ToolPanel.vue'
+import SpeakerPanel from '@/components/SpeakerPanel.vue'
 import Icon from '@/components/Icon.vue'
 
 const project = useProjectStore()
@@ -26,6 +28,7 @@ const ui = useUiStore()
 const editor = useEditorStore()
 const history = useHistoryStore()
 const settings = useSettingsStore()
+const speakerStore = useSpeakerStore()
 
 /**
  * 当前视图条目。独立模式下是选中的那个文件，合并模式下是拼接产物 ——
@@ -479,8 +482,9 @@ async function writeSubtitleTo(path: string, record?: ExportRecord): Promise<voi
     lang: record?.bundle ?? 'source',
     translationLang: record?.lang ?? '',
     sourceFirst: settings.exportLangSourceFirst,
-    // 导出时带了说话人前缀，就地保存也必须带 —— 否则按一次保存就把前缀抹掉了
+    // 导出时带了讲话人标签，就地保存也必须带 —— 否则按一次保存就把标签抹掉了
     speakerPrefix: settings.speakerPrefix,
+    speakerNames: speakerStore.namesOf(file.id),
   })
   const content = applyLineEnding(body, settings.exportLineEnding)
   await bridge.fs.writeSubtitle(path, content, file.sourceEncoding ?? settings.exportEncoding)
@@ -543,6 +547,8 @@ async function saveInPlace(): Promise<void> {
         <AudioPlayer />
         <hr class="divider" />
         <ToolPanel />
+        <!-- 讲话人：只有当前文件真的有讲话人（或手动新增过）时才出现，自带上方分隔线 -->
+        <SpeakerPanel />
         <hr class="divider" />
 
         <div class="issues">

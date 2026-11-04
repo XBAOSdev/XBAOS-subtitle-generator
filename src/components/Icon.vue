@@ -346,6 +346,12 @@ withDefaults(
       <path d="M10 10a2.8 2.8 0 0 0 3.9 3.9" />
     </template>
 
+    <!-- 讲话人（单人轮廓：15px 下两条线就能认出来，双人轮廓会糊成一团） -->
+    <template v-else-if="name === 'user'">
+      <circle cx="12" cy="8" r="3.6" />
+      <path d="M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6" />
+    </template>
+
     <!-- 兜底：方框 -->
     <template v-else>
       <rect x="5" y="5" width="14" height="14" rx="2" />

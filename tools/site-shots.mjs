@@ -34,18 +34,25 @@ const COMMON = 'demo=1&theme=light&update=latest'
 /*
  * 文件名就是官网 assets 里的名字，不要改 —— 页面里写死了这几个引用。
  * 宽高对应 index.html 里 <img> 的 width/height（这里是 CSS 像素，落盘是 2 倍图）。
+ *
+ * **`shot-models.png` 不在这里**：可下载的模型清单由主进程给，浏览器预览拿不到，
+ * 拍出来是一张空壳。那张图由 `node tools/electron-probe.mjs site-models` 从真实应用出，
+ * 写的是同一个目录 —— 放进这个列表只会被这里覆盖掉。
  */
 const SHOTS = [
   // 首屏大图：编辑器，最有说服力的一张
   { file: 'shot-editor.png', query: `view=editor&${COMMON}`, w: 1454, h: 840 },
   // 图文块 1：导入页
   { file: 'shot-import.png', query: `view=home&${COMMON}`, w: 1454, h: 840 },
-  // 图文块 2：辅助窗口本身就是 720 宽的窄窗，按它的真实比例出图
-  { file: 'shot-assist.png', query: `window=assist&task=review&${COMMON}`, w: 720, h: 840 },
-  // 图文块 3：模型页。浏览器预览里没有 Electron 桥，装不出「已安装模型」的样子，
-  // 但「首次启动会引导你配置模型」本来就是这一块要讲的事，落在原样反而如实。
-  { file: 'shot-models.png', query: `view=models&${COMMON}`, w: 1454, h: 840 },
+  // 图文块 2：辅助窗口本身就是 720 宽的窄窗，按它的真实比例出图。
+  // 不带 `task` 才是校对那一侧 —— 带着图注讲的却是校对，对不上
+  { file: 'shot-assist.png', query: `window=assist&${COMMON}`, w: 720, h: 840 },
 ]
+
+/* 只重拍其中一张：`node tools/site-shots.mjs assist`，避免为了改一张把三张都覆盖一遍 */
+const only = process.argv[2] || ''
+const shots = only ? SHOTS.filter((s) => s.file.includes(only)) : SHOTS
+if (shots.length === 0) throw new Error(`没有文件名包含「${only}」的截图`)
 
 async function main() {
   const child = spawn(CHROME, [
@@ -81,7 +88,7 @@ async function main() {
   const tab = await tabRes.json()
   const cdp = await connect(tab.webSocketDebuggerUrl)
 
-  for (const shot of SHOTS) {
+  for (const shot of shots) {
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: shot.w,
       height: shot.h,
@@ -104,6 +111,20 @@ async function main() {
     if (/ERR_|无法访问|拒绝/.test(String(title))) {
       throw new Error(`页面没加载成功：${title}`)
     }
+
+    /*
+     * 藏掉「开发期才有」的东西再拍：`?demo=` 只在 DEV 下生效，所以这些图只能对着
+     * 开发服务器拍，而开发版界面上带着「载入演示数据」这类入口、左下角还可能冒出
+     * 通知条 —— 官网上不该出现它们。用注入的样式藏，比事后修图可靠。
+     */
+    await cdp.evaluate(`(() => {
+      const style = document.createElement('style')
+      style.textContent = '.board__dev, .toasts, .aitip { display: none !important; }'
+      document.head.appendChild(style)
+      return true
+    })()`)
+    await sleep(120)
+
     await capture(cdp, path.join(OUT_DIR, shot.file))
     console.log(`  ok   ${shot.file}  ${shot.w}x${shot.h} @2x`)
   }

@@ -36,7 +36,17 @@ import {
 import { countIssues, visibleIssues, widthUnits } from '../src/utils/validate'
 import { applyLineWrap, breakIntoLines } from '../src/utils/lineWrap'
 import { applyTermFix, collectFixTerms, createTermFixer } from '../src/utils/termFix'
-import { assignSpeakers, speakerLabel } from '../src/utils/speaker'
+import {
+  assignSpeakers,
+  clearSpeaker,
+  defaultSpeakerName,
+  listSpeakers,
+  mergeSpeakerInto,
+  nextSpeakerIndex,
+  setSpeakerFor,
+  speakerLabel,
+  speakerName,
+} from '../src/utils/speaker'
 import { buildWrapWords } from '../src/utils/wrapWords'
 import { COMMON_WORDS, COMMON_WORD_GROUPS } from '../src/data/commonWords'
 import {
@@ -45,7 +55,7 @@ import {
   groupOfDomId,
   searchSettings,
 } from '../src/data/settingsMap'
-import { srtTime, serializeSrt, serializeAss, composeForExport, bundleLangTag, sourceLangTag } from '../src/utils/subtitle'
+import { srtTime, serializeSrt, serializeVtt, serializeAss, composeForExport, bundleLangTag, sourceLangTag } from '../src/utils/subtitle'
 import { planExport, pickTranslationLang, translationLangsOf, type PlanSource } from '../src/utils/exportPlan'
 import { parseSubtitle } from '../src/utils/subtitleParse'
 import { buildPrompt, pickPresentTerms, promptCharCost, splitTerms } from '../src/utils/prompt'
@@ -99,7 +109,9 @@ import {
   parseManifest,
   pickReleaseNotes,
 } from '../electron/update.js'
-import { readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { parse as parseSfc } from 'vue/compiler-sfc'
 import type { PunctuationOptions, SubtitleSegment } from '../src/types'
 
 let pass = 0
@@ -4135,6 +4147,72 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
 }
 
+/* ------------------------------------------------ 全局样式与组件本地样式重名 */
+
+/**
+ * 全局类名不许与组件本地类名重名。
+ *
+ * 为什么值得单独守一条：scoped 只保证「组件自己声明过的属性」不被全局覆盖，
+ * 组件没声明的属性照样从全局漏进来。给导入页加了个带边框的 `.pane` 之后，
+ * AI 辅助窗口里那个同名但无边框的 `.pane` 立刻被框住 —— 标题顶在边框上，
+ * 整页看不出是哪来的，控制台也一句不提。
+ *
+ * 白名单里是已经逐个对过账的：本地规则本就是整套重写，重名不会带来视觉变化。
+ * 新增全局类名前先跑 `npm run unit`，撞上了就换个名字，别往白名单里塞。
+ */
+{
+  const stripComments = (css: string): string => css.replace(/\/\*[\s\S]*?\*\//g, '')
+  const classOf = (css: string): string[] =>
+    [...stripComments(css).matchAll(/^\s*\.([A-Za-z][\w-]*)/gm)].map((m) => m[1])
+
+  const globalClasses = new Set(classOf(readFileSync(new URL('../src/styles/global.css', import.meta.url), 'utf8')))
+
+  const vueFiles: string[] = []
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const child = `${dir}/${entry.name}`
+      if (entry.isDirectory()) walk(child)
+      else if (entry.name.endsWith('.vue')) vueFiles.push(child)
+    }
+  }
+  walk(fileURLToPath(new URL('../src', import.meta.url)))
+
+  const collisions = new Map<string, Set<string>>()
+  for (const file of vueFiles) {
+    const src = readFileSync(file, 'utf8')
+    const styleStart = src.indexOf('<style')
+    if (styleStart < 0) continue
+    for (const name of classOf(src.slice(styleStart))) {
+      if (!globalClasses.has(name)) continue
+      if (!collisions.has(name)) collisions.set(name, new Set())
+      collisions.get(name)!.add(file.slice(file.lastIndexOf('/') + 1))
+    }
+  }
+
+  // 白名单：本地规则覆盖了全局那一条涉及的全部视觉属性，重名不改变渲染结果
+  const allowed: Record<string, string> = {
+    block: 'AssistView 整套重写了卡片外观（边框/圆角/底色），只差 overflow',
+    block__head: 'AssistView 自己给了间距与对齐',
+    block__title: 'AssistView 自己给了字号与颜色',
+    btn: 'HomeView 只加了 .btn.is-flying 修饰符，本意就是叠在全局按钮上',
+    card: 'RecordView 的值与全局一致，另加了内边距',
+    switch: 'SettingsView 改了开关的布局方式，原生输入框本就该藏起来',
+  }
+
+  const unexpected = [...collisions].filter(([name]) => !(name in allowed))
+  check(
+    '全局类名没有和组件本地类名撞名',
+    unexpected.length === 0,
+    unexpected.length
+      ? `${unexpected.map(([n, f]) => `.${n}（${[...f].join('、')}）`).join(' ')} —— 换掉全局那个名字`
+      : '',
+  )
+
+  // 白名单也得跟着实现走：哪条已经不撞了就该删掉，否则以后误以为它还冲突
+  const stale = Object.keys(allowed).filter((name) => !collisions.has(name))
+  check('重名白名单里没有失效条目', stale.length === 0, stale.length ? `${stale.join('、')} 已不再重名，删掉` : '')
+}
+
 /* ------------------------------------------------ 录制音频窗口的接线守门 */
 
 {
@@ -4142,7 +4220,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const main = readText('electron/main.js')
   const preload = readText('electron/preload.cjs')
   const record = readText('src/views/RecordView.vue')
-  const dropzone = readText('src/components/DropZone.vue')
+  const dropzone = readText('src/components/MaterialBoard.vue')
   const app = readText('src/App.vue')
 
   // ---- 主进程：三件渲染进程做不到的事
@@ -4181,11 +4259,20 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
 
   // ---- 主界面：入口 + 锁
   check('导入页有「录制音频」入口', dropzone.includes('录制音频') && dropzone.includes('openRecorder'))
+  /*
+   * 只看 `openRecorder` 自己那一小段：素材区里「移除」「清空」的确认框是
+   * 正当的（会丢字幕），不能因为同一个文件里有 dialog.confirm 就算违规。
+   */
+  const recorderFrom = dropzone.indexOf('async function openRecorder')
+  const recorderTo = dropzone.indexOf('function loadDemo')
+  const recorderSrc =
+    recorderFrom >= 0 && recorderTo > recorderFrom ? dropzone.slice(recorderFrom, recorderTo) : ''
   check(
     '点入口直接开窗（先置锁再 open），不再弹「接下来会打开窗口」那种无意义确认',
-    !dropzone.includes('dialog.confirm') &&
-      dropzone.indexOf('setRecordActive(true)') >= 0 &&
-      dropzone.indexOf('setRecordActive(true)') < dropzone.indexOf('record.open()'),
+    recorderSrc.length > 0 &&
+      !recorderSrc.includes('dialog.confirm') &&
+      recorderSrc.indexOf('setRecordActive(true)') >= 0 &&
+      recorderSrc.indexOf('setRecordActive(true)') < recorderSrc.indexOf('record.open()'),
     '点「录制音频」的意图已经够明确，多一步确认是纯噪音',
   )
   check(
@@ -4487,22 +4574,99 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     single.speakers === 1 && single.segments.every((s) => s.speaker === 0),
   )
 
-  check('标签从 1 开始数', speakerLabel(0) === '说话人 1' && speakerLabel(undefined) === '')
+  check('标签从 1 开始数', speakerLabel(0) === '讲话人 1' && speakerLabel(undefined) === '')
 
   /*
-   * 导出：默认不写说话人前缀。
+   * 称呼：自定义优先，空/空白退回默认。
+   * 空串是很常见的一手（用户清空输入框想「恢复原名」），它不能被当成一个
+   * 名叫「」的讲话人 —— 导出时就会变成「：字幕」。
+   */
+  check(
+    '自定义称呼优先于默认名',
+    speakerName(0, { 0: '张三' }) === '张三' && speakerName(0, {}) === defaultSpeakerName(0),
+  )
+  check('空白称呼退回默认名', speakerName(2, { 2: '   ' }) === '讲话人 3')
+  check('没有编号时没有称呼', speakerName(undefined, { 0: '张三' }) === '')
+
+  /* ---- 称呼的增删改：全部是纯函数，返回新数组 ---- */
+  const spkSegs: SubtitleSegment[] = [
+    { ...seg(0, 1, '一'), speaker: 0 },
+    { ...seg(1, 2, '二'), speaker: 1 },
+    { ...seg(2, 3, '三'), speaker: 0 },
+  ]
+  const listed = listSpeakers(spkSegs, { 0: '张三' }, [5])
+  check(
+    '列出讲话人并统计条数',
+    listed.length === 3 &&
+      listed[0].name === '张三' &&
+      listed[0].count === 2 &&
+      listed[1].count === 1 &&
+      listed[2].index === 5 &&
+      listed[2].count === 0,
+    JSON.stringify(listed),
+  )
+
+  check('新编号不复用已删掉的号', nextSpeakerIndex(spkSegs, [5]) === 6)
+  check('只有条目时按最大编号 +1', nextSpeakerIndex(spkSegs) === 2)
+
+  const changedSpk = setSpeakerFor(spkSegs, [spkSegs[1].id], 0)
+  check(
+    '批量改讲话人',
+    changedSpk.changed === 1 && changedSpk.segments.filter((s) => s.speaker === 0).length === 3,
+    JSON.stringify(changedSpk.segments.map((s) => s.speaker)),
+  )
+  check('改讲话人不改原数组', spkSegs[1].speaker === 1)
+  check('已经是同一个人的不算改动', setSpeakerFor(spkSegs, [spkSegs[0].id], 0).changed === 0)
+
+  const cleared = setSpeakerFor(spkSegs, [spkSegs[0].id], undefined)
+  check(
+    '清除标识是真的删字段',
+    cleared.changed === 1 && !('speaker' in cleared.segments[0]),
+  )
+
+  const merged = mergeSpeakerInto(spkSegs, 1, 0)
+  check(
+    '并入他人后只剩一个编号',
+    merged.changed === 1 && merged.segments.every((s) => s.speaker === 0),
+  )
+  check('并给自己等于没改', mergeSpeakerInto(spkSegs, 1, 1).changed === 0)
+
+  const wiped = clearSpeaker(spkSegs, 0)
+  check(
+    '清除某人的全部标识',
+    wiped.changed === 2 && wiped.segments.filter((s) => s.speaker === 0).length === 0,
+  )
+
+  /*
+   * 导出：默认不写讲话人标签。
    *
    * 这条断言守的是「默认行为不变」—— 升级之后，没开分离的老工程导出来的
    * 文件必须和以前逐字节一样。
    */
   const withSpk: SubtitleSegment = { ...seg(0, 2, '第一句'), speaker: 0 }
   const plain = serializeSrt([withSpk], {})
-  check('默认导出不带说话人前缀', !plain.includes('说话人'), plain.split('\n')[2])
+  check('默认导出不带讲话人标签', !plain.includes('讲话人'), plain.split('\n')[2])
 
   const prefixed = serializeSrt([withSpk], { speakerPrefix: true })
-  check('开启后才写前缀', prefixed.includes('[说话人 1] 第一句'), prefixed.split('\n')[2])
+  check('开启后 SRT 写成「称呼：字幕」', prefixed.includes('讲话人 1：第一句'), prefixed.split('\n')[2])
 
-  // 双语只标首行：同一条字幕的两行不属于两个说话人
+  // 自定义称呼要跟着走：用户改完名字导出还是「讲话人 1」就白改了
+  const named = serializeSrt([withSpk], { speakerPrefix: true, speakerNames: { 0: '张三' } })
+  check('导出用自定义称呼', named.includes('张三：第一句'), named.split('\n')[2])
+
+  // ASS 有 Name 列，写在那里比塞进文本干净；逗号会破坏字段分隔，必须抹掉
+  const ass = serializeAss([withSpk], { speakerPrefix: true, speakerNames: { 0: '张三,李四' } })
+  check(
+    'ASS 称呼写进 Name 列',
+    /Dialogue: 0,[^,]+,[^,]+,Default,张三 李四,0,0,0,,第一句/.test(ass) && !ass.includes('张三：'),
+    ass.split('\n').find((l) => l.startsWith('Dialogue')),
+  )
+
+  // VTT 用语音标签，别在文本里硬编
+  const vtt = serializeVtt([withSpk], { speakerPrefix: true, speakerNames: { 0: '张三' } })
+  check('VTT 用 <v> 语音标签', vtt.includes('<v 张三>第一句'), vtt.split('\n').pop())
+
+  // 双语只标一次：同一条字幕的两行不属于两个讲话人
   const bilingual: SubtitleSegment = {
     ...seg(0, 2, '第一句'),
     speaker: 1,
@@ -4510,8 +4674,8 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   }
   const bi = serializeSrt([bilingual], { lang: 'both', translationLang: 'en', speakerPrefix: true })
   check(
-    '双语音只标第一行',
-    (bi.match(/\[说话人 2\]/g) ?? []).length === 1,
+    '双语音只标一次',
+    (bi.match(/讲话人 2：/g) ?? []).length === 1,
     bi.split('\n').slice(2).join(' | '),
   )
 }
@@ -4579,6 +4743,246 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     cells === 2,
     `v-if="hasSpeakers" 出现 ${cells} 次，应为 2（表头 + 行）`,
   )
+
+  /*
+   * 讲话人的三块界面：侧栏面板、表格里的换人入口、导出里的筛选。
+   *
+   * 这三块各自都能单独跑起来，但少一处就会变成「功能在、入口不在」：
+   * 面板没挂上去 = 改不了名；表格那格不可点 = 只能整批改；导出没筛选 =
+   * 台账里勾了人也不生效。
+   */
+  const editorSrc = readSource('src/views/EditorView.vue')
+  const panelSrc = readSource('src/components/SpeakerPanel.vue')
+  const exportSrc = readSource('src/components/dialogs/ExportDialog.vue')
+  const homeSrc = readSource('src/views/HomeView.vue')
+
+  check('编辑器侧栏挂了讲话人面板', /<SpeakerPanel \/>/.test(editorSrc))
+  check('面板能改名', /speakers\.rename\(/.test(panelSrc))
+  check(
+    '删除时两种去向都给了',
+    /mergeSpeakerInto\(/.test(panelSrc) && /clearSpeaker\(/.test(panelSrc),
+    '只清除标识会让「其实同一个人」的两段发言永远分开',
+  )
+  check('表格里点称呼就能换人', /openSpeakerMenu\(\$event, seg\)/.test(tableSrc))
+  check('字幕条带右键菜单', /@contextmenu="openRowMenu\(\$event, seg\)"/.test(tableSrc))
+
+  /*
+   * 右键菜单在表格与时间轴上是**同一份**实现。
+   *
+   * 两处各写一份时最容易出现的偏差是「表格里能合并、时间轴上合并是灰的」，
+   * 而且只在多选时暴露。所以守门不看某一句文案，而是盯住接线方式：
+   * 两边都从 useSegmentMenu 取，且谁也没有自己拼菜单项列表。
+   */
+  const timelineSrc = readSource('src/components/TimelineTrack.vue')
+  const menuSrc = readSource('src/composables/useSegmentMenu.ts')
+  check(
+    '时间轴的字幕条也能右键',
+    /@contextmenu="onBarContextMenu\(\$event, bar\.seg\)"/.test(timelineSrc) &&
+      /<UiMenu/.test(timelineSrc),
+    '时间轴上没有右键入口，多选之后只能回表格里操作',
+  )
+  check(
+    '两处右键菜单是同一份实现',
+    /useSegmentMenu\(/.test(tableSrc) &&
+      /useSegmentMenu\(/.test(timelineSrc) &&
+      !/tidyMenu\(\[/.test(tableSrc) &&
+      !/tidyMenu\(\[/.test(timelineSrc),
+    '组件里自己拼菜单项，迟早与另一处不一致',
+  )
+  check(
+    '菜单项集中在 composable',
+    /label: '合并选中'/.test(menuSrc) &&
+      /label: '更改讲话人'/.test(menuSrc) &&
+      /label: '在播放头分割'/.test(menuSrc),
+    'composable 里找不到菜单项，说明实现又散回组件了',
+  )
+  check(
+    '时间轴不给自己做不到的菜单项',
+    /useSegmentMenu\(\)/.test(timelineSrc),
+    '时间轴的条上没有输入框，传了 beginEdit 就会出现点了没反应的「编辑文本」',
+  )
+  check(
+    '表格能给「编辑文本」',
+    /useSegmentMenu\(\{[\s\S]{0,200}beginEdit/.test(tableSrc),
+    '不传 beginEdit，表格里就少了直接进编辑的入口',
+  )
+  check(
+    '导出会带上称呼与筛选',
+    /speakerNames: namesOf\.get/.test(exportSrc) && /filteredSummary/.test(exportSrc),
+    '只传标签不传称呼，导出来的永远是「讲话人 N」',
+  )
+
+  /*
+   * 导出的两处目录输入框都能调起系统选框。
+   *
+   * 只给文本框 = 让用户手打 `D:\Podcast\第12期`，敲错一个字符就只剩一句「目录不存在」。
+   * 两处（统一目录、逐文件清单）都要有，少一处那一种模式就还是瞎输。
+   */
+  check(
+    '统一目录旁能调起系统选框',
+    /export__dirrow[\s\S]{0,900}pickDir\('unified'/.test(exportSrc) &&
+      /pickDirectory\(/.test(exportSrc),
+    '只有一个文本框，用户得手打整条路径',
+  )
+  check(
+    '逐文件的目录框旁也能调起系统选框',
+    /plan__dirrow[\s\S]{0,900}pickDir\(item\.fileId/.test(exportSrc),
+    '「每个文件分别指定」那种模式下仍然只能手输',
+  )
+  check(
+    '导出弹窗顶部没有可收起的汇总条',
+    !/export__summary/.test(exportSrc) && !/收起清单/.test(exportSrc),
+    '「将输出到 N 个目录 / 收起清单」这块是纯导航，已经删掉了',
+  )
+
+  // 分离开关必须已经从折叠里挪出来：它藏在「高级选项」里时，没人找得到
+  const advAt = homeSrc.indexOf('class="adv field--wide"')
+  const spkAt = homeSrc.indexOf('settings.speakerDiarization')
+  check(
+    '分离开关不在高级选项里',
+    spkAt > 0 && advAt > 0 && spkAt < advAt,
+    `开关在 ${spkAt}、折叠在 ${advAt}`,
+  )
+  check('分离开关改名为「区分不同的讲话人」', /区分不同的讲话人/.test(homeSrc))
+
+  /*
+   * 导入页的形态（2026-11-04 定）：素材区融合拖放与列表、一个入口通吃、
+   * 页面不整页滚、批量方式归设置。
+   *
+   * 这几条彼此依赖：只做「两栏」而留着整页滚动，卡片就没有独立的滚动条；
+   * 只做「一个入口」而 accept 里没有字幕后缀，用户选了字幕文件会被静默丢弃。
+   */
+  const boardSrc = readSource('src/components/MaterialBoard.vue')
+  check(
+    '导入只有一个入口（音频与字幕同一个选择器）',
+    !homeSrc.includes('导入字幕文件') && /accept="[^"]*\.srt[^"]*"/.test(boardSrc),
+    '两个按钮等于逼用户先判断「我这是音频还是字幕」，那是给软件省事',
+  )
+  check(
+    '素材方块可拖动排序',
+    /draggable="true"/.test(boardSrc) && /project\.reorder\(/.test(boardSrc),
+    '不能拖动就只剩上下箭头，调顺序很别扭',
+  )
+  check(
+    '末尾常驻「+」入口',
+    /tile--add/.test(boardSrc) && /name="plus"/.test(boardSrc),
+    '空队列时整块画布就没有落点了',
+  )
+  check(
+    '批量处理方式归到设置里',
+    /批量处理方式/.test(homeSrc) && !/批量处理方式/.test(boardSrc),
+    '它描述的是这一批怎么合成结果，属于设置而不是某个文件',
+  )
+  check(
+    '页面不整页滚动，改由两张卡片各自滚',
+    /\.view--fill \.view__body \{[\s\S]{0,140}overflow: hidden/.test(homeSrc) &&
+      /\.board__grid \{[\s\S]{0,160}overflow-y: auto/.test(boardSrc) &&
+      /\.settings \{[\s\S]{0,200}overflow-y: auto/.test(homeSrc),
+    '整页一滚，两栏就失去了「各自独立」的意义',
+  )
 }
+/* ------------------------------------------------ 页面组件必须单根 */
+
+{
+  /*
+   * 每个页面组件只能有一个根节点。
+   *
+   * 根元素外面多一个注释节点，组件就成了多根片段；App.vue 里的
+   * `<Transition mode="out-in">` 因此等不到离场回调 —— 切页会整页空白，
+   * 控制台一句错都不报。这个坑真踩过一次（HomeView 顶上那段排版说明），
+   * 只有逐页点开才发现，肉眼和类型检查都拦不住，只能靠守门。
+   */
+  const views = ['HomeView', 'EditorView', 'ModelView', 'SettingsView', 'AboutView']
+  for (const name of views) {
+    const src = readFileSync(new URL(`../src/views/${name}.vue`, import.meta.url), 'utf8')
+    const roots = parseSfc(src).descriptor.template?.ast?.children ?? []
+    const root = roots[0] as { type: number } | undefined
+    check(
+      `${name} 只有一个根节点`,
+      roots.length === 1 && root?.type === 1,
+      `根节点 ${roots.length} 个（type ${roots.map((n) => (n as { type: number }).type).join(',')}）：注释也算节点`,
+    )
+  }
+}
+
+/* ------------------------------------------------ 内嵌字体 */
+
+{
+  /*
+   * 字体必须**随包带上**，不能只写一个回退栈。
+   *
+   * 之前就是只写栈：Windows 默认没有思源黑体，用户机器上实际渲染的是微软雅黑，
+   * 同一行字幕换台电脑字宽就变。而这件事在开发机上永远看不出来 —— 开发机装了思源黑体。
+   * 所以守门盯着「文件在不在、CSS 有没有真的用上」，不盯文案。
+   */
+  const readSource = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const fontsCss = readSource('src/styles/fonts.css')
+  const tokensCss = readSource('src/styles/tokens.css')
+  const mainTs = readSource('src/main.ts')
+
+  const fontFile = new URL('../src/assets/fonts/noto-sans-sc-subset.woff2', import.meta.url)
+  const fontBytes = existsSync(fontFile) ? statSync(fontFile).size : 0
+
+  check(
+    '内嵌字体文件真的在仓库里（不是占位空文件）',
+    fontBytes > 1_000_000,
+    fontBytes === 0 ? '缺 src/assets/fonts/noto-sans-sc-subset.woff2' : `${(fontBytes / 1048576).toFixed(1)} MB`,
+  )
+  check(
+    '@font-face 指向那个 woff2，且声明为变量字重',
+    /@font-face/.test(fontsCss) &&
+      /noto-sans-sc-subset\.woff2/.test(fontsCss) &&
+      /font-weight:\s*100 900/.test(fontsCss),
+    '一条 100–900 覆盖 400/500/600 三档，比分三个静态字重省得多',
+  )
+  check(
+    '样式入口真的导入了 fonts.css（且排在 tokens 之前）',
+    /import '\.\/styles\/fonts\.css'/.test(mainTs) &&
+      mainTs.indexOf('styles/fonts.css') < mainTs.indexOf('styles/tokens.css'),
+    '漏了这一行，前面那条 @font-face 就是一段没人用的 CSS',
+  )
+  check(
+    '--font-sans 以内嵌字体打头',
+    /--font-sans:\s*"Noto Sans SC"/.test(tokensCss),
+    '排在系统字体后面就白内嵌了：装了思源黑体的机器会先用系统那份',
+  )
+}
+
+/* ------------------------------------------------ 许可清单不许漏项 */
+
+{
+  /*
+   * 「随产物分发的东西必须能在「关于」页里找到」。
+   *
+   * 上一版漏了两类：说话人分离的两个声纹模型（随包分发，却一栏都没有）、
+   * 以及 fastcluster（BSD 明文要求二进制分发时在文档里带署名）。
+   * 这类东西漏了不会报错、界面也一切正常，只能靠清单对账。
+   */
+  const readSource = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const about = readSource('src/views/AboutView.vue')
+  const third = readSource('licenses/THIRD-PARTY.md')
+
+  const pairs: [string, string][] = [
+    ['声纹切分模型（pyannote）', 'pyannote'],
+    ['声纹模型（CAM++）', 'CAM++'],
+    ['说话人聚类（fastcluster）', 'fastcluster'],
+    ['内嵌字体', 'Open Font License'],
+  ]
+  for (const [label, needle] of pairs) {
+    check(
+      `「关于」页与第三方清单都写了${label}`,
+      about.includes(needle) && third.includes(needle),
+      '两处要同时有：关于页给用户看，THIRD-PARTY.md 随安装包分发',
+    )
+  }
+
+  check(
+    '内嵌字体的许可原文随包（licenses/Open-Font-License-1.1.txt）',
+    existsSync(new URL('../licenses/Open-Font-License-1.1.txt', import.meta.url)) &&
+      /SIL Open Font License/i.test(readSource('licenses/Open-Font-License-1.1.txt')),
+    'OFL 要求分发时随附许可全文',
+  )
+}
+
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 process.exit(fail > 0 ? 1 : 0)
