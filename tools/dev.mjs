@@ -25,7 +25,9 @@ import {
   readDevServer,
   recordDevServer,
 } from './lib/port.mjs'
-import { DEFAULT_MODEL, findModel, resolveEngineExe } from '../electron/paths.js'
+import { ARCH_INFO, ARCH_SHERPA, ARCH_WHISPER } from '../electron/model-catalog.js'
+import { listModels, pickModel } from '../electron/models.js'
+import { resolveEngineExe } from '../electron/paths.js'
 
 const require = createRequire(import.meta.url)
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -124,21 +126,33 @@ async function checkPort() {
  *
  * 引擎和模型缺了都不会让 npm run dev 失败 —— 界面照样打得开，只是识别用不了。
  * 但那种「界面正常、点开始没反应」的状态最难自查，所以提前把结果打在终端里。
+ *
+ * 两套引擎各查一遍：装了哪套就能跑哪类模型，只有一套时另一类模型在界面上
+ * 是灰的，先在这里说清楚，免得以为是模型坏了。
  */
 function preflight() {
-  const { exe, source } = resolveEngineExe({ isPackaged: false })
-  const model = findModel(DEFAULT_MODEL, { isPackaged: false })
+  const ctx = { isPackaged: false }
 
   console.log('[dev] 启动前自检')
+  for (const arch of [ARCH_WHISPER, ARCH_SHERPA]) {
+    const info = ARCH_INFO[arch]
+    const { exe, source } = resolveEngineExe({ ...ctx, arch })
+    const build = arch === ARCH_WHISPER ? 'bash engine/build.sh' : 'bash engine-onnx/build.sh'
+    console.log(
+      exe
+        ? `[dev]   ${info.engine} 引擎  ok    ${exe}（来源 ${source}）`
+        : `[dev]   ${info.engine} 引擎  缺失  编译：${build}`,
+    )
+  }
+
+  // 这里显示的是「用户没选过模型时会用哪个」，顺序见 model-catalog.js 的
+  // FALLBACK_ORDER。用户已经在设置里指定过模型的，以那个为准。
+  const installed = listModels(ctx)
+  const picked = installed.length ? pickModel(ctx) : null
   console.log(
-    exe
-      ? `[dev]   识别引擎  ok    ${exe}（来源 ${source}）`
-      : '[dev]   识别引擎  缺失  请先编译：bash engine/build.sh',
-  )
-  console.log(
-    model
-      ? `[dev]   默认模型  ok    ${model.path}（来源 ${model.source}）`
-      : `[dev]   默认模型  缺失  需要把 ${DEFAULT_MODEL} 放到 models/ 目录`,
+    picked
+      ? `[dev]   模型  ok    ${installed.length} 个可用，默认用 ${picked.name}（${ARCH_INFO[picked.arch].runtime}）`
+      : '[dev]   模型  缺失  启动后在模型页下载，或把模型放进 models/ 目录',
   )
   console.log('[dev]   （缺项不影响界面打开，只影响识别功能）')
 }

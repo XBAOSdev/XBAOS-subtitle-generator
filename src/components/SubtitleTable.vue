@@ -37,6 +37,14 @@ const ui = useUiStore()
 const bodyRef = ref<HTMLDivElement | null>(null)
 
 const segments = computed(() => project.viewFile?.segments ?? [])
+
+/*
+ * 整张表里只要有一条带说话人编号，才腾出一列。
+ *
+ * 常驻一列 52px 对没开分离的用户是纯粹的空间浪费 —— 那一列永远是空的，
+ * 还要用户自己猜它为什么空着。列随数据出现，比「灰着等你去开启」干净。
+ */
+const hasSpeakers = computed(() => segments.value.some((s) => typeof s.speaker === 'number'))
 const allIds = computed(() => segments.value.map((s) => s.id))
 
 const allChecked = computed(
@@ -714,7 +722,7 @@ function onKeydown(event: KeyboardEvent): void {
       </span>
     </div>
 
-    <div class="subtable__head">
+    <div class="subtable__head" :class="{ 'has-spk': hasSpeakers }">
       <span class="cell cell--check">
         <input
           type="checkbox"
@@ -727,6 +735,7 @@ function onKeydown(event: KeyboardEvent): void {
       <span class="cell cell--index">#</span>
       <span class="cell cell--time">开始</span>
       <span class="cell cell--time">结束</span>
+      <span v-if="hasSpeakers" class="cell cell--spk">说话人</span>
       <span class="cell cell--text">字幕文本</span>
       <span class="cell cell--flag" />
     </div>
@@ -738,6 +747,7 @@ function onKeydown(event: KeyboardEvent): void {
         :data-seg-id="seg.id"
         class="row"
         :class="{
+          'has-spk': hasSpeakers,
           'is-selected': selectedSet.has(seg.id),
           'is-current': editor.selectedIds[0] === seg.id,
           'is-edited': isEdited(seg),
@@ -783,6 +793,20 @@ function onKeydown(event: KeyboardEvent): void {
             :model-value="seg.end"
             @update:model-value="setTimecode(seg, 'end', $event)"
           />
+        </span>
+
+        <!--
+          说话人只是一条标注：没有分离结果时整列都不渲染，也不占位成「未识别」
+          之类的字，免得每条都顶着四个没用的字。
+        -->
+        <span v-if="hasSpeakers" class="cell cell--spk">
+          <span
+            v-if="typeof seg.speaker === 'number'"
+            class="spk"
+            :title="`说话人 ${seg.speaker + 1}`"
+          >
+            {{ seg.speaker + 1 }}
+          </span>
         </span>
 
         <span class="cell cell--text">
@@ -903,10 +927,18 @@ function onKeydown(event: KeyboardEvent): void {
   /*
    * 最后一列从 26px 加宽到 78px：那里现在放「忽略告警」按钮，
    * 不是一个小圆点。宽度给足，中文按钮才不会被压成竖排。
+   *
+   * 说话人那列不在这里：它随数据出现（.has-spk），没开分离就不占宽度。
    */
   grid-template-columns: 28px 44px 104px 104px minmax(0, 1fr) 78px;
   align-items: center;
   gap: var(--space-2);
+}
+
+/* 有说话人编号时才多一列，位置固定在「结束」与「字幕文本」之间 */
+.subtable__head.has-spk,
+.row.has-spk {
+  grid-template-columns: 28px 44px 104px 104px 52px minmax(0, 1fr) 78px;
 }
 
 /* 编辑操作栏 */
@@ -1060,6 +1092,32 @@ function onKeydown(event: KeyboardEvent): void {
 
 .cell--index:active {
   cursor: grabbing;
+}
+
+/*
+ * 说话人标：纯数字 + 中性底，不按人分色。
+ *
+ * 配色规范里只有 AI 那套允许出彩色，而数字本身已经足够区分 —— 硬造六种
+ * 灰阶或彩色，收益是「扫一眼」，代价是整张表开始花，不值。
+ */
+.cell--spk {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.spk {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-inset);
+  font-variant-numeric: tabular-nums;
 }
 
 /* 抓取点平时几乎看不见，悬停或拖动时才亮 —— 编号本身才是这一列的主角 */

@@ -79,6 +79,17 @@ p {
   margin: 0;
 }
 
+/*
+ * 术语表也要复位。`dd` 的默认 `margin-inline-start: 40px` 是按「缩进式定义列表」
+ * 设计的，放到网格里就是每个值都比标签右移一大截 —— 单独在某个组件里补 margin
+ * 只能治那一处，漏一处就又是一版错位。
+ */
+dl,
+dt,
+dd {
+  margin: 0;
+}
+
 button,
 input,
 select,

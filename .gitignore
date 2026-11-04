@@ -23,6 +23,9 @@ out/
 models/
 *.gguf
 *.onnx
+# 例外：说话人分离的两个小模型随包分发（共 33MB，远低于单文件上限），
+# 打包机必须能拿到真实文件，所以放开这一条。
+!resources/diarization/*.onnx
 
 # ===== 编译/打包出的二进制（双保险）=====
 # 源码里不该出现这些；散落一个就足以撑爆仓库
@@ -43,6 +46,15 @@ engine/out/
 engine/third_party/
 # 测试用音频：脚本生成，不入库
 engine/test-data/
+
+# ===== ONNX 引擎（sherpa-onnx 独立进程）=====
+engine-onnx/build/
+# 依赖包：onnxruntime 静态库单个就 103MB（GitHub 单文件硬上限 100MB），
+# 而且都属于「构建输入」而非源码。用 tools/fetch-deps.mjs 补齐，
+# 落地位置见 docs/BUILD-ENGINE.md。
+engine-onnx/*.tar.gz
+engine-onnx/*.tar.bz2
+engine-onnx/*.zip
 
 # ===== 编辑器与系统 =====
 .vscode/*

@@ -8,74 +8,28 @@
  *      页面 CSP 约束，是这里唯一合适的通道。
  *
  * 设计要点：
- *   - 双源：Hugging Face 官方在前、hf-mirror.com 国内镜像在后，
+ *   - 多文件：ONNX 模型是「一个目录 + 若干文件」，whisper 是「单个 .bin」。
+ *     条目里的 files 数组统一描述，下载器按顺序拉，进度按**总字节**聚合 ——
+ *     界面不需要知道底下有几个文件。
+ *   - 双源：国内平台（ModelScope / hf-mirror）在前，另一个在后。
  *     第一个源连不上或返回错误状态时自动换下一个源重试（含续传状态重置）。
  *   - 断点续传：数据先写进 <file>.part，请求带 Range 头。
  *     服务器返回 206 就续写，返回 200（不支持 Range）就从头重写。
- *   - 完整性：下载完校验 ggml 魔数（0x67676d6c，文件前 4 字节为
- *     6c 6d 67 67）+ 最小体积，防止把 CDN 的 403 HTML 页面当成模型。
- *     SHA256 校验需要逐条目维护哈希表且上游会随模型更新变化，
- *     魔数 + 体积对「下错文件」这一实际风险已经足够。
+ *   - 完整性：清单里每个文件都带真实 sha256，逐个核对。
+ *     只有用户自己放进目录的模型（不经这里下载）才没有哈希可比，
+ *     那种情况不归本模块管。
  *   - 进度事件节流 250ms，避免 IPC 消息洪泛拖慢界面。
  *
- * 模型来源（均为开源可商用许可）：
- *   small  ggerganov/whisper.cpp          ggml-small.bin
- *   base   ggerganov/whisper.cpp          ggml-base.bin
- *   turbo  ggerganov/whisper.cpp          ggml-large-v3-turbo.bin
- *   belle  BELLE-2/Belle-whisper-large-v3-turbo-zh-ggml   ggml-model.bin
- *
- * 注：small 在 2026-10-14「模型不随包」之前只靠随包分发、没有下载源，
- * 改成不随包后若不补源，推荐档反而成了唯一拿不到的模型。
+ * 模型来源与许可见 model-catalog.js，这里只管搬运。
  */
 
 import { net } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
+import crypto from 'node:crypto'
 
-/** 下载完成后文件会落到用户模型目录，统一重命名成带来源语义的名字 */
-export const MODEL_CATALOG = [
-  {
-    key: 'small',
-    file: 'ggml-small.bin',
-    sizeLabel: '约 480MB',
-    urls: [
-      'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin',
-      'https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin',
-    ],
-  },
-  {
-    key: 'base',
-    file: 'ggml-base.bin',
-    sizeLabel: '约 140MB',
-    urls: [
-      'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
-      'https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
-    ],
-  },
-  {
-    key: 'turbo',
-    file: 'ggml-large-v3-turbo.bin',
-    sizeLabel: '约 1.6GB',
-    urls: [
-      'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin',
-      'https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin',
-    ],
-  },
-  {
-    key: 'belle',
-    file: 'ggml-belle-large-v3-turbo-zh.bin',
-    sizeLabel: '约 1.6GB',
-    urls: [
-      'https://huggingface.co/BELLE-2/Belle-whisper-large-v3-turbo-zh-ggml/resolve/main/ggml-model.bin',
-      'https://hf-mirror.com/BELLE-2/Belle-whisper-large-v3-turbo-zh-ggml/resolve/main/ggml-model.bin',
-    ],
-  },
-]
-
-export function findCatalog(key) {
-  return MODEL_CATALOG.find((m) => m.key === key) ?? null
-}
+import { findCatalog } from './model-catalog.js'
 
 /** ggml 文件魔数 0x67676d6c 按小端写入后的前 4 字节 */
 function looksLikeGgml(buf) {
@@ -83,6 +37,25 @@ function looksLikeGgml(buf) {
 }
 
 const MIN_MODEL_BYTES = 1024 * 1024 // 任何正经模型都不可能小于 1MB
+
+/** 流式算 SHA256，229MB 约一秒 */
+function sha256File(full) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256')
+    const rs = fs.createReadStream(full, { highWaterMark: 1 << 20 })
+    rs.on('data', (chunk) => hash.update(chunk))
+    rs.on('end', () => resolve(hash.digest('hex')))
+    rs.on('error', reject)
+  })
+}
+
+function fileSize(full) {
+  try {
+    return fs.statSync(full).size
+  } catch {
+    return 0
+  }
+}
 
 export class ModelDownloader {
   /**
@@ -98,36 +71,52 @@ export class ModelDownloader {
     return this.jobs.has(key)
   }
 
+  /** 目录型模型落在 <模型目录>/<id>/，文件型直接落在 <模型目录>/ */
+  targetDir(entry, destRoot) {
+    return entry.kind === 'dir' ? path.join(destRoot, entry.id) : destRoot
+  }
+
+  /** 该条目的全部文件是否已经在磁盘上 */
+  isInstalled(entry, destRoot) {
+    const dir = this.targetDir(entry, destRoot)
+    return entry.files.every((f) => fileSize(path.join(dir, f.name)) >= (f.size || MIN_MODEL_BYTES))
+  }
+
   /**
    * 开始一个下载任务。已在跑时直接返回 false，由 IPC 层决定怎么提示。
    * @returns {boolean}
    */
-  start(key, destDir) {
+  start(key, destRoot) {
     const entry = findCatalog(key)
     if (!entry) throw new Error(`未知的模型：${key}`)
     if (this.jobs.has(key)) return false
 
-    const dest = path.join(destDir, entry.file)
-    if (fs.existsSync(dest)) {
+    if (this.isInstalled(entry, destRoot)) {
       this.emit({ key, status: 'done', already: true })
       return false
     }
 
-    fs.mkdirSync(destDir, { recursive: true })
+    const targetDir = this.targetDir(entry, destRoot)
+    fs.mkdirSync(targetDir, { recursive: true })
+
     const job = {
       key,
       entry,
-      dest,
-      part: `${dest}.part`,
+      destRoot,
+      targetDir,
+      /** 已完成的文件总字节 */
+      doneBytes: 0,
+      /** 当前文件已接收字节 */
+      curReceived: 0,
+      total: entry.files.reduce((sum, f) => sum + (f.size || 0), 0),
+      fileIndex: 0,
       request: null,
-      received: 0,
-      total: 0,
       lastEmit: 0,
       aborted: false,
       canceled: false,
     }
     this.jobs.set(key, job)
-    this.emit({ key, status: 'start' })
+    this.emit({ key, status: 'start', total: job.total })
     void this.run(job)
     return true
   }
@@ -149,46 +138,109 @@ export class ModelDownloader {
   }
 
   async run(job) {
-    for (let i = 0; i < job.entry.urls.length; i++) {
+    for (let i = 0; i < job.entry.files.length; i++) {
       if (job.canceled) break
-      try {
-        await this.tryOneSource(job, job.entry.urls[i], i > 0)
-        if (job.canceled) break // 取消：保留 .part，下次继续
-        if (!job.failed) return // 成功，不再换源
-        // 失败了，换下一个源（续传基准保持不变：.part 还在）
-      } catch (err) {
-        job.failed = true
-        job.error = err instanceof Error ? err.message : String(err)
+      const file = job.entry.files[i]
+      job.fileIndex = i
+      job.curReceived = 0
+
+      const destPath = path.join(job.targetDir, file.name)
+      // 上次已经下完的文件（比如两个文件下到一半断了）直接跳过，不重下
+      if (file.size && fileSize(destPath) === file.size) {
+        if (await this.verifyFile(job, destPath, file)) {
+          job.doneBytes += file.size
+          continue
+        }
       }
+
+      let ok = false
+      for (let u = 0; u < file.urls.length && !ok; u++) {
+        if (job.canceled) break
+        try {
+          ok = await this.fetchOne(job, file, destPath, file.urls[u], u > 0)
+        } catch (err) {
+          job.error = err instanceof Error ? err.message : String(err)
+        }
+      }
+
+      if (!ok) {
+        /*
+         * 取消不是失败。cancel() 会直接结算当前尝试让它返回 false，
+         * 若在这里一律报错，用户点了「取消」却收到「下载失败」——
+         * 而且 .part 还留着，下次续传时看起来像是自己坏过。
+         */
+        if (job.canceled) {
+          this.finish(job, 'canceled')
+          return
+        }
+        this.finish(job, 'error', job.error ?? '所有下载源都失败了')
+        return
+      }
+      job.doneBytes += file.size || fileSize(destPath)
     }
 
-    this.jobs.delete(job.key)
     if (job.canceled) {
       // 保留 .part，下次继续
-      this.emit({ key: job.key, status: 'canceled', received: job.received })
+      this.finish(job, 'canceled')
       return
     }
-    this.emit({
-      key: job.key,
-      status: 'error',
-      message: job.error ?? '所有下载源都失败了',
+
+    this.finish(job, 'done', null, {
+      dest: job.targetDir,
+      total: job.total || job.doneBytes,
+      received: job.doneBytes,
     })
   }
 
+  finish(job, status, message, extra = {}) {
+    this.jobs.delete(job.key)
+    this.emit({
+      key: job.key,
+      status,
+      message: message ?? undefined,
+      received: job.doneBytes + job.curReceived,
+      total: job.total,
+      ...extra,
+    })
+  }
+
+  /** 校验一个已落盘的文件。给了 sha256 就从严，没给就只看魔数与体积 */
+  async verifyFile(job, full, file) {
+    if (file.sha256) {
+      try {
+        return (await sha256File(full)) === file.sha256
+      } catch {
+        return false
+      }
+    }
+    if (file.name.toLowerCase().endsWith('.bin')) {
+      let head
+      try {
+        const fd = fs.openSync(full, 'r')
+        head = Buffer.alloc(4)
+        fs.readSync(fd, head, 0, 4, 0)
+        fs.closeSync(fd)
+      } catch {
+        return false
+      }
+      return looksLikeGgml(head) && fileSize(full) >= MIN_MODEL_BYTES
+    }
+    return fileSize(full) > 0
+  }
+
   /**
-   * 尝试一个源。成功（含换源前的可重试失败）时通过 job.failed 表达结果。
+   * 拉一个文件。成功返回 true；失败返回 false（换下一个源）。
    */
-  tryOneSource(job, url, isFallback) {
+  fetchOne(job, file, destPath, url, isFallback) {
     return new Promise((resolve) => {
-      const resumeSize = this.partSize(job.part)
-      if (resumeSize > 0 && isFallback && job.received === 0) job.received = resumeSize
+      const part = `${destPath}.part`
+      let resumeSize = fileSize(part)
 
       const request = net.request({ url, method: 'GET' })
       request.setHeader('User-Agent', 'XBAOS-SubtitleGenerator')
       if (resumeSize > 0) request.setHeader('Range', `bytes=${resumeSize}-`)
 
       let fd = null
-      let mode = resumeSize > 0 ? 'a' : 'w' // 206 续写；200 重写
       let settled = false
 
       const finish = (result) => {
@@ -212,38 +264,21 @@ export class ModelDownloader {
         const status = res.statusCode ?? 0
 
         if (status !== 200 && status !== 206) {
-          job.failed = true
           job.error = `下载源返回 HTTP ${status}${isFallback ? '' : '，将尝试镜像源'}`
           res.resume()
-          finish()
+          finish(false)
           return
         }
 
         // 服务器忽略 Range 从头发了完整内容：改写而不是续写
-        if (status === 200 && resumeSize > 0) mode = 'w'
-
-        let total = job.received
-        if (status === 206) {
-          const range = res.headers['content-range']
-          const match = Array.isArray(range) ? range[0] : range
-          const parsed = typeof match === 'string' ? /\/(\d+)$/.exec(match) : null
-          if (parsed) total = Number(parsed[1])
-        } else {
-          const len = res.headers['content-length']
-          const raw = Array.isArray(len) ? len[0] : len
-          total = raw ? Number(raw) : 0
-          job.received = 0
-        }
-        job.total = total
-        mode = status === 206 ? 'a' : 'w'
+        if (status === 200 && resumeSize > 0) resumeSize = 0
+        if (status === 200) job.curReceived = 0
 
         try {
-          fd = fs.openSync(job.part, mode === 'a' ? 'a' : 'w')
-          if (mode === 'w') job.received = 0
+          fd = fs.openSync(part, resumeSize > 0 ? 'a' : 'w')
         } catch (err) {
-          job.failed = true
           job.error = `无法写入临时文件：${err instanceof Error ? err.message : String(err)}`
-          finish()
+          finish(false)
           return
         }
 
@@ -258,91 +293,62 @@ export class ModelDownloader {
             } catch {
               /* 已中断 */
             }
-            job.failed = true
             job.error = `写盘失败：${err instanceof Error ? err.message : String(err)}`
             return
           }
-          job.received += chunk.length
+          job.curReceived += chunk.length
           this.maybeEmitProgress(job)
         })
 
-        res.on('end', () => {
+        res.on('end', async () => {
           if (job.aborted) {
-            finish()
+            finish(false)
             return
           }
-          // ---- 完整性校验 ----
-          if (job.total > 0 && job.received < job.total) {
-            job.failed = true
-            job.error = '下载不完整，连接被中断，可重试续传'
-            finish()
+          const got = fileSize(part)
+          if (file.size && got !== file.size) {
+            job.error = `下载不完整（${got}/${file.size} 字节），可重试续传`
+            finish(false)
             return
           }
-          let head
-          try {
-            const f = fs.openSync(job.part, 'r')
-            head = Buffer.alloc(4)
-            fs.readSync(f, head, 0, 4, 0)
-            fs.closeSync(f)
-          } catch (err) {
-            job.failed = true
-            job.error = `校验失败：${err instanceof Error ? err.message : String(err)}`
-            finish()
-            return
-          }
-          const size = this.partSize(job.part)
-          if (!looksLikeGgml(head) || size < MIN_MODEL_BYTES) {
-            job.failed = true
-            job.error = '下载的内容不是有效的模型文件（校验未通过），已丢弃'
+          const ok = await this.verifyFile(job, part, file)
+          if (!ok) {
+            job.error = '下载的内容校验未通过，已丢弃'
             try {
-              fs.unlinkSync(job.part)
+              fs.unlinkSync(part)
             } catch {
               /* 删不掉就留着，下次重写 */
             }
-            finish()
+            finish(false)
             return
           }
-
           try {
-            fs.renameSync(job.part, job.dest)
+            fs.renameSync(part, destPath)
           } catch (err) {
-            job.failed = true
-            job.error = `模型落盘失败：${err instanceof Error ? err.message : String(err)}`
-            finish()
+            job.error = `文件落盘失败：${err instanceof Error ? err.message : String(err)}`
+            finish(false)
             return
           }
-
-          this.jobs.delete(job.key)
-          job.failed = false
-          this.emit({
-            key: job.key,
-            status: 'done',
-            received: job.received,
-            total: job.total,
-            dest: job.dest,
-          })
-          finish()
+          finish(true)
         })
 
         res.on('error', (err) => {
           if (job.canceled) {
-            finish()
+            finish(false)
             return
           }
-          job.failed = true
           job.error = `网络错误：${err.message}${isFallback ? '' : '，将尝试镜像源'}`
-          finish()
+          finish(false)
         })
       })
 
       request.on('error', (err) => {
         if (job.canceled) {
-          finish()
+          finish(false)
           return
         }
-        job.failed = true
         job.error = `无法连接下载源：${err.message}${isFallback ? '' : '，将尝试镜像源'}`
-        finish()
+        finish(false)
       })
 
       job.request = request
@@ -350,47 +356,64 @@ export class ModelDownloader {
     })
   }
 
-  partSize(part) {
-    try {
-      return fs.statSync(part).size
-    } catch {
-      return 0
-    }
-  }
-
   maybeEmitProgress(job) {
     const now = Date.now()
-    if (now - job.lastEmit < 250 && job.received < job.total) return
+    const received = job.doneBytes + job.curReceived
+    if (now - job.lastEmit < 250 && received < job.total) return
     job.lastEmit = now
     this.emit({
       key: job.key,
       status: 'progress',
-      received: job.received,
+      received,
       total: job.total,
-      percent:
-        job.total > 0 ? Math.min(99.9, (job.received / job.total) * 100) : 0,
+      fileIndex: job.fileIndex,
+      fileCount: job.entry.files.length,
+      percent: job.total > 0 ? Math.min(99.9, (received / job.total) * 100) : 0,
     })
   }
 
-  /** 删除用户模型目录里的模型文件。只接受纯文件名，拒绝任何路径穿越 */
-  async remove(fileName, destDir) {
-    if (path.basename(fileName) !== fileName) {
-      throw new Error('只允许删除模型目录下的文件')
+  /**
+   * 删除模型目录里的模型。
+   *
+   * 只接受纯标识名，拒绝任何路径穿越。目录型模型按「先清文件、再删空目录」
+   * 走，不用递归删除 —— 万一用户往模型目录里塞了自己的东西，宁可留着让他看见，
+   * 也不要一次 rm -rf 抹掉。
+   */
+  async remove(id, destRoot, kind = 'file') {
+    if (path.basename(id) !== id) {
+      throw new Error('只允许删除模型目录下的内容')
     }
-    const target = path.join(destDir, fileName)
-    if (!target.startsWith(path.resolve(destDir) + path.sep)) {
-      throw new Error('非法路径')
+    const root = path.resolve(destRoot)
+    const target = path.join(root, id)
+    if (!target.startsWith(root + path.sep)) throw new Error('非法路径')
+
+    if (kind === 'dir') {
+      let entries
+      try {
+        entries = fs.readdirSync(target, { withFileTypes: true })
+      } catch (err) {
+        if (err.code === 'ENOENT') return true
+        throw err
+      }
+      // 先整体检查再删：边删边查的话，碰到子文件夹时会留下删了一半的目录
+      const foreign = entries.find((e) => !e.isFile())
+      if (foreign) {
+        throw new Error('模型目录里还有子文件夹，请在资源管理器中手动删除')
+      }
+      for (const e of entries) {
+        await fsp.unlink(path.join(target, e.name))
+      }
+      await fsp.rmdir(target)
+      return true
     }
+
     // 主文件可能不存在（比如上次取消后只剩 .part），此时只清理续传残留
-    try {
-      await fsp.unlink(target)
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err
-    }
-    try {
-      await fsp.unlink(`${target}.part`)
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err
+    for (const p of [target, `${target}.part`]) {
+      try {
+        await fsp.unlink(p)
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err
+      }
     }
     return true
   }

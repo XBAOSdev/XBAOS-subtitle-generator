@@ -20,6 +20,21 @@ async function openSite(): Promise<void> {
   if (!ok) ui.notify('error', '打不开官网', `请手动访问 ${update.targetUrl}`)
 }
 
+/** 打开随包的许可原文目录。副本本来就在，只是没人会去安装目录里翻 */
+async function openLicenses(): Promise<void> {
+  const api = window.xbaos?.app
+  if (!api?.openLicenses) {
+    ui.notify('info', '浏览器预览打不开许可目录', '请在桌面应用中使用')
+    return
+  }
+  try {
+    const res = await api.openLicenses()
+    if (!res.ok && res.message) ui.notify('error', '打不开许可目录', res.message)
+  } catch (err) {
+    ui.notify('error', '打不开许可目录', err instanceof Error ? err.message : String(err))
+  }
+}
+
 /** 协议入口。正文在 `src/legal`，这里只负责「看哪一份」 */
 const LEGAL_ENTRIES = [
   {
@@ -45,11 +60,19 @@ const LIBS = [
   { name: 'Vue.js', license: 'MIT License' },
   { name: 'Pinia', license: 'MIT License' },
   { name: 'whisper.cpp', license: 'MIT License' },
+  { name: 'sherpa-onnx', license: 'Apache License 2.0' },
+  { name: 'ONNX Runtime', license: 'MIT License' },
+  { name: 'kaldi-native-fbank / kaldifst / OpenFst', license: 'Apache License 2.0' },
+  { name: 'Eigen', license: 'Mozilla Public License 2.0' },
+  { name: 'kissfft', license: 'BSD 3-Clause License' },
+  { name: 'utf8proc / nlohmann/json', license: 'MIT License' },
   { name: 'OpenAI Whisper 模型权重', license: 'MIT License' },
   { name: 'BELLE 中文微调模型权重', license: 'Apache License 2.0' },
+  { name: 'SenseVoice-Small 模型权重', license: 'FunASR Model License 1.1' },
   { name: 'dr_libs（WAV / MP3 / FLAC 解码）', license: 'MIT-0 或 Public Domain' },
   { name: 'stb_vorbis（OGG Vorbis 解码）', license: 'MIT-0 或 Public Domain' },
   { name: 'libopus / libogg', license: 'BSD 3-Clause License' },
+  { name: 'FFmpeg（non-proprietary 构建）', license: 'LGPL-2.1-or-later' },
   { name: 'Vulkan-Headers', license: 'Apache License 2.0' },
   { name: '思源黑体 Source Han Sans SC', license: 'SIL Open Font License 1.1' },
 ]
@@ -118,6 +141,11 @@ const LIBS = [
               </dd>
             </div>
           </dl>
+
+          <p class="hero__tagline">
+            把音频转成字幕的 Windows 桌面工具，可通过两套识别引擎运行
+            Whisper、Belle、SenseVoice 等多种模型。
+          </p>
         </section>
 
         <section class="block">
@@ -202,6 +230,11 @@ const LIBS = [
               AAC、WMA、AMR、DTS 等格式的部分专利仍在保护期内，所以没有内置它们的解码器，
               需要先转换为上列任一格式。
             </p>
+
+            <button class="btn btn--sm licenses__open" type="button" @click="openLicenses">
+              <Icon name="folder-open" :size="13" />
+              <span>查看许可原文</span>
+            </button>
           </div>
         </section>
 
@@ -258,12 +291,24 @@ const LIBS = [
 <style scoped>
 .hero {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-4);
   padding: var(--space-5);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   background: var(--color-bg-surface);
+}
+
+/* 一句话定位：占满整行并压一条分隔线，上面是身份、下面是它能做什么 */
+.hero__tagline {
+  flex: 0 0 100%;
+  margin-top: var(--space-1);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: var(--line-base);
 }
 
 .hero__mark {
@@ -423,6 +468,10 @@ const LIBS = [
   font-size: var(--font-size-xs);
   line-height: var(--line-loose);
   color: var(--color-text-secondary);
+}
+
+.licenses__open {
+  margin-top: var(--space-3);
 }
 
 .privacy {

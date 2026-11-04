@@ -20,12 +20,22 @@ import { promisify } from 'node:util'
 
 import { EngineClient, EngineCanceledError, EngineCrashError } from './engine-client.js'
 import { decodeTextAuto, encodeSubtitle } from './encoding.js'
-import { ModelDownloader, MODEL_CATALOG } from './model-download.js'
+import { ModelDownloader } from './model-download.js'
+import {
+  ARCH_INFO,
+  ARCH_SHERPA,
+  ARCH_WHISPER,
+  FALLBACK_ORDER,
+  archLabel,
+  capsOf,
+  findCatalog,
+  publicCatalog,
+} from './model-catalog.js'
+import { clearArchCache, listModels, resolveModel } from './models.js'
 import { MANIFEST_URL, allowedExternalUrl, checkForUpdate, isAllowedExternalHost } from './update.js'
 import {
-  DEFAULT_MODEL,
-  findModel,
-  listAvailableModels,
+  DIARIZATION_FILES,
+  diarizationModelDir,
   modelSearchDirs,
   resolveEngineExe,
   resolveRendererDist,
@@ -103,11 +113,7 @@ let customModelsDir = ''
 let modelDownloader = null
 
 /** 渲染进程可见的模型目录条目。下载地址由主进程内部维护，不下发 */
-const MODEL_CATALOG_PUBLIC = MODEL_CATALOG.map(({ key, file, sizeLabel }) => ({
-  key,
-  file,
-  sizeLabel,
-}))
+const MODEL_CATALOG_PUBLIC = publicCatalog()
 
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'
 const isDev = !app.isPackaged
@@ -132,63 +138,32 @@ function modelCtx() {
   }
 }
 
-function engineInfo() {
+/**
+ * 引擎可执行文件的查找。按架构分：whisper 走 ggml 引擎，其余走 ONNX 引擎。
+ *
+ * @param {string} [arch] 不传就按 whisper 找 —— 用于「还不知道用哪个模型」的
+ *   诊断场景（关于页 / 日志），真正跑识别时调用方一定有架构。
+ */
+function engineInfo(arch = ARCH_WHISPER) {
   const { exe, source } = resolveEngineExe({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
+    arch,
   })
   return { exe, source }
 }
 
 /**
- * 把「渲染进程给的模型标识」解析成引擎能用的绝对路径。
+ * 把「渲染进程给的模型标识」解析成**这次真正要跑的模型**。
  *
- * 允许传三种东西：什么都不传（用默认模型）、只给文件名（在候选目录里找）、
- * 给绝对路径（直接检查存在性，给高级用户手动指定用）。
- * 找不到一律返回 null，由调用方决定怎么报错 —— 这里不抛，因为
- * engine:load 和 engine:transcribe 需要的错误文案不一样。
+ * 三种入参：什么都不传（按兜底顺序挑）、给标识（文件名或目录名）、
+ * 给绝对路径（高级用户手动指定）。返回条目里带 arch —— 主进程据此
+ * 决定 spawn 哪个引擎，渲染层据此决定哪些功能要灰掉。
+ *
+ * @returns {{entry: object, fellBack: boolean} | null}
  */
-/**
- * 从磁盘上已有的模型里挑一个兜底。
- *
- * 「模型不随包」之后用户装的很可能正是 base 或 turbo 而不是 small，
- * 不该因为他没点过「切换使用」就判定识别失败 —— 所以默认档找不到时
- * 还要继续在已装模型里挑。
- *
- * 多个候选时不听 readdir 的字母序：字母序会把 ggml-base 排在 ggml-small
- * 前面，等于默认给用户最差的那个。
- *
- * @returns {{path: string, dir: string, source: string} | null}
- */
-function pickInstalledModel() {
-  const preferred = findModel(DEFAULT_MODEL, modelCtx())
-  if (preferred) return preferred
-
-  const installed = listAvailableModels(modelCtx())
-  if (installed.length === 0) return null
-
-  /*
-   * 顺序按**能力**排，不按体积、更不按字母序。
-   *
-   * 曾经是 `small → base → turbo`，结果磁盘上装着 1.6GB 的 Belle 中文微调时
-   * 也会被跳过 —— 用户下了更好的模型、却因为这一行永远用着 244M 的 small，
-   * 这跟「下了没用」没有区别。Belle 是中文语料微调的 large-v3-turbo，
-   * 中文同音字与专有名词明显更准，所以排第一。
-   *
-   * 只在「用户从未选过模型」（modelFile 为空）时生效；用户显式选过谁就用谁。
-   * 代价是首次会慢一些，但「默认更准」比「默认更快」更符合这里的用途。
-   */
-  const preferOrder = [
-    'ggml-belle-large-v3-turbo-zh.bin',
-    'ggml-large-v3-turbo.bin',
-    'ggml-small.bin',
-    'ggml-base.bin',
-  ]
-  for (const name of preferOrder) {
-    const hit = installed.find((m) => m.name === name)
-    if (hit) return hit
-  }
-  return installed[0]
+function resolveModelEntry(requested) {
+  return resolveModel(typeof requested === 'string' ? requested : '', modelCtx())
 }
 
 /**
@@ -201,51 +176,138 @@ function pickInstalledModel() {
  * 刻意不发 `fallback` 事件：打开模型页看看不该冒出一条警告。
  */
 function resolveModelInfo(requested) {
-  if (requested) {
-    const hit = path.isAbsolute(requested)
-      ? (existsSync(requested) ? { path: requested, source: 'absolute' } : null)
-      : findModel(requested, modelCtx())
-    if (hit) return { name: path.basename(hit.path), path: hit.path, source: hit.source }
+  const hit = resolveModelEntry(requested)
+  if (!hit) return null
+  const { entry } = hit
+  return {
+    id: entry.id,
+    name: entry.name,
+    path: entry.path,
+    source: entry.source,
+    arch: entry.arch,
+    kind: entry.kind,
+    fellBack: hit.fellBack,
   }
-
-  const fallback = pickInstalledModel()
-  if (!fallback) return null
-  return { name: path.basename(fallback.path), path: fallback.path, source: fallback.source }
 }
 
-function resolveModelPath(requested) {
-  if (requested) {
-    if (path.isAbsolute(requested)) {
-      return existsSync(requested) ? requested : null
-    }
-    const found = findModel(requested, modelCtx())?.path ?? null
-    if (found) return found
-
-    /*
-     * 用户在模型管理页选过的模型被手动删掉时，别让识别直接失败 ——
-     * 那是最容易发生也最难自查的情形（在资源管理器里删了文件，软件这边
-     * 一声不响地记着旧名字）。回退到任一可用模型并说明发生了什么。
-     *
-     * 注意回退目标用 pickInstalledModel() 而不是死盯 DEFAULT_MODEL：
-     * 只装了 base 的用户，small 本来就不存在，盯默认档会白回退成 null。
-     */
-    const fallback = pickInstalledModel()
-    if (!fallback) return null
-
+/**
+ * 同 resolveModelEntry，但会**通知界面**「选过的模型被删了，已回退」。
+ *
+ * 用于真正要跑识别的路径（engine:load / engine:transcribe），不用于只读查询 ——
+ * 打开模型页看看不该冒出一条警告。
+ */
+function resolveModelForRun(requested) {
+  const hit = resolveModelEntry(requested)
+  if (!hit) return null
+  if (hit.fellBack && requested) {
     send('engine:stream', {
       taskId: null,
       msg: {
         type: 'fallback',
         from: requested,
-        to: path.basename(fallback.path),
-        reason: `所选模型 ${requested} 不存在，已回退到 ${path.basename(fallback.path)}`,
+        to: hit.entry.id,
+        reason: `所选模型 ${requested} 不存在，已回退到 ${hit.entry.name}`,
       },
     })
-    return fallback.path
+  }
+  return hit
+}
+
+/**
+ * 记住「上次用的模型与架构」。
+ *
+ * 为什么单独存一份：模型页顶端要显示当前架构，而判定架构要看模型文件内容
+ * （ONNX 目录要读 tokens.txt）。记下来之后界面上可以先按记录的架构渲染，
+ * 只有真的换了模型或文件失效才重判 —— 这就是「不要每次都检查一遍」。
+ *
+ * 与主题偏好同一个套路：写独立小文件，不动渲染进程的 localStorage，
+ * 避免出现两份设置真相源。
+ */
+function modelStatePath() {
+  return path.join(app.getPath('userData'), 'model-state.json')
+}
+
+function readModelState() {
+  try {
+    const raw = JSON.parse(readFileSync(modelStatePath(), 'utf8'))
+    if (raw && typeof raw.id === 'string' && typeof raw.arch === 'string') return raw
+  } catch {
+    /* 没有记录、或文件坏了，按没记录处理 */
+  }
+  return null
+}
+
+async function writeModelState(state) {
+  try {
+    await fs.writeFile(modelStatePath(), JSON.stringify(state), 'utf8')
+  } catch (err) {
+    console.warn(`[models] 记录当前架构失败：${err.message}`)
+  }
+}
+
+/**
+ * 自定义模型目录的落地文件。
+ *
+ * 渲染进程那份设置存在 localStorage 里，主进程读不到；而「模型在哪」必须在
+ * 主进程侧就知道（下载落点、扫描范围、打开文件夹）。所以单独记一份副本 ——
+ * 与主题偏好同一个套路，不追求两份同步，只记这一个值。
+ *
+ * 没有它的话，用户换到 D 盘后一重启就回落到默认目录，界面显示「没检测到
+ * 模型」，而文件其实好好躺在新目录里。
+ */
+function modelsDirStatePath() {
+  return path.join(app.getPath('userData'), 'models-dir.json')
+}
+
+/** 读上次设置的自定义目录。目录已不存在（移动硬盘拔了、被删了）就当没设过 */
+function readCustomModelsDir() {
+  try {
+    const raw = JSON.parse(readFileSync(modelsDirStatePath(), 'utf8'))
+    const dir = raw && typeof raw.dir === 'string' ? raw.dir.trim() : ''
+    if (!dir) return ''
+    return existsSync(dir) ? dir : ''
+  } catch {
+    return ''
+  }
+}
+
+function writeCustomModelsDir(dir) {
+  void fs
+    .writeFile(modelsDirStatePath(), JSON.stringify({ dir }), 'utf8')
+    .catch((err) => console.warn(`[models] 记录模型目录失败：${err.message}`))
+}
+
+/**
+ * 当前生效模型 + 架构的快照。
+ *
+ * 先看记录的架构是否仍然成立（同一个标识、架构判定一致），成立就直接用，
+ * 省掉读 tokens.txt；不成立才更新记录。
+ */
+function activeModelSnapshot(requested) {
+  const entry = resolveModelEntry(requested)?.entry ?? null
+  if (!entry) return { entry: null, arch: '', archLabel: '', caps: capsOf('') }
+
+  const saved = readModelState()
+  if (!saved || saved.id !== entry.id || saved.arch !== entry.arch) {
+    void writeModelState({ id: entry.id, arch: entry.arch, at: Date.now() })
   }
 
-  // 没选过模型（modelFile 为空）时同理
-  return pickInstalledModel()?.path ?? null
+  return {
+    entry: {
+      id: entry.id,
+      name: entry.name,
+      path: entry.path,
+      kind: entry.kind,
+      size: entry.size,
+      source: entry.source,
+      builtin: entry.builtin,
+      catalogKey: entry.catalogKey,
+      variant: entry.variant,
+    },
+    arch: entry.arch,
+    archLabel: archLabel(entry.arch),
+    caps: capsOf(entry.arch),
+  }
 }
 
 // ---------------------------------------------------------------- 引擎诊断
@@ -445,18 +507,20 @@ async function writeCrashReport(client, info) {
   }
 }
 
+/** 当前引擎进程对应的架构。空串表示还没定过。 */
+let engineArch = ''
+
+/**
+ * 创建 / 复用引擎客户端。
+ *
+ * 这里**不校验 exe**：两套引擎是两个 exe，用哪个由模型架构决定，
+ * 而模型要等渲染进程把设置同步过来之后才知道。真正的校验在
+ * ensureEngineFor() 里 —— 那时已经知道该跑哪套了。
+ */
 function ensureEngine() {
   if (engine) return engine
 
-  const { exe, source } = engineInfo()
-  if (!exe) {
-    throw new Error(
-      '找不到识别引擎。开发态请先执行 engine/build.sh 编译；' +
-        '也可以用环境变量 XBAOS_ENGINE_EXE 指定路径。',
-    )
-  }
-
-  engine = new EngineClient(exe, [], { disableVulkan: readVulkanDisabled() || envDisablesVulkan() })
+  engine = new EngineClient('', [], { disableVulkan: readVulkanDisabled() || envDisablesVulkan() })
   engine.on('log', (level, text) => {
     rememberEngineLog(level, text)
     writeEngineLog(level, text)
@@ -477,8 +541,36 @@ function ensureEngine() {
     }
   })
 
-  console.log(`[engine] 使用 ${exe}（来源 ${source}）`)
   return engine
+}
+
+/**
+ * 确保引擎实例指向**目标架构**的可执行文件。
+ *
+ * 换架构必须换进程：运行中的进程不可能改掉自己的可执行文件。
+ * 已有进程时会先停掉它（模型也随之卸载），所以这个函数是异步的。
+ *
+ * @param {string} arch 'whisper' | 'sherpa'
+ */
+async function ensureEngineFor(arch) {
+  const client = ensureEngine()
+  const info = ARCH_INFO[arch] ?? ARCH_INFO[ARCH_WHISPER]
+  const { exe, source } = engineInfo(info.id)
+
+  if (!exe) {
+    throw new Error(
+      `找不到 ${archLabel(info.id)} 识别引擎。开发态请先编译（` +
+        `whisper: engine/build.sh，ONNX: engine-onnx/build.sh）；` +
+        `也可以用环境变量 ${info.envVar} 指定路径。`,
+    )
+  }
+
+  if (engineArch !== info.id) {
+    await client.setExe(exe)
+    engineArch = info.id
+    console.log(`[engine] 使用 ${archLabel(info.id)} 引擎 ${exe}（来源 ${source}）`)
+  }
+  return client
 }
 
 /**
@@ -492,7 +584,13 @@ function ensureEngine() {
  *
  * 显式选 vulkan/gpu 时反过来做：把上次崩溃记下的禁用清掉，给用户一次机会。
  */
-async function applyBackendIntent(client, backend) {
+async function applyBackendIntent(client, backend, arch = ARCH_WHISPER) {
+  /*
+   * ONNX 引擎只有 onnxruntime 的 CPU provider，上面那套 Vulkan 环境变量
+   * 对它毫无意义 —— 直接按 cpu 回，不去动 whisper 那边记的状态。
+   */
+  if (arch !== ARCH_WHISPER) return 'cpu'
+
   if (backend === 'cpu') {
     if (!client.disableVulkan) await client.setDisableVulkan(true)
     return 'cpu'
@@ -1078,7 +1176,8 @@ function send(channel, payload) {
 function registerIpc() {
   // ---- 应用信息
   ipcMain.handle('app:info', () => {
-    const { exe, source } = engineInfo()
+    const whisperEngine = engineInfo(ARCH_WHISPER)
+    const sherpaEngine = engineInfo(ARCH_SHERPA)
     return {
       version: app.getVersion(),
       platform: process.platform,
@@ -1089,18 +1188,23 @@ function registerIpc() {
       chrome: process.versions.chrome,
       node: process.versions.node,
       theme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
-      engine: { exe, source, available: !!exe },
+      /** 两套引擎各自是否就位。缺一套不影响另一套 */
+      engines: {
+        [ARCH_WHISPER]: { ...whisperEngine, available: !!whisperEngine.exe },
+        [ARCH_SHERPA]: { ...sherpaEngine, available: !!sherpaEngine.exe },
+      },
       /*
-       * 模型清单带 source 字段（user / custom / bundled / env / dev）。
-       * 「哪些算已装」由这里说了算：只按 .bin 后缀收，文件名不参与判定 ——
-       * 用户从浏览器重复下载会得到 ggml-small(1).bin，自己改名也常见。
+       * 模型清单带 source 字段（user / custom / bundled / env / dev）与 arch。
+       * 「哪些算已装」由主进程说了算：文件型只看 .bin 后缀，目录型要同时有
+       * tokens.txt 与 onnx —— 用户从浏览器重复下载、自己改名都很常见，
+       * 名字不能参与判定。
        */
-      models: listAvailableModels(modelCtx()),
+      models: listModels(modelCtx()),
       // 全部模型查找目录（按优先级拼接），诊断「为什么没找到模型」时看这个
       modelsDir: modelSearchDirs(modelCtx())
         .map((d) => d.dir)
         .join(';'),
-      defaultModel: DEFAULT_MODEL,
+      defaultModel: FALLBACK_ORDER[0],
       paths: {
         userData: app.getPath('userData'),
         downloadDir: writableModelsDir(app.getPath('userData'), customModelsDir),
@@ -1110,6 +1214,21 @@ function registerIpc() {
         temp: app.getPath('temp'),
       },
     }
+  })
+
+  /**
+   * 打开随包分发的开源许可原文。
+   *
+   * Apache-2.0 等许可要求分发时附带许可证副本。副本确实打在
+   * resources/licenses 里，但没人会去安装目录翻 —— 给个入口，比在文档里
+   * 写一句「见 licenses/ 目录」有用得多。
+   */
+  ipcMain.handle('app:openLicenses', async () => {
+    const dir = app.isPackaged
+      ? path.join(process.resourcesPath, 'licenses')
+      : path.join(repoRoot, 'licenses')
+    const message = await shell.openPath(dir)
+    return { ok: !message, message: message || undefined }
   })
 
   // 主题变化通知渲染进程（渲染进程自己也能监听 prefers-color-scheme，这里只是补一条）
@@ -1530,8 +1649,12 @@ function registerIpc() {
     return { ok: modelDownloader.cancel(key) }
   })
 
-  ipcMain.handle('model:delete', async (_event, fileName) => {
-    await modelDownloader.remove(fileName, userModels())
+  ipcMain.handle('model:downloads', () => [...modelDownloader.jobs.keys()])
+
+  ipcMain.handle('model:delete', async (_event, id, kind) => {
+    await modelDownloader.remove(id, userModels(), kind === 'dir' ? 'dir' : 'file')
+    // 删掉的正是当前生效的模型时，架构缓存与记录都要失效，否则界面还显示旧架构
+    clearArchCache()
     return { ok: true }
   })
 
@@ -1543,6 +1666,29 @@ function registerIpc() {
    * 文件被手动删掉之后会留下一个「使用中」的空壳。
    */
   ipcMain.handle('models:resolve', (_event, file) => resolveModelInfo(file))
+
+  /**
+   * 当前模型与架构的快照，模型页顶端与功能灰化都读它。
+   *
+   * 顺手做两件事：
+   *   1. 把架构写进 model-state.json —— 下次打开界面不必重新探测；
+   *   2. 提前把对应引擎拉起来握手，用户点「开始识别」时少等一次进程启动。
+   *      这一步失败不影响任何功能，只是少了这点预热。
+   */
+  ipcMain.handle('models:active', async (_event, id) => {
+    const snapshot = activeModelSnapshot(id)
+    if (snapshot.entry) {
+      const client = ensureEngine()
+      if (!client.running) void ensureEngineFor(snapshot.arch).catch(() => {})
+    }
+    return snapshot
+  })
+
+  /** 重新扫一遍模型目录（用户在资源管理器里动了文件之后用） */
+  ipcMain.handle('models:refresh', () => {
+    clearArchCache()
+    return listModels(modelCtx())
+  })
 
   // ---- 模型存储位置
   ipcMain.handle('model:getDir', () => ({
@@ -1562,6 +1708,7 @@ function registerIpc() {
     const value = typeof dir === 'string' ? dir.trim() : ''
     if (!value) {
       customModelsDir = ''
+      writeCustomModelsDir('')
       return { ok: true, dir: userModelsDir(app.getPath('userData')) }
     }
     try {
@@ -1573,6 +1720,9 @@ function registerIpc() {
       return { ok: false, message: err instanceof Error ? err.message : String(err) }
     }
     customModelsDir = value
+    writeCustomModelsDir(value)
+    // 换了目录，之前那份「哪个模型配哪个架构」的缓存作废
+    clearArchCache()
     return { ok: true, dir: value }
   })
 
@@ -1638,48 +1788,54 @@ function registerIpc() {
 
   // ---- 引擎
   ipcMain.handle('engine:status', async () => {
-    const client = ensureEngine()
     try {
+      // 还不知道该跑哪套时按当前引擎问，还没起来就报未启动，不擅自拉起 whisper
+      const client = engine ?? null
+      if (!client || !client.running) {
+        return { ok: false, error: '引擎未启动', arch: engineArch, backend: 'unknown' }
+      }
       const pong = await client.ping()
       // Vulkan 被禁用时引擎仍可能报 gpu（whisper 对 use_gpu 是静默忽略的），
       // 这里按实际情况纠正，免得界面显示一个用不了的后端
       return {
         ok: true,
         ...pong,
+        arch: engineArch,
         backend: client.disableVulkan ? 'cpu' : client.backend,
         modelLoaded: client.modelLoaded,
       }
     } catch (err) {
-      return { ok: false, error: err.message }
+      return { ok: false, error: err.message, arch: engineArch }
     }
   })
 
   ipcMain.handle('engine:load', async (_event, opts = {}) => {
-    const client = ensureEngine()
-    const model = resolveModelPath(opts.model)
-    if (!model) {
+    const hit = resolveModelForRun(opts.model)
+    if (!hit) {
       // 不写死具体文件名：模型不随包之后，用户目录里可能一个模型都没有，
       // 也可能只有个改了名的。指向「模型管理」页比报一个他根本没见过的名字有用。
-      throw new Error(
-        '没有可用的识别模型。请在「模型管理」页下载一个，' +
-          '或把 ggml 格式的 .bin 模型文件放进模型文件夹。',
-      )
+      throw new Error('没有可用的识别模型。请在「模型管理」页下载一个，或改用自己放入的模型。')
     }
+    const { entry } = hit
+    const client = await ensureEngineFor(entry.arch)
 
-    // 后端意图必须在 load 之前落地：Vulkan 初始化就发生在加载模型这一步
-    const backend = await applyBackendIntent(client, opts.backend)
+    // 后端意图必须在 load 之前落地：whisper 的 Vulkan 初始化就发生在加载模型这一步
+    const backend = await applyBackendIntent(client, opts.backend, entry.arch)
 
-    const result = await client.load({ model, backend })
+    const result = await client.load({ model: entry.path, backend, threads: opts.threads })
     return {
       ok: true,
       ...result,
-      model,
-      backend: client.disableVulkan ? 'cpu' : client.backend,
+      model: entry.path,
+      arch: entry.arch,
+      archLabel: archLabel(entry.arch),
+      backend,
     }
   })
 
   ipcMain.handle('engine:unload', async () => {
-    const client = ensureEngine()
+    const client = engine
+    if (!client) return { ok: true }
     await client.unload()
     return { ok: true }
   })
@@ -1695,35 +1851,43 @@ function registerIpc() {
       throw new Error('已有识别任务在进行中，请先取消')
     }
 
-    const client = ensureEngine()
+    const hit = resolveModelForRun(opts.model)
+    if (!hit) {
+      throw new Error('没有可用的识别模型，请在「模型管理」页先放置一个模型')
+    }
+    const { entry } = hit
+    const client = await ensureEngineFor(entry.arch)
     const taskId = opts.taskId || `t${Date.now()}`
 
+    // 能力不支持的参数在这里就丢掉，不指望界面一定灰得干净
+    const caps = capsOf(entry.arch)
+
     // 后端意图先落地：选「仅 CPU」时这里可能重启引擎（环境变量改不了运行中的进程）
-    const backend = await applyBackendIntent(client, opts.backend)
+    const backend = await applyBackendIntent(client, opts.backend, entry.arch)
 
     /**
      * 跑一遍「必要时加载模型 + 识别」。
      * 抽成函数是为了崩溃降级之后能原样再走一次。
      */
     const runOnce = async (backendForLoad) => {
-      // 没加载模型就先加载，省得渲染进程每次都自己判断
-      if (!client.modelLoaded) {
-        const model = resolveModelPath(opts.model)
-        if (!model) throw new Error('没有可用的识别模型，请在「模型管理」页先放置一个模型')
-        await client.load({ model, backend: backendForLoad })
+      // 没加载模型、或者加载的不是这一个，都要重新加载。
+      // 只看 modelLoaded 的话，同一架构内换模型不会重载 —— 用旧模型跑完，
+      // 界面上却显示新模型的名字。
+      if (!client.modelLoaded || client.loadedModel !== entry.path) {
+        await client.load({ model: entry.path, backend: backendForLoad, threads: opts.threads })
       }
 
       return client.transcribe(
         {
           audio: opts.audio,
           language: opts.language,
-          prompt: opts.prompt,
+          prompt: caps.prompt ? opts.prompt : undefined,
           threads: opts.threads,
-          translate: opts.translate,
+          translate: caps.translate ? opts.translate : false,
           // 多遍识别的采样温度与解码参数、音质前处理开关
-          temperature: opts.temperature,
-          beamSize: opts.beamSize,
-          bestOf: opts.bestOf,
+          temperature: caps.decode ? opts.temperature : undefined,
+          beamSize: caps.decode ? opts.beamSize : undefined,
+          bestOf: caps.decode ? opts.bestOf : undefined,
           vad: opts.vad,
           normalize: opts.normalize,
         },
@@ -1754,7 +1918,9 @@ function registerIpc() {
          * 只能由我们在进程外兜：换个环境变量重开一个进程，再试一次。
          *
          * 只降级一次 —— CPU 也崩就是别的问题，无限重试只会把用户困在原地。
+         * ONNX 引擎没有 Vulkan 这条路径，崩了就是崩了，不要假装能降级。
          */
+        if (entry.arch !== ARCH_WHISPER) throw err
         if (!(err instanceof EngineCrashError) || client.disableVulkan) throw err
 
         send('engine:stream', {
@@ -1774,6 +1940,8 @@ function registerIpc() {
       return {
         ok: true,
         taskId,
+        arch: entry.arch,
+        model: entry.id,
         ...done,
         wallMs: Date.now() - startedAt,
       }
@@ -1784,6 +1952,75 @@ function registerIpc() {
       throw err
     } finally {
       activeTask = null
+    }
+  })
+
+  /**
+   * 说话人分离。
+   *
+   * 刻意**不复用**识别用的引擎实例：`ensureEngineFor()` 只维护一个进程，换架构要
+   * `setExe()` 重启 —— 用 whisper 识别完再来分离，就会把识别引擎踢掉，下次识别
+   * 还得重新 load 模型（几百 MB，十几秒）。分离不加载识别模型、跑完就退，单独
+   * 开一个 ONNX 进程最省事，也保证它碰不到 Vulkan 那套降级状态。
+   *
+   * 分离结果与识别架构无关：whisper 与 SenseVoice 识别的字幕，用的是同一份
+   * 「谁在什么时候说话」，所以两套模型都能配。
+   */
+  ipcMain.handle('engine:diarize', async (_event, opts = {}) => {
+    const audio = typeof opts.audio === 'string' ? opts.audio : ''
+    if (!audio) throw new Error('没有指定音频文件')
+    if (!existsSync(audio)) throw new Error(`音频文件不存在：${audio}`)
+
+    const dir = diarizationModelDir({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    })
+    const segModel = path.join(dir, DIARIZATION_FILES.segmentation)
+    const embedModel = path.join(dir, DIARIZATION_FILES.embedding)
+    if (!existsSync(segModel) || !existsSync(embedModel)) {
+      throw new Error(`缺少说话人分离模型，请确认 ${dir} 下的文件完整`)
+    }
+
+    const { exe } = engineInfo(ARCH_SHERPA)
+    if (!exe) throw new Error('找不到 ONNX 引擎，无法进行说话人分离')
+
+    const client = new EngineClient(exe, [])
+    client.on('log', (level, text) => {
+      if (level === 'error' || level === 'warn') console.error(`[diarize:${level}] ${text}`)
+      else if (isDev) console.log(`[diarize:${level}] ${text}`)
+    })
+
+    const spans = []
+    const startedAt = Date.now()
+    try {
+      const done = await client.diarize(
+        {
+          audio,
+          segModel,
+          embedModel,
+          numSpeakers: opts.numSpeakers,
+          threshold: opts.threshold,
+          threads: opts.threads,
+        },
+        (msg) => {
+          if (msg.type === 'speaker') {
+            spans.push({ start: msg.start, end: msg.end, speaker: msg.speaker })
+          } else if (msg.type === 'progress') {
+            send('engine:diarize-progress', { taskId: opts.taskId ?? null, percent: msg.percent })
+          }
+        },
+      )
+      return {
+        ok: true,
+        spans,
+        duration: done.duration,
+        speakers: done.speakers,
+        elapsed: done.elapsed,
+        wallMs: Date.now() - startedAt,
+      }
+    } finally {
+      // 一次性任务，跑完就退：不留一个几十 MB 的常驻进程等下次再用
+      await client.stop().catch(() => {})
     }
   })
 
@@ -1848,21 +2085,22 @@ app.whenReady().then(async () => {
 
   if (!gotLock) return
 
+  // 自定义模型目录要在注册 IPC 之前读进来：扫描、下载、打开文件夹都依赖它
+  customModelsDir = readCustomModelsDir()
+
   registerIpc()
   createWindow()
   // 系统声音采集必须先把 handler 挂上：不挂的话 getDisplayMedia() 会弹
   // Electron 自带的「选择要共享的内容」窗口。
   installDisplayMediaHandler()
 
-  // 提前把引擎拉起来做握手，用户点「开始识别」时就不用等进程启动
-  try {
-    const client = ensureEngine()
-    await client.start()
-    const pong = await client.ping()
-    console.log(`[engine] 握手成功 backends=${JSON.stringify(pong.backends)}`)
-  } catch (err) {
-    console.error(`[engine] 预启动失败：${err.message}（界面会提示，不影响其他功能）`)
-  }
+  /*
+   * 不在这里预启动引擎。
+   *
+   * 上一版无条件拉起 whisper 引擎做握手，现在有两套引擎：该起哪一个取决于
+   * 用户选了哪个模型，而那要等渲染进程把设置同步过来（models:active）。
+   * 那时再预热，起错进程的浪费也就没了。
+   */
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

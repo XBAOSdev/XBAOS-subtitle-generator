@@ -4,7 +4,7 @@ import { useUiStore, type ViewKey } from '@/stores/ui'
 import { useProjectStore } from '@/stores/project'
 import { useUpdateStore } from '@/stores/update'
 import { useI18n } from '@/composables/useI18n'
-import { branding, appVersion } from '@/branding'
+import { appVersion } from '@/branding'
 import Icon from '@/components/Icon.vue'
 
 const ui = useUiStore()
@@ -103,13 +103,6 @@ async function onUpdateClick(): Promise<void> {
 
       <div class="sidebar__meta">
         <span class="sidebar__version">v{{ appVersion }}</span>
-        <a
-          class="sidebar__link"
-          :href="branding.website"
-          target="_blank"
-          rel="noopener noreferrer"
-          >{{ branding.websiteLabel }}</a
-        >
       </div>
     </div>
   </nav>
@@ -250,20 +243,8 @@ async function onUpdateClick(): Promise<void> {
 .sidebar__meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-2);
   font-size: 11px;
   color: var(--color-text-tertiary);
-}
-
-.sidebar__link {
-  color: var(--color-text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar__link:hover {
-  color: var(--color-accent);
 }
 </style>

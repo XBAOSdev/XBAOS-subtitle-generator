@@ -2245,8 +2245,10 @@ const scenarios = {
     await sleep(200)
 
     // ---- 实验增强三件套已从 UI 隐藏（2026-10-11 实测降质）----
-    // 只允许剩下 3 个开关（归一化 / 高通 / 静音切分），且隐藏的三项必须
-    // 真的找不到 —— 哪天有人把它们加回 UI，这里要拦住。
+    // 只允许剩下 5 个开关（归一化 / 高通 / 静音切分 / 识别后热词纠正 / 识别后分析说话人），
+    // 且隐藏的三项必须真的找不到 —— 哪天有人把它们加回 UI，这里要拦住。
+    // 第 4 个是 2026-11-04 新增的本地同音纠正，默认开启、两套架构都能用。
+    // 第 5 个是 2026-11-05 新增的说话人分离，默认关闭（要额外跑一遍声纹）。
     const switches = await cdp.evaluate(`(() => {
       return {
         list: [...document.querySelectorAll('.switch')].map((l) => ({
@@ -2257,12 +2259,24 @@ const scenarios = {
       }
     })()`)
     const texts = switches.list.map((s) => s.text)
-    check('可见开关恰好 3 个', switches.list.length === 3, JSON.stringify(texts))
+    check('可见开关恰好 5 个', switches.list.length === 5, JSON.stringify(texts))
+    check(
+      '说话人分离开关可见且默认关闭',
+      switches.list.some((s) => s.text.includes('识别后分析说话人') && s.checked === false),
+      JSON.stringify(texts),
+    )
+    check(
+      '热词同音纠正开关可见',
+      texts.some((t) => t.includes('识别后按热词纠正同音字')),
+      JSON.stringify(texts),
+    )
     for (const hidden of ['按录音场景切分', '束搜索', '低置信度段落复核']) {
       check(`实验开关已隐藏 — ${hidden}`, !texts.some((t) => t.includes(hidden)))
     }
     for (const s of switches.list) {
-      check(`保留开关默认开启 — ${s.text}`, s.checked === true, String(s.checked))
+      // 说话人分离是唯一一个默认关闭的保留开关：它要多跑一遍声纹模型，不该白花时间
+      const expected = s.text.includes('识别后分析说话人') ? false : true
+      check(`保留开关默认${expected ? '开启' : '关闭'} — ${s.text}`, s.checked === expected, String(s.checked))
     }
     check('场景下拉不再渲染', switches.sceneSelect === false)
 
@@ -2356,14 +2370,14 @@ const scenarios = {
 
     await shot(cdp, 'probe-settings-spec.png')
 
-    // ---- 模型管理页的「更改存储位置」应把人直接送到设置页对应章节 ----
+    // ---- 模型管理页的「存储位置」应把人直接送到设置页对应章节 ----
     // 换目录、恢复默认归设置页管，但用户想改存储位置时第一反应是来模型页。
     await goto(cdp, BASE + '/?view=models')
     await sleep(400)
     const goBtn = await centerOf(
-      `[...document.querySelectorAll('.own__actions .btn')].find((b) => b.textContent.includes('更改存储位置'))`,
+      `[...document.querySelectorAll('.arch__actions .btn')].find((b) => b.textContent.includes('存储位置'))`,
     )
-    check('模型页有更改存储位置入口', !!goBtn)
+    check('模型页有存储位置入口', !!goBtn)
     if (goBtn) {
       await cdp.click(goBtn.x, goBtn.y)
       await sleep(900)
@@ -3567,14 +3581,58 @@ const scenarios = {
      * 一层反斜杠转义」那种极易写错的地方。
      */
     let injectedId = null
-    const stub = async (models, resolved) => {
+    /**
+     * 内置清单的替身。
+     *
+     * 真清单在 electron/model-catalog.js 里（主进程侧），页面拿到的是只读副本。
+     * 这里照抄结构即可，**不需要**跟真清单逐字一致 —— 断言关心的是
+     * 「卡片有没有、标签对不对」，不是元数据文案。
+     */
+    const CATALOG = [
+      { key: 'sensevoice-small', id: 'sensevoice-small', name: 'SenseVoice-Small', arch: 'sherpa', engine: 'sherpa-onnx', archLabel: 'sherpa-onnx（ONNX Runtime）', kind: 'dir', publisher: '阿里巴巴通义实验室', license: 'FunASR Model License 1.1', licenseUrl: '', params: '234M', langs: '中文 英文 粤语', sizeLabel: '约 228MB', summary: '中文首选', bytes: 239549735 },
+      { key: 'belle', id: 'ggml-belle-large-v3-turbo-zh.bin', name: 'Belle-whisper Zh', arch: 'whisper', engine: 'whisper.cpp', archLabel: 'whisper.cpp（GGML）', kind: 'file', publisher: 'BELLE-2', license: 'Apache-2.0', licenseUrl: '', params: '809M', langs: '中文 英文', sizeLabel: '约 1.6GB', summary: '中文语料微调', bytes: 1624555275 },
+      { key: 'small', id: 'ggml-small.bin', name: 'Whisper Small', arch: 'whisper', engine: 'whisper.cpp', archLabel: 'whisper.cpp（GGML）', kind: 'file', publisher: 'OpenAI', license: 'MIT', licenseUrl: '', params: '244M', langs: '多语种', sizeLabel: '约 480MB', summary: '体积与质量折中', bytes: 487601967 },
+      { key: 'base', id: 'ggml-base.bin', name: 'Whisper Base', arch: 'whisper', engine: 'whisper.cpp', archLabel: 'whisper.cpp（GGML）', kind: 'file', publisher: 'OpenAI', license: 'MIT', licenseUrl: '', params: '74M', langs: '多语种', sizeLabel: '约 140MB', summary: '最轻量', bytes: 147951465 },
+    ]
+    const CAPS = { prompt: true, translate: true, decode: true, gpu: true }
+
+    /**
+     * @param models 磁盘上扫到的模型（新结构：id / kind / arch / catalogKey…）
+     */
+    const stub = async (models) => {
       if (injectedId) {
         await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injectedId })
       }
       const { identifier } = await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
         source: `(() => {
           window.__models = ${JSON.stringify(models)}
-          window.__resolved = ${JSON.stringify(resolved)}
+          const CATALOG = ${JSON.stringify(CATALOG)}
+          const CAPS = ${JSON.stringify(CAPS)}
+          /* 替身版的架构判定：先按标识精确匹配，再退回任一 whisper 模型 ——
+             与主进程 models.js 的 resolveModel 同义，界面才测得到「回退」这条路径 */
+          const activeOf = (id) => {
+            const key = typeof id === 'string' ? id : ''
+            const list = window.__models || []
+            let hit = list.find((m) => m.id === key) || null
+            if (!hit && list.length) hit = list.find((m) => m.arch === 'whisper') || list[0]
+            if (!hit) {
+              return {
+                entry: null,
+                arch: '',
+                archLabel: '',
+                caps: { prompt: false, translate: false, decode: false, gpu: false },
+              }
+            }
+            const sherpa = hit.arch === 'sherpa'
+            return {
+              entry: hit,
+              arch: hit.arch,
+              archLabel: sherpa ? 'sherpa-onnx（ONNX Runtime）' : 'whisper.cpp（GGML）',
+              caps: sherpa
+                ? { prompt: false, translate: false, decode: false, gpu: false }
+                : CAPS,
+            }
+          }
           window.xbaos = {
             isElectron: true,
             info: () =>
@@ -3586,12 +3644,21 @@ const scenarios = {
                 isDev: false,
                 models: window.__models,
                 modelsDir: '/probe/models',
-                defaultModel: 'ggml-small.bin',
-                engine: { exe: 'stub', source: 'packaged', available: true },
+                defaultModel: 'sensevoice-small',
+                engines: {
+                  whisper: { exe: 'stub', source: 'packaged', available: true },
+                  sherpa: { exe: 'stub', source: 'packaged', available: true },
+                },
                 paths: { userData: '/probe', downloadDir: '/probe/models' },
               }),
             models: {
-              resolve: () => Promise.resolve(window.__resolved),
+              catalog: () => Promise.resolve(CATALOG),
+              active: (id) => Promise.resolve(activeOf(id)),
+              refresh: () => Promise.resolve(window.__models),
+              downloads: () => Promise.resolve([]),
+              download: () => Promise.resolve({ ok: true }),
+              cancelDownload: () => Promise.resolve({ ok: true }),
+              resolve: (id) => Promise.resolve(activeOf(id).entry),
               openDir: () => Promise.resolve({ ok: true }),
               remove: () => Promise.resolve({ ok: true }),
               getDir: () =>
@@ -3650,7 +3717,8 @@ const scenarios = {
             idle: !!el.querySelector('.tag--idle'),
           }
         })
-        const currentEl = document.querySelector('.own__current')
+        const archValue = document.querySelector('.arch__value')
+        const archSub = document.querySelector('.arch__sub')
         // 页面里已经不再渲染 .view__title（页名改由窗口标题栏正中显示），
         // 判「当前在哪一页」统一读 .titlebar__view
         return {
@@ -3660,9 +3728,9 @@ const scenarios = {
           builtins,
           activeBuiltin: builtins.filter((b) => b.active).map((b) => b.name),
           extra: [...document.querySelectorAll('.own__item-name')].map((el) => el.textContent.trim()),
-          current: currentEl
-            ? currentEl.textContent.replace(/\\s+/g, ' ').replace('当前使用：', '').trim()
-            : '',
+          // 顶部架构条：值 = 架构名或「未检测到可用模型」；副行 = 模型名 + 路径
+          archValue: archValue ? archValue.textContent.trim() : '',
+          archSub: archSub ? archSub.textContent.replace(/\\s+/g, ' ').trim() : '',
           empty: !!document.querySelector('.own__empty'),
           toasts: [...document.querySelectorAll('.toast')].map((el) =>
             el.textContent.replace(/\\s+/g, ' ').trim(),
@@ -3670,17 +3738,28 @@ const scenarios = {
         }
       })()`)
 
+    /** 磁盘上扫到一个文件型模型（保留新结构里界面用到的字段） */
+    const modelEntry = (id, size, catalogKey = '') => ({
+      id,
+      name: id.replace(/\.bin$/, ''),
+      kind: 'file',
+      arch: 'whisper',
+      variant: 'ggml',
+      path: `/probe/models/${id}`,
+      dir: '/probe/models',
+      source: 'user',
+      size,
+      builtin: !!catalogKey,
+      catalogKey,
+    })
+
     try {
       // ---- 1) 目录里只有改名后的模型：必须可见、可切换
-      const renamedFile = '/probe/models/whisper-small(1).bin'
-      await stub(
-        [{ name: 'whisper-small(1).bin', path: renamedFile, dir: '/probe/models', source: 'user', size: 500 * 1024 * 1024 }],
-        { name: 'whisper-small(1).bin', path: renamedFile, source: 'user' },
-      )
+      await stub([modelEntry('whisper-small(1).bin', 500 * 1024 * 1024)])
       await goto(cdp, BASE + '/?theme=light')
       await seedSettings({ modelFile: 'whisper-small(1).bin' })
       await goto(cdp, BASE + '/?theme=light&view=models')
-      await waitFor(cdp, `!!document.querySelector('.own__current')`, 10_000)
+      await waitFor(cdp, `!!document.querySelector('.arch__value')`, 10_000)
 
       const renamed = await modelPage()
       check(
@@ -3689,11 +3768,15 @@ const scenarios = {
         pageLogs.slice(0, 2).join(' | '),
       )
       check(
-        '改名后的模型列进了「使用自己的模型」',
+        '改名后的模型列进了「自己的模型」',
         renamed.extra.includes('whisper-small(1).bin'),
         JSON.stringify(renamed.extra),
       )
-      check('「当前使用」显示实际生效的文件名', renamed.current === 'whisper-small(1).bin', renamed.current)
+      check(
+        '顶部架构条显示实际生效的模型路径',
+        renamed.archSub.includes('whisper-small(1).bin'),
+        renamed.archSub,
+      )
       check(
         '内置档不会跟着一起标「使用中」',
         renamed.activeBuiltin.length === 0,
@@ -3701,27 +3784,23 @@ const scenarios = {
       )
 
       // ---- 2) 设置里记的模型已被手动删除
-      const baseFile = '/probe/models/ggml-base.bin'
-      await stub(
-        [{ name: 'ggml-base.bin', path: baseFile, dir: '/probe/models', source: 'user', size: 140 * 1024 * 1024 }],
-        { name: 'ggml-base.bin', path: baseFile, source: 'user' },
-      )
+      await stub([modelEntry('ggml-base.bin', 140 * 1024 * 1024, 'base')])
       await seedSettings({ modelFile: 'ggml-small.bin' })
       await goto(cdp, BASE + '/?theme=light&view=models')
-      await waitFor(cdp, `!!document.querySelector('.own__current')`, 10_000)
+      await waitFor(cdp, `!!document.querySelector('.arch__value')`, 10_000)
 
       const gone = await modelPage()
       check(
         '选中的模型被删后，它不再显示「使用中」',
-        !gone.activeBuiltin.includes('Whisper small'),
+        !gone.activeBuiltin.some((n) => n.toLowerCase().includes('small')),
         JSON.stringify(gone.activeBuiltin),
       )
       check(
         '「使用中」落到实际回退到的那个模型上',
-        gone.activeBuiltin.includes('Whisper base'),
+        gone.activeBuiltin.some((n) => n.toLowerCase().includes('base')),
         JSON.stringify(gone.activeBuiltin),
       )
-      check('「当前使用」如实显示回退后的文件名', gone.current === 'ggml-base.bin', gone.current)
+      check('顶部架构条如实显示回退后的模型', gone.archSub.includes('ggml-base.bin'), gone.archSub)
       check(
         '内置目录之外的常规文件名不算「额外」条目',
         gone.extra.length === 0 && gone.empty,
@@ -3729,7 +3808,7 @@ const scenarios = {
       )
 
       // ---- 3) 一个模型都没有：启动直接送到模型页
-      await stub([], null)
+      await stub([])
       await seedSettings({ modelFile: '' })
       await goto(cdp, BASE + '/?theme=light')
 
@@ -3740,7 +3819,11 @@ const scenarios = {
         none.toasts.some((t) => t.includes('还没有可用的识别模型')),
         JSON.stringify(none.toasts),
       )
-      check('模型页如实显示「未检测到可用模型」', none.current === '未检测到可用模型', none.current)
+      check(
+        '模型页如实显示「未检测到可用模型」',
+        none.archValue === '未检测到可用模型',
+        none.archValue,
+      )
 
       // 提醒过一次之后不再反复拦人
       await goto(cdp, BASE + '/?theme=light')
@@ -3748,23 +3831,15 @@ const scenarios = {
       check('提醒过一次后不再反复拦人', second.title === '导入音频', second.title)
 
       // ---- 4) 下载了更好的中文模型却没启用：卡片上必须能看出来
-      const smallFile = '/probe/models/ggml-small.bin'
-      const belleFile = '/probe/models/ggml-belle-large-v3-turbo-zh.bin'
       const bothModels = () => [
-        { name: 'ggml-small.bin', path: smallFile, dir: '/probe/models', source: 'user', size: 480 * 1024 * 1024 },
-        {
-          name: 'ggml-belle-large-v3-turbo-zh.bin',
-          path: belleFile,
-          dir: '/probe/models',
-          source: 'user',
-          size: 1600 * 1024 * 1024,
-        },
+        modelEntry('ggml-small.bin', 480 * 1024 * 1024, 'small'),
+        modelEntry('ggml-belle-large-v3-turbo-zh.bin', 1600 * 1024 * 1024, 'belle'),
       ]
 
-      await stub(bothModels(), { name: 'ggml-small.bin', path: smallFile, source: 'user' })
+      await stub(bothModels())
       await seedSettings({ modelFile: 'ggml-small.bin' })
       await goto(cdp, BASE + '/?theme=light&view=models')
-      await waitFor(cdp, `!!document.querySelector('.own__current')`, 10_000)
+      await waitFor(cdp, `!!document.querySelector('.arch__value')`, 10_000)
 
       const idlePage = await modelPage()
       check(
@@ -3798,7 +3873,7 @@ const scenarios = {
       const switched = await modelPage()
       check(
         '「未启用」的模型可以从卡片上的按钮切过去',
-        switched.activeBuiltin.includes('Belle-whisper-large-v3-turbo-zh'),
+        switched.activeBuiltin.some((n) => n.includes('Belle')),
         JSON.stringify(switched.activeBuiltin),
       )
     } finally {

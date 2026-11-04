@@ -479,6 +479,8 @@ async function writeSubtitleTo(path: string, record?: ExportRecord): Promise<voi
     lang: record?.bundle ?? 'source',
     translationLang: record?.lang ?? '',
     sourceFirst: settings.exportLangSourceFirst,
+    // 导出时带了说话人前缀，就地保存也必须带 —— 否则按一次保存就把前缀抹掉了
+    speakerPrefix: settings.speakerPrefix,
   })
   const content = applyLineEnding(body, settings.exportLineEnding)
   await bridge.fs.writeSubtitle(path, content, file.sourceEncoding ?? settings.exportEncoding)

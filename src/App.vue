@@ -4,6 +4,7 @@ import { useUiStore, TASK_RECOGNIZE, FLIGHT_MS, FLIGHT_SETTLE_MS, type TaskFligh
 import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { useUpdateStore } from '@/stores/update'
+import { useModelStore } from '@/stores/model'
 import { confirmDestructive } from '@/utils/confirm'
 
 import AppTitlebar from '@/components/AppTitlebar.vue'
@@ -34,6 +35,7 @@ const ui = useUiStore()
 const project = useProjectStore()
 const settings = useSettingsStore()
 const update = useUpdateStore()
+const model = useModelStore()
 
 const views = {
   home: HomeView,
@@ -517,13 +519,26 @@ onMounted(() => {
   window.addEventListener('drop', onDrop)
   applyDevQuery()
 
-  // 模型是识别的前提，缺了必须当面说清楚。?view= 注入时不抢导航（探针要用）
-  if (!devViewInjected) void checkModelsOnStart()
-
-  // 「模型存储位置」存在 localStorage 里，主进程重启后不记得 —— 启动时同步一次，
-  // 否则改过目录之后第一次下载还会落到旧位置
+  /*
+   * 「模型存储位置」先同步给主进程，再拉模型与架构。
+   *
+   * 顺序不能反：主进程扫模型、判定架构、算下载落点，用的都是它自己那份目录。
+   * 先 refresh 后 setDir 的话，改过目录的用户一启动就会被扫成「没有模型」，
+   * 直接被拽到模型页 —— 而文件其实好好躺在他设的目录里。
+   * 主进程自己也会记一份（models-dir.json），这里同步的是设置页里更新的那份。
+   */
   const modelsApi = window.xbaos?.models
-  if (modelsApi?.setDir) void modelsApi.setDir(settings.modelsDir).catch(() => {})
+  const modelsDirSynced = modelsApi?.setDir
+    ? modelsApi.setDir(settings.modelsDir).catch(() => {})
+    : Promise.resolve()
+
+  void modelsDirSynced.then(() => {
+    // 当前模型与架构：界面上「哪些功能可用」全靠它，后面切换模型时
+    // store 自己会跟着刷（见 stores/model.ts）
+    void model.refresh()
+    // 模型是识别的前提，缺了必须当面说清楚。?view= 注入时不抢导航（探针要用）
+    if (!devViewInjected) void checkModelsOnStart()
+  })
 
   // 启动时静默检查更新。这是软件除「下载模型」外唯一会联网的地方，
   // 可以在关于页关掉。不 await：它慢一点、失败也不该拖住界面。

@@ -143,6 +143,46 @@ export interface TranscribeResult extends Partial<Omit<EngineDone, 'id' | 'type'
   message?: string
 }
 
+/** 一个说话人时间段（引擎 `speaker` 消息） */
+export interface DiarizationSpan {
+  start: number
+  end: number
+  /** 聚类编号，0 起。编号本身没有语义，同号即同一个人 */
+  speaker: number
+}
+
+/** `engine:diarize` 的入参 */
+export interface DiarizeOptions {
+  taskId?: string
+  /** 音频文件绝对路径 */
+  audio: string
+  /**
+   * 已知的说话人数。>0 时直接按它聚类，比让阈值猜更稳；
+   * 不传或 0 表示自动判断。
+   */
+  numSpeakers?: number
+  /**
+   * 自动判断时的距离阈值。越大分出来的人越少。
+   * 不传时用主进程默认值（0.7，实测中文对话比 sherpa 默认的 0.5 准）。
+   */
+  threshold?: number
+  threads?: number
+}
+
+/** `engine:diarize` 返回 */
+export interface DiarizeResult {
+  ok: boolean
+  spans: DiarizationSpan[]
+  /** 音频时长，秒 */
+  duration: number
+  /** 判定出的人数 */
+  speakers: number
+  /** 分离本身耗时（引擎内部），秒 */
+  elapsed: number
+  /** 端到端耗时（含进程启动与往返） */
+  wallMs: number
+}
+
 /** `engine:transcribe` 的入参 */
 export interface TranscribeOptions {
   taskId?: string
@@ -184,8 +224,7 @@ export interface TranscribeOptions {
 }
 
 /** VAD 切分参数（与引擎 vad.hpp 的 VadOptions 对应，均为可选字段） */
-export interface VadOptionsPayload {
-  /** 短于此的语音碎片丢弃（秒） */
+export interface VadOptionsPayload {  /** 短于此的语音碎片丢弃（秒） */
   minSpeechSec?: number
   /** 短于此的间隔视为句内停顿合并（秒） */
   minSilenceSec?: number
@@ -228,6 +267,65 @@ export interface EngineLocation {
   available: boolean
 }
 
+/** 模型形态：单个文件，或一个目录 */
+export type ModelKind = 'file' | 'dir'
+
+/**
+ * 架构能力开关。界面按它决定控件可用与否 —— 不要在组件里各写一套判断，
+ * 换一种模型类型就要改三四个地方是上一版的真实教训。
+ */
+export interface ArchCaps {
+  /** 领域词 / 术语表进入识别提示词 */
+  prompt: boolean
+  /** 翻译任务 */
+  translate: boolean
+  /** 温度、束搜索、多遍推理等解码参数 */
+  decode: boolean
+  /** GPU / Vulkan 后端 */
+  gpu: boolean
+}
+
+/** `models.active` 的返回：当前生效模型与架构 */
+export interface ActiveModelInfo {
+  entry: {
+    id: string
+    name: string
+    path: string
+    kind: ModelKind
+    size: number
+    source: ModelSource
+    builtin: boolean
+    catalogKey: string
+    variant: string
+  } | null
+  /** 'whisper' | 'sherpa'，没有模型时为空串 */
+  arch: string
+  /** 展示用，如「sherpa-onnx（ONNX Runtime）」 */
+  archLabel: string
+  caps: ArchCaps
+}
+
+/** `models.catalog` 的条目：可下载模型及其公示信息 */
+export interface ModelCatalogItem {
+  key: string
+  id: string
+  name: string
+  arch: string
+  /** 引擎短名（whisper.cpp / sherpa-onnx），表格里用这一栏 */
+  engine: string
+  archLabel: string
+  kind: ModelKind
+  publisher: string
+  license: string
+  licenseUrl: string
+  params: string
+  langs: string
+  sizeLabel: string
+  summary: string
+  /** 下载总字节数，0 表示未知 */
+  bytes: number
+}
+
 /**
  * 模型文件的来源。
  *   custom  —— 用户在设置里指定的模型目录
@@ -239,15 +337,30 @@ export interface EngineLocation {
 export type ModelSource = 'env' | 'custom' | 'user' | 'bundled' | 'dev'
 
 export interface ModelFileInfo {
-  /** 文件名，如 ggml-small.bin */
+  /**
+   * 模型标识：文件型是文件名（ggml-small.bin），目录型是目录名（sensevoice-small）。
+   * 设置里记的就是这个值，识别时原样交回主进程。
+   */
+  id: string
+  /** 展示名（去掉扩展名） */
   name: string
-  /** 绝对路径 */
+  /** 文件型 = 单个 .bin；目录型 = 一个目录（ONNX 权重 + tokens.txt） */
+  kind: ModelKind
+  /** 跑哪套引擎，由主进程按内容判定 */
+  arch: string
+  /** 目录型的细分类型：sensevoice 可用；unknown 表示引擎认不了 */
+  variant: string
+  /** 绝对路径：文件型是文件，目录型是目录 */
   path: string
   /** 所在目录 */
   dir: string
   source: ModelSource
-  /** 字节数 */
+  /** 字节数（目录型为其中所有文件之和） */
   size: number
+  /** 是否内置清单里的条目（下载来的） */
+  builtin: boolean
+  /** 内置条目的 key，用户自放的为空串 */
+  catalogKey: string
 }
 
 /** `models.onProgress` 推送的下载事件 */
@@ -278,12 +391,13 @@ export interface AppInfo {  version: string
   chrome: string
   node: string
   theme: 'dark' | 'light'
-  engine: EngineLocation
-  /** 所有能找到的模型。同名只保留优先级最高的一份 */
+  /** 两套引擎各自是否就位，键是架构标识（whisper / sherpa） */
+  engines: Record<string, EngineLocation>
+  /** 所有能找到的模型。同一标识只保留优先级最高的一份 */
   models: ModelFileInfo[]
   /** 全部模型查找目录（按优先级拼接），诊断「为什么没找到模型」时看这个 */
   modelsDir: string
-  /** 默认模型的文件名 */
+  /** 兜底优先的模型标识 */
   defaultModel: string
   paths: {
     userData: string
@@ -317,6 +431,8 @@ export interface XbaosBridge {
     onCloseRequest: (cb: () => void) => () => void
     ackCloseRequest: () => void
     forceClose: () => void
+    /** 在系统文件管理器里打开随包的许可原文目录 */
+    openLicenses: () => Promise<{ ok: boolean; message?: string }>
   }
 
   theme: {
@@ -462,10 +578,14 @@ export interface XbaosBridge {
 
   /** 模型管理：真实下载（断点续传 + 镜像回退）、删除与进度事件 */
   models: {
-    catalog: () => Promise<{ key: string; file: string; sizeLabel: string }[]>
+    /** 可下载模型的目录（含架构 / 发行者 / 协议 / 体积） */
+    catalog: () => Promise<ModelCatalogItem[]>
     download: (key: string) => Promise<{ ok: boolean }>
     cancelDownload: (key: string) => Promise<{ ok: boolean }>
-    remove: (fileName: string) => Promise<{ ok: boolean }>
+    /** 正在下载的 key 列表（界面重开后恢复进度状态用） */
+    downloads: () => Promise<string[]>
+    /** 删除模型。id 为纯标识名，kind 决定删文件还是删目录 */
+    remove: (id: string, kind: ModelKind) => Promise<{ ok: boolean }>
     /** 当前模型存储位置 */
     getDir: () => Promise<{ dir: string; defaultDir: string; custom: string }>
     /** 设置自定义模型目录（主进程会真写一个探针文件验证可写）。传空串恢复默认 */
@@ -473,12 +593,26 @@ export interface XbaosBridge {
     /** 在系统文件管理器里打开模型文件夹 */
     openDir: () => Promise<{ ok: boolean; message?: string }>
     /**
-     * 这次实际会用哪个模型。传设置里的文件名，失效时主进程会回退到
+     * 当前生效模型与架构。传设置里存的标识，主进程负责判定架构并记住 ——
+     * 界面不要自己按文件名猜架构。没有可用模型时 entry 为 null。
+     */
+    active: (id: string) => Promise<ActiveModelInfo>
+    /** 重新扫一遍模型目录（用户在资源管理器里动了文件之后用） */
+    refresh: () => Promise<ModelFileInfo[]>
+    /**
+     * 这次实际会用哪个模型。传设置里的标识，失效时主进程会回退到
      * 任一已装模型并告诉你是谁 —— 界面据此标「使用中」，不要自己拿名字比。
      */
     resolve: (
       file: string,
-    ) => Promise<{ name: string; path: string; source: string } | null>
+    ) => Promise<{
+      id: string
+      name: string
+      path: string
+      source: string
+      arch: string
+      kind: ModelKind
+    } | null>
     onProgress: (cb: (payload: ModelDownloadEvent) => void) => () => void
   }
 
@@ -500,6 +634,9 @@ export interface XbaosBridge {
     >
     unload: () => Promise<{ ok: boolean }>
     transcribe: (opts: TranscribeOptions) => Promise<TranscribeResult>
+    /** 说话人分离。与当前识别模型无关，两套架构都能用 */
+    diarize: (opts: DiarizeOptions) => Promise<DiarizeResult>
+    onDiarizeProgress: (cb: (payload: { taskId: string | null; percent: number }) => void) => () => void
     abort: () => Promise<{ ok: boolean }>
     onStream: (cb: (payload: EngineStreamEvent) => void) => () => void
     onLog: (cb: (payload: EngineLogEvent) => void) => () => void

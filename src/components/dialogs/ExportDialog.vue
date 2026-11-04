@@ -54,6 +54,16 @@ const today = new Date().toISOString().slice(0, 10).replace(/-/g, '')
 
 const isMerge = computed(() => project.batchMode === 'merge')
 
+/**
+ * 这批要导出的字幕里有没有说话人标签。
+ *
+ * 没跑过分离就整块不显示 —— 一个永远打不上标签的开关，只会让人以为
+ * 「勾了却没生效」。
+ */
+const hasSpeakers = computed(() =>
+  sources.value.some((s) => s.segments.some((seg) => typeof seg.speaker === 'number')),
+)
+
 function resolveDir(file: AudioFile): string {
   if (locationMode.value === 'unified') return unifiedDir.value
   if (locationMode.value === 'per-file') return perFileDirs.value[file.id] ?? file.dir
@@ -246,6 +256,7 @@ async function doExport(): Promise<void> {
         lang: entry.bundle,
         translationLang: entry.lang,
         sourceFirst: sourceFirst.value,
+        speakerPrefix: settings.speakerPrefix,
       })
       const content = applyLineEnding(body, lineEnding.value)
 
@@ -519,6 +530,11 @@ function close(): void {
             </select>
           </label>
         </div>
+
+        <label v-if="hasSpeakers" class="checkbox export__open">
+          <input v-model="settings.speakerPrefix" type="checkbox" />
+          <span>在每条字幕开头标注说话人</span>
+        </label>
 
         <label class="checkbox export__open">
           <input v-model="openAfter" type="checkbox" />

@@ -3,212 +3,152 @@ import { computed, onActivated, onMounted, ref, watch } from 'vue'
 import { useUiStore } from '@/stores/ui'
 import { useSettingsStore } from '@/stores/settings'
 import { useDownloadsStore } from '@/stores/downloads'
+import { useModelStore } from '@/stores/model'
 import Icon from '@/components/Icon.vue'
-import type { AppInfo } from '@/types/engine'
+import type { AppInfo, ModelCatalogItem, ModelFileInfo, ModelKind } from '@/types/engine'
 
 const ui = useUiStore()
 const settings = useSettingsStore()
 const downloads = useDownloadsStore()
-
-interface ModelItem {
-  key: string
-  name: string
-  params: string
-  sizeLabel: string
-  quality: string
-  /**
-   * 许可证**逐个模型写**，不能共用一份。
-   *
-   * whisper.cpp 与 OpenAI 官方权重是 MIT，但社区中文微调版沿用自己的许可：
-   * Belle-whisper-large-v3-turbo-zh 在 Hugging Face 上标的是 Apache-2.0。
-   * 这里若统一写死 MIT，界面就对外发布了一条错误的许可信息 —— 有人照着
-   * 「MIT」去做二次分发，会漏掉 Apache-2.0 的署名与变更声明义务。
-   */
-  license: string
-  note: string
-}
-
-/**
- * key 与主进程 model-download.js 的 MODEL_CATALOG 一一对应，
- * 「切换使用」写入 settings.modelFile 后由引擎加载时解析。
- */
-const MODELS: ModelItem[] = [
-  {
-    key: 'small',
-    name: 'Whisper small',
-    params: '244M',
-    sizeLabel: '约 480MB',
-    quality: '可用',
-    license: 'MIT',
-    note: '入门档。体积小、速度快，中文同音字容易听错',
-  },
-  {
-    key: 'base',
-    name: 'Whisper base',
-    params: '74M',
-    sizeLabel: '约 140MB',
-    quality: '一般',
-    license: 'MIT',
-    note: '速度最快，适合先看整体效果',
-  },
-  {
-    key: 'turbo',
-    name: 'Whisper large-v3-turbo',
-    params: '809M',
-    sizeLabel: '约 1.6GB',
-    quality: '很好',
-    license: 'MIT',
-    note: '速度与准确度较平衡',
-  },
-  {
-    key: 'belle',
-    name: 'Belle-whisper-large-v3-turbo-zh',
-    params: '809M',
-    sizeLabel: '约 1.6GB',
-    quality: '最佳',
-    license: 'Apache-2.0',
-    note: '中文语料微调，同音字与专有名词明显更准。体积大，识别比 small 慢',
-  },
-]
+const model = useModelStore()
 
 const bridge = window.xbaos
-const info = ref<AppInfo | null>(null)
 
 /**
- * 下载状态来自 downloads store，这里不自己订阅。
+ * 三个数据源，职责分明，不互相推导：
+ *   catalog  主进程给的可下载条目（内置清单 + 架构 / 发行者 / 协议）
+ *   info     磁盘上真实扫到的模型（含用户自己放的）
+ *   model    主进程判定的「当前生效模型与架构」（stores/model.ts）
  *
- * 原因见那个 store 的注释：状态若挂在页面组件上，用户切走再回来进度就没了、
- * 按钮又变回「下载」，而主进程那边其实还在跑。这里只是把它映射成模板原本
- * 就在用的两个名字，模板一行都不用改。
+ * 「使用中」只认 model.entry —— 拿设置里的字符串比一比会在文件被手动删掉之后
+ * 留下一个空壳标记，而识别那边早就回退到别的模型了。
  */
+const catalog = ref<ModelCatalogItem[]>([])
+const info = ref<AppInfo | null>(null)
+const loading = ref(true)
+/** 取数失败时的可读原因。没有它，页面只会空着，看不出断在哪一步 */
+const loadError = ref('')
+
+const installed = computed<ModelFileInfo[]>(() => info.value?.models ?? [])
+
+/** 下载状态来自 store：页面切走再回来进度还在，主进程那边的下载也不受影响 */
 const downloading = computed(() => downloads.activeKey)
 const progress = computed(() => downloads.progress)
 
-/** 设置里记着的模型文件名。空串 = 没选过，识别时由主进程挑一个已装模型 */
-const activeModelFile = computed(() => settings.modelFile)
+/** 内置条目 → 磁盘上对应那一份 */
+function installedOf(item: ModelCatalogItem): ModelFileInfo | null {
+  return installed.value.find((m) => m.id === item.id) ?? null
+}
+
+/** 内置清单里的磁盘标识，用来兜底过滤，见 ownModels */
+const catalogIds = computed(() => new Set(catalog.value.map((c) => c.id)))
 
 /**
- * 这次实际会用哪个模型（**主进程权威判定**）。
+ * 用户自己放进目录、且不在内置清单里的模型。
  *
- * 不拿 `activeModelFile` 直接比名字：设置里存的是名字，文件可能已经被手动
- * 删掉或改过名 —— 只比名字会让界面挂着一个「使用中」的空壳，而识别那边
- * 早就回退到别的模型了（或者干脆没有模型可用）。
+ * 必须列出来：识别时主进程本来就会用上它们，界面若不显示，用户会看到
+ * 「一个都没下载」却又能识别成功，既无从理解，也没有入口切换或删掉它。
+ *
+ * 两个条件都要判：`catalogKey` 是主进程打的标，`catalogIds` 是拿当前清单
+ * 再核一遍。只信前者的话，主进程还没重启、下发的是旧结构时，内置模型会
+ * 全部落到这里，和上方卡片重复一遍。
  */
-const resolvedModel = ref('')
+const ownModels = computed(() =>
+  installed.value.filter((m) => !m.catalogKey && !catalogIds.value.has(m.id)),
+)
 
-async function refreshResolved(): Promise<void> {
-  if (!bridge?.models?.resolve) return
+/** 空态要说清是「一个模型都没有」还是「只有内置的」，两种情况该做的事完全不同 */
+const hasAnyModel = computed(() => installed.value.length > 0)
+
+/** 兜底顺序里第一个已装的内置条目没有时，标一下当前是谁在生效 */
+const activeEntry = computed(() => model.entry)
+
+onMounted(() => void refresh())
+// 本页在 <KeepAlive> 里，切走再回来不重新挂载 —— 而模型目录是页面之外会变的东西
+onActivated(() => void refresh())
+
+async function refresh(): Promise<void> {
+  if (!bridge) {
+    // 浏览器预览：清单在主进程侧，没有桥就取不到，如实说明比空列表好
+    loading.value = false
+    return
+  }
+  loadError.value = ''
   try {
-    const hit = await bridge.models.resolve(settings.modelFile)
-    resolvedModel.value = hit?.name ?? ''
-  } catch {
-    resolvedModel.value = ''
+    /*
+     * 两份数据分开兜错，不要用裸的 Promise.all。
+     * 曾经因为 app:info 抛错（漏导入一个常量），整体 reject，内置清单连同
+     * 下载入口一起消失，页面上只剩「正在读取」—— 用户既看不到模型，也无从
+     * 判断是哪一步断的。分开取，坏一个还有一个，坏的那个把原因显示出来。
+     */
+    const [nextInfo, nextCatalog] = await Promise.all([
+      bridge.info().catch((err: unknown) => {
+        loadError.value = err instanceof Error ? err.message : String(err)
+        return null
+      }),
+      bridge.models.catalog().catch((err: unknown) => {
+        loadError.value = err instanceof Error ? err.message : String(err)
+        return [] as ModelCatalogItem[]
+      }),
+    ])
+    if (nextInfo) info.value = nextInfo
+    catalog.value = nextCatalog
+    await model.refresh()
+  } finally {
+    loading.value = false
   }
 }
 
-onMounted(() => void refreshInfo())
-
-/*
- * 本页在 <KeepAlive> 里，切走再回来**不会**重新挂载 —— 而「模型文件夹里
- * 有没有东西」是页面之外发生的事（用户去资源管理器拖了个文件进来），
- * 所以 onActivated 必须再刷一次。首次挂载两个钩子都会触发，多扫一遍目录
- * 的代价可以忽略，比漏刷一次让用户以为没生效划算。
- */
-onActivated(() => void refreshInfo())
-
-async function refreshInfo(): Promise<void> {
+/** 扫描磁盘（用户在资源管理器里动过文件之后用），比 refresh 多一层重判架构 */
+async function rescan(): Promise<void> {
   if (!bridge) return
-  info.value = await bridge.info()
-  await refreshResolved()
+  await bridge.models.refresh()
+  await refresh()
 }
 
-/**
- * 下载收尾后重新扫描一次模型列表。
- *
- * 「刷新列表」是页面自己的事（要更新 `info`），所以留在页面里；事件的其余处理
- * 统一在 store。取消或失败也会走到这里 —— 重扫一次代价很低，不值得为省这一下
- * 把三种收尾拆开，何况取消时磁盘上确实多了半个文件。
- */
+// 下载收尾后重扫：取消与失败也走这里 —— 磁盘上确实多了半个文件
 watch(
   () => downloads.activeKey,
   (now, before) => {
-    if (before && !now) void refreshInfo()
+    if (before && !now) void refresh()
   },
 )
 
-/** 该条目对应的已安装模型（真实扫描，随下载/删除即时变化） */
-function installedOf(item: ModelItem): AppInfo['models'][number] | null {
-  const name = modelFileOf(item.key)
-  const list = info.value?.models ?? []
-  return list.find((m) => m.name === name) ?? null
-}
-
-// key -> 磁盘上的模型文件名（与主进程 MODEL_CATALOG 一致）
-const FILE_BY_KEY: Record<string, string> = {
-  small: 'ggml-small.bin',
-  base: 'ggml-base.bin',
-  turbo: 'ggml-large-v3-turbo.bin',
-  belle: 'ggml-belle-large-v3-turbo-zh.bin',
-}
-
-function modelFileOf(key: string): string {
-  return FILE_BY_KEY[key] ?? `ggml-${key}.bin`
-}
-
-function isDownloaded(item: ModelItem): boolean {
-  return installedOf(item) !== null
-}
-
-/**
- * 该条目是不是「实际正在用」的那个模型。
- *
- * 判据取自主进程（resolvedModel）而不是设置里的名字 —— 设置里那个名字对应
- * 的文件可能已经被删掉或改了名，那样界面会一直挂着「使用中」。
- */
-function activeKeyOf(item: ModelItem): boolean {
-  return resolvedModel.value !== '' && resolvedModel.value === modelFileOf(item.key)
-}
-
-/**
- * 目录里躺着、但不属于内置目录的模型 —— 用户自己放进去的，文件名随意。
- *
- * 必须列出来：识别时主进程本来就会用上它们（内置档一个都没装就任取一个
- * 已装模型），界面若不显示，用户会看到「一个都没装」却又能识别成功，
- * 既无从理解，也没有入口切换或删掉它。
- */
-const extraModels = computed(() => {
-  const known = new Set(MODELS.map((m) => modelFileOf(m.key)))
-  return (info.value?.models ?? []).filter((m) => !known.has(m.name))
-})
-
-function download(item: ModelItem): void {
+function download(item: ModelCatalogItem): void {
   void downloads.start(item.key, item.name)
 }
 
-function cancelDownload(item: ModelItem): void {
+function cancelDownload(item: ModelCatalogItem): void {
   void downloads.cancel(item.key)
 }
 
-/** 切换到指定文件名的模型（内置档与用户自放的模型共用同一条路径） */
-function useFile(name: string, label: string): void {
-  settings.modelFile = name
-  // 立即回显，不等下一次 IPC 往返 —— 否则点完按钮有半拍延迟
-  resolvedModel.value = name
-  ui.notify('success', `已切换到 ${label}`, '下一次识别开始生效')
+/**
+ * 切换使用。写进去的是**模型标识**（文件名或目录名），由主进程解析成路径，
+ * 顺便判定架构 —— 界面不参与「这该用哪个引擎」的判断。
+ */
+async function useModel(id: string, label: string): Promise<void> {
+  settings.modelFile = id
+  await refresh()
+  const next = model.entry?.id === id ? model.archLabel : ''
+  ui.notify('success', `已切换到 ${label}`, next ? `架构 ${next}` : '下一次识别开始生效')
 }
 
-function use(item: ModelItem): void {
-  useFile(modelFileOf(item.key), item.name)
+function isActiveId(id: string): boolean {
+  return activeEntry.value?.id === id
 }
 
-/** 可删除 = 位于用户自己的目录里；随包（bundled）与仓库内（dev）的删不了 */
+/** 目录型模型引擎认不出来（不是 SenseVoice）时不能切换，只能提示 */
+function unsupported(m: ModelFileInfo): boolean {
+  return m.arch === 'sherpa' && m.variant !== 'sensevoice'
+}
+
+/** 可删除 = 在用户自己的目录里；随包（bundled）与仓库内（dev）的删不了 */
 function isRemovableSource(source: string): boolean {
   return source === 'user' || source === 'custom'
 }
 
-async function removeFile(name: string, label: string): Promise<void> {
+async function removeModel(id: string, label: string, kind: ModelKind): Promise<void> {
   if (!bridge) return
-
   const ok = await bridge.dialog.confirm({
     title: '删除模型',
     message: `确定删除 ${label} 吗？`,
@@ -220,24 +160,14 @@ async function removeFile(name: string, label: string): Promise<void> {
   if (ok !== 1) return
 
   try {
-    await bridge.models.remove(name)
-    // 删的正是当前在用的那个：清掉设置，交给识别那边重新挑一个可用模型
-    if (activeModelFile.value === name) settings.modelFile = ''
+    await bridge.models.remove(id, kind)
+    // 删的正是当前在用的那个：清掉设置，交给主进程重新挑一个可用模型
+    if (settings.modelFile === id) settings.modelFile = ''
     ui.notify('info', `已删除 ${label}`)
-    await refreshInfo()
+    await rescan()
   } catch (err) {
     ui.notify('error', '删除失败', err instanceof Error ? err.message : String(err))
   }
-}
-
-async function remove(item: ModelItem): Promise<void> {
-  const installed = installedOf(item)
-  if (!installed) return
-  if (!isRemovableSource(installed.source)) {
-    ui.notify('info', '该模型不在用户目录中', '无法在此删除，请直接删除对应文件')
-    return
-  }
-  await removeFile(installed.name, item.name)
 }
 
 const storageDir = computed(() => info.value?.paths.downloadDir ?? '')
@@ -248,34 +178,19 @@ function sizeText(bytes: number): string {
   return mb >= 1024 ? `${(mb / 1024).toFixed(2)}GB` : `${Math.round(mb)}MB`
 }
 
-/** 已安装显示真实字节数，未安装显示档位估计 */
-function sizeLabelOf(item: ModelItem): string {
-  const installed = installedOf(item)
-  return installed ? sizeText(installed.size) : item.sizeLabel
+/** 已装显示真实字节数，未装显示档位估计 */
+function sizeLabelOf(item: ModelCatalogItem): string {
+  const hit = installedOf(item)
+  return hit ? sizeText(hit.size) : item.sizeLabel
 }
 
-/** 下载中的进度文案：总量未知时退化为已下载量 */
-function progressText(key: string): string {
-  // 模板里 computed 会自动解包，script 里必须显式 .value
-  const p = progress.value[key]
-  if (!p) return ''
-  if (p.total > 0) {
-    return `${p.percent.toFixed(1)}%`
-  }
-  const mb = p.received / 1024 / 1024
-  return `${mb >= 1024 ? (mb / 1024).toFixed(2) + 'GB' : Math.round(mb) + 'MB'}`
-}
+/** 当前生效架构是否缺少引擎可执行文件（开发态常见，正式包不该出现） */
+const engineMissing = computed(() => {
+  const arch = model.arch
+  if (!arch || !info.value) return false
+  return info.value.engines?.[arch]?.available === false
+})
 
-function installedSourceOf(item: ModelItem): string {
-  return installedOf(item)?.source ?? ''
-}
-
-/** 可删除 = 位于用户自己的目录里；随包（bundled / dev）的删不了 */
-function isRemovable(item: ModelItem): boolean {
-  return isRemovableSource(installedSourceOf(item))
-}
-
-/** 在系统文件管理器里打开模型文件夹，方便用户往里放自己的 ggml 模型 */
 async function openModelsDir(): Promise<void> {
   if (!bridge) return
   try {
@@ -286,13 +201,7 @@ async function openModelsDir(): Promise<void> {
   }
 }
 
-/**
- * 跳到设置页的「模型存储位置」章节并滚到那里。
- *
- * 换目录、恢复默认这些操作归设置页管（还牵扯迁移提醒），在模型页重复一套会分叉；
- * 但用户想改存储位置时第一反应就是来模型页，所以这里必须有个入口 ——
- * 直接把人送过去，而不是让他自己找。
- */
+/** 存储位置归设置页管（还牵扯迁移提醒），这里只把人送过去 */
 function goModelsDirSetting(): void {
   ui.navigate('settings', 'models-dir')
 }
@@ -302,38 +211,77 @@ function goModelsDirSetting(): void {
   <div class="view">
     <div class="view__body">
       <div class="view__body-inner">
-        <div class="notice">
-          <Icon name="info" :size="14" />
-          <p>
-            <template v-if="storageDir">
-              模型存储位置：<span class="mono">{{ storageDir }}</span
-              ><br />
-            </template>
-            <template v-else>
-              模型存储位置：<span class="mono">%APPDATA%\XBAOS\SubtitleGenerator\Models\</span
-              ><br />
-            </template>
-            支持断点续传，失败时自动切换国内镜像（hf-mirror.com）。
-          </p>
-        </div>
+        <!-- 当前架构 -->
+        <section class="arch">
+          <div class="arch__info">
+            <div class="arch__row">
+              <span class="arch__label">当前架构</span>
+              <span v-if="activeEntry" class="arch__value">{{ model.archLabel }}</span>
+              <span v-else-if="loading" class="arch__value">正在读取</span>
+              <span v-else class="arch__value arch__value--none">未检测到可用模型</span>
+            </div>
+            <div v-if="activeEntry" class="arch__sub">
+              <span class="arch__model">{{ activeEntry.name }}</span>
+              <span class="arch__sep">/</span>
+              <span class="mono arch__path">{{ activeEntry.path }}</span>
+            </div>
+            <div v-if="engineMissing" class="arch__warn">
+              <Icon name="alert" :size="13" />
+              <span>当前架构的识别引擎缺失，请重新安装或先编译引擎</span>
+            </div>
+          </div>
+          <div class="arch__actions">
+            <button class="btn btn--sm" type="button" :disabled="!bridge" @click="openModelsDir">
+              <Icon name="folder-open" :size="13" />
+              <span>模型文件夹</span>
+            </button>
+            <button class="btn btn--sm" type="button" @click="goModelsDirSetting">
+              <Icon name="settings" :size="13" />
+              <span>存储位置</span>
+            </button>
+            <button class="btn btn--sm" type="button" @click="rescan">
+              <Icon name="refresh" :size="13" />
+              <span>重新扫描</span>
+            </button>
+          </div>
+        </section>
 
+        <!-- 内置条目 -->
+        <p v-if="!bridge" class="own__empty">浏览器预览读不到模型清单，请在桌面应用中使用</p>
+        <p v-else-if="loadError" class="load-error">
+          <Icon name="alert" :size="13" />
+          <span>模型清单读取失败：{{ loadError }}</span>
+        </p>
         <section
-          v-for="item in MODELS"
+          v-for="item in catalog"
           :key="item.key"
           class="model"
-          :class="{ 'is-active': activeKeyOf(item) }"
+          :class="{ 'is-active': isActiveId(item.id) }"
         >
           <div class="model__main">
-            <div class="model__title-row">
+            <div class="model__head">
               <h2 class="model__name">{{ item.name }}</h2>
-              <span v-if="activeKeyOf(item)" class="tag tag--ok">使用中</span>
+              <span v-if="item.key === 'sensevoice-small'" class="tag tag--rec">推荐</span>
+              <span v-if="isActiveId(item.id)" class="tag tag--ok">使用中</span>
               <!-- 「装着但没在用」必须看得见：这是最容易发生的误解 -->
-              <span v-else-if="isDownloaded(item)" class="tag tag--idle">未启用</span>
+              <span v-else-if="installedOf(item)" class="tag tag--idle">未启用</span>
               <span v-if="downloading === item.key" class="tag">下载中</span>
             </div>
-            <p class="model__note">{{ item.note }}</p>
+            <p class="model__summary">{{ item.summary }}</p>
 
             <dl class="model__specs">
+              <div>
+                <dt>架构</dt>
+                <dd>{{ item.engine }}</dd>
+              </div>
+              <div>
+                <dt>发行者</dt>
+                <dd>{{ item.publisher }}</dd>
+              </div>
+              <div>
+                <dt>协议</dt>
+                <dd :title="item.licenseUrl">{{ item.license }}</dd>
+              </div>
               <div>
                 <dt>参数量</dt>
                 <dd class="mono">{{ item.params }}</dd>
@@ -343,119 +291,125 @@ function goModelsDirSetting(): void {
                 <dd class="mono">{{ sizeLabelOf(item) }}</dd>
               </div>
               <div>
-                <dt>中文准确度</dt>
-                <dd>{{ item.quality }}</dd>
-              </div>
-              <div>
-                <dt>许可证</dt>
-                <dd class="mono">{{ item.license }}</dd>
+                <dt>语种</dt>
+                <dd>{{ item.langs }}</dd>
               </div>
             </dl>
           </div>
 
           <div class="model__actions">
             <template v-if="downloading === item.key">
-              <div class="model__progress">
-                <div class="model__progress-track">
+              <div class="progress">
+                <div class="progress__track">
                   <span :style="{ width: `${progress[item.key]?.percent ?? 0}%` }" />
                 </div>
-                <span class="mono model__progress-text">{{ progressText(item.key) }}</span>
-                <button class="btn btn--sm" type="button" @click="cancelDownload(item)">
-                  取消
-                </button>
+                <span class="mono progress__text">
+                  {{ (progress[item.key]?.percent ?? 0).toFixed(1) }}%
+                </span>
               </div>
+              <button class="btn btn--sm" type="button" @click="cancelDownload(item)">
+                取消
+              </button>
             </template>
 
-            <template v-else-if="isDownloaded(item)">
+            <template v-else-if="installedOf(item)">
               <button
                 class="btn btn--sm"
                 type="button"
-                :disabled="activeKeyOf(item)"
-                @click="use(item)"
+                :disabled="isActiveId(item.id)"
+                @click="useModel(item.id, item.name)"
               >
-                {{ activeKeyOf(item) ? '当前使用' : '切换使用' }}
+                {{ isActiveId(item.id) ? '当前使用' : '切换使用' }}
               </button>
               <button
-                v-if="isRemovable(item)"
+                v-if="isRemovableSource(installedOf(item)!.source)"
                 class="btn btn--sm btn--danger"
                 type="button"
-                @click="remove(item)"
+                @click="removeModel(item.id, item.name, item.kind)"
               >
                 删除
               </button>
             </template>
 
-            <button v-else class="btn btn--sm btn--primary" type="button" @click="download(item)">
+            <button
+              v-else
+              class="btn btn--sm btn--primary"
+              type="button"
+              :disabled="!!downloading"
+              @click="download(item)"
+            >
               <Icon name="download" :size="13" />
               <span>下载</span>
             </button>
           </div>
         </section>
 
-        <!-- 使用自己的模型 -->
+        <!-- 自己的模型 -->
         <section class="own">
           <div class="own__head">
             <Icon name="folder" :size="14" />
-            <span class="own__title">使用自己的模型</span>
+            <span class="own__title">自己的模型</span>
           </div>
           <p class="own__text">
-            把 whisper.cpp 格式的 <span class="mono">.bin</span> 模型文件放进模型文件夹，
-            回到这里点「刷新列表」就能切换使用。<strong>文件名不必和上面一致</strong>
-            ：识别时会自动用上目录里可用的模型，不会因为改了名就找不到。
+            把模型放进模型文件夹后点「重新扫描」。支持单个
+            <span class="mono">.bin</span> 文件，或含
+            <span class="mono">model.int8.onnx</span> 与
+            <span class="mono">tokens.txt</span> 的文件夹，架构按内容自动判定。
           </p>
-          <p class="own__path mono">{{ storageDir || '（正在读取…）' }}</p>
-          <p class="own__current">
-            当前使用：<span class="mono">{{ resolvedModel || '未检测到可用模型' }}</span>
-          </p>
-          <div class="own__actions">
-            <button class="btn btn--sm" type="button" :disabled="!bridge" @click="openModelsDir">
-              <Icon name="folder-open" :size="13" />
-              <span>打开模型文件夹</span>
-            </button>
-            <button class="btn btn--sm" type="button" @click="goModelsDirSetting">
-              <Icon name="settings" :size="13" />
-              <span>更改存储位置</span>
-            </button>
-            <button class="btn btn--sm" type="button" :disabled="!bridge" @click="refreshInfo">
-              <Icon name="refresh" :size="13" />
-              <span>刷新列表</span>
-            </button>
-          </div>
+          <p class="own__path mono">{{ storageDir || '正在读取' }}</p>
 
-          <!-- 自己放进去的模型（文件名随意）。列出来才能切换与删除，
-               否则它们在识别时会被用上，在界面上却完全看不到。 -->
-          <ul v-if="extraModels.length" class="own__list">
-            <li v-for="m in extraModels" :key="m.path" class="own__item">
+          <ul v-if="ownModels.length" class="own__list">
+            <li v-for="m in ownModels" :key="m.path" class="own__item">
               <div class="own__item-main">
-                <span class="own__item-name mono">{{ m.name }}</span>
-                <span class="own__item-size">{{ sizeText(m.size) }}</span>
+                <span class="own__item-name mono">{{ m.id }}</span>
+                <span class="own__item-arch">{{ m.kind === 'dir' ? '目录' : '文件' }}</span>
+                <span class="own__item-size mono">{{ sizeText(m.size) }}</span>
               </div>
               <div class="own__item-actions">
-                <span v-if="resolvedModel === m.name" class="tag tag--ok">使用中</span>
-                <button v-else class="btn btn--sm" type="button" @click="useFile(m.name, m.name)">
+                <span v-if="isActiveId(m.id)" class="tag tag--ok">使用中</span>
+                <span v-else-if="unsupported(m)" class="tag tag--idle">不支持</span>
+                <button
+                  v-else
+                  class="btn btn--sm"
+                  type="button"
+                  @click="useModel(m.id, m.id)"
+                >
                   切换使用
                 </button>
                 <button
                   v-if="isRemovableSource(m.source)"
                   class="btn btn--sm btn--danger"
                   type="button"
-                  @click="removeFile(m.name, m.name)"
+                  @click="removeModel(m.id, m.id, m.kind)"
                 >
                   删除
                 </button>
               </div>
             </li>
           </ul>
-          <p v-else class="own__empty">模型文件夹里还没有检测到 <span class="mono">.bin</span> 文件。</p>
+          <p v-else-if="!hasAnyModel" class="own__empty">模型文件夹里还没有检测到可用的模型。</p>
+          <p v-else class="own__empty">除上面的内置条目外，模型文件夹里没有其他模型。</p>
+        </section>
 
-          <div class="own__warn">
-            <Icon name="alert" :size="13" />
-            <span>
-              只支持 whisper.cpp 的 ggml 格式，其他格式（<span class="mono">.pt</span> /
-              <span class="mono">.safetensors</span> / <span class="mono">ONNX</span>）
-              不会出现在列表里，也无法加载。
-            </span>
+        <!-- 下载来源与责任边界 -->
+        <section class="source">
+          <div class="source__head">
+            <Icon name="download" :size="14" />
+            <span class="source__title">模型从哪来</span>
           </div>
+          <div class="source__chain">
+            <span class="source__hop mono">ModelScope</span>
+            <span class="source__arrow">→</span>
+            <span class="source__hop mono">hf-mirror</span>
+            <span class="source__arrow">→</span>
+            <span class="source__hop mono">huggingface.co</span>
+          </div>
+          <p class="source__text">
+            依次尝试上面的来源，每个文件都做 SHA-256 校验，不符即拒收。
+          </p>
+          <p class="source__text">
+            模型是第三方内容，不属于本软件；权利与许可归各自发布者，本软件只负责下载、校验与调用，不对第三方站点负责。
+          </p>
         </section>
       </div>
     </div>
@@ -463,7 +417,213 @@ function goModelsDirSetting(): void {
 </template>
 
 <style scoped>
-/* ---- 使用自己的模型 ---- */
+/* ---- 当前架构 ---- */
+.arch {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-raised);
+  box-shadow: var(--shadow-sm);
+}
+
+.arch__info {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.arch__row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.arch__label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.arch__value {
+  font-size: var(--font-size-md);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.arch__value--none {
+  font-weight: var(--weight-regular);
+  color: var(--color-text-secondary);
+}
+
+.arch__sub {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.arch__model {
+  flex-shrink: 0;
+}
+
+.arch__sep {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+}
+
+.arch__path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-tertiary);
+}
+
+.arch__warn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+}
+
+.arch__actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: var(--space-2);
+}
+
+/* ---- 模型条目 ---- */
+.model {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+}
+
+.model.is-active {
+  background: var(--color-bg-raised);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--color-accent-border);
+}
+
+.model__main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.model__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /*
+   * 固定标题行高。带「使用中 / 未启用」标签的卡片，标题行会被标签撑到 21px，
+   * 没标签的只有 19px —— 下面整块字段跟着下移 2px，五张卡片看起来就参差不齐。
+   */
+  min-height: 22px;
+}
+
+.model__name {
+  font-size: var(--font-size-md);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.model.is-active .model__name {
+  font-weight: var(--weight-semibold);
+}
+
+.model__summary {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+/*
+ * 三列两行、列宽均等。
+ *
+ * 之前是六列横排、宽度按 1.1/1.1/1.45/0.6/0.8/1.15 分配，列间距落在
+ * 172/176/214/130/146 上 —— 每一列都对齐，但间隔忽宽忽窄，看着散。
+ * 等宽以后每列都从同一条竖线起头；两行也避免了窄窗口下长值把列挤折行。
+ */
+.model__specs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+  margin-top: var(--space-1);
+}
+
+.model__specs dt {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.model__specs dd {
+  margin-top: 2px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-primary);
+}
+
+.model__actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  /*
+   * 宽度必须固定。
+   *
+   * 按钮组是「切换使用 + 删除」两个还是一个，会改变左侧内容区的可用宽度 ——
+   * 而字段是三等分的 grid，于是每张卡片的三列起点都不一样，看起来就是
+   * 「文字没对齐」。固定成能容下两个按钮的宽度，字段区才真正逐列对齐。
+   */
+  width: 172px;
+  padding-top: 2px;
+}
+
+/* ---- 下载进度 ---- */
+.progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 168px;
+}
+
+.progress__track {
+  position: relative;
+  overflow: hidden;
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-bg-inset);
+}
+
+.progress__track span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 2px;
+  background: var(--color-accent);
+  transition: width 180ms linear;
+}
+
+.progress__text {
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+/* ---- 自己的模型 ---- */
 .own {
   display: flex;
   flex-direction: column;
@@ -494,63 +654,57 @@ function goModelsDirSetting(): void {
 }
 
 .own__path {
+  overflow: hidden;
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   background: var(--color-bg-inset);
   font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.own__current {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-secondary);
-}
-
-/* 用户自放的模型列表。行内是「名字（可换行）+ 按钮组」，
-   按钮组必须 flex: none —— 长文件名一挤，中文按钮会掉成竖排 */
 .own__list {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
 }
 
 .own__item {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--space-3);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  background: var(--color-bg-inset);
 }
 
 .own__item-main {
-  flex: 1;
-  min-width: 0;
   display: flex;
+  min-width: 0;
   align-items: baseline;
   gap: var(--space-2);
 }
 
 .own__item-name {
+  overflow: hidden;
   font-size: var(--font-size-xs);
   color: var(--color-text-primary);
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+.own__item-arch,
 .own__item-size {
-  flex: none;
-  font-size: 11px;
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
 }
 
 .own__item-actions {
-  flex: none;
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: var(--space-2);
 }
@@ -560,152 +714,78 @@ function goModelsDirSetting(): void {
   color: var(--color-text-tertiary);
 }
 
-.own__actions {
-  display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-
-.own__warn {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  font-size: var(--font-size-xs);
-  color: var(--color-warning);
-  line-height: var(--line-base);
-}
-
-.own__warn :deep(.icon) {
-  flex: none;
-  margin-top: 1px;
-}
-
-.notice {
-  display: flex;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--color-info-border);
-  border-radius: var(--radius-md);
-  background: var(--color-info-subtle);
-  font-size: var(--font-size-xs);
-  line-height: var(--line-loose);
-  color: var(--color-text-secondary);
-}
-
-.notice :deep(.icon) {
-  margin-top: 3px;
-  color: var(--color-info);
-}
-
-.model {
+.load-error {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+}
+
+/* ---- 下载来源 ---- */
+
+.source {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   padding: var(--space-4);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: var(--color-bg-surface);
 }
 
-.model.is-active {
-  border-color: var(--color-accent-border);
-}
-
-.model__main {
-  flex: 1;
-  min-width: 0;
-}
-
-.model__title-row {
+.source__head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-}
-
-.model__name {
-  font-size: var(--font-size-base);
+  font-size: var(--font-size-sm);
   font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
 }
 
-.tag {
-  padding: 1px var(--space-2);
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  font-weight: var(--weight-medium);
-}
-
-.tag--ok {
-  background: var(--color-success-subtle);
-  color: var(--color-success);
-}
-
-/* 「装着但没在用」：需要被看见，但不能抢「使用中」的视觉权重 */
-.tag--idle {
-  background: var(--color-bg-raised);
-  box-shadow: inset 0 0 0 1px var(--color-border);
+.source__head :deep(.icon) {
   color: var(--color-text-tertiary);
 }
 
-.model__note {
-  margin-top: 3px;
+.source__text {
   font-size: var(--font-size-xs);
-  color: var(--color-text-tertiary);
+  line-height: var(--line-base);
+  color: var(--color-text-secondary);
 }
 
-.model__specs {
+/* 回退顺序是这一块的重点：用等宽字体 + 箭头串成一行，扫一眼就知道顺序 */
+.source__chain {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-5);
-  margin-top: var(--space-3);
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-inset);
 }
 
-.model__specs dt {
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-}
-
-.model__specs dd {
-  margin: 1px 0 0;
+.source__hop {
   font-size: var(--font-size-xs);
   color: var(--color-text-primary);
-  /* 许可证有的写 MIT、有的写 Apache-2.0，宽度不一。不锁 nowrap 的话
-     「Apache-2.0」会在连字符处被折成两行，规格行高度跟着参差。 */
-  white-space: nowrap;
 }
 
-.model__actions {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.model__progress {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 160px;
-}
-
-.model__progress-track {
-  flex: 1;
-  height: 4px;
-  border-radius: var(--radius-pill);
-  background: var(--color-bg-subtle);
-  overflow: hidden;
-}
-
-.model__progress-track span {
-  display: block;
-  height: 100%;
-  background: var(--color-accent);
-  border-radius: var(--radius-pill);
-  transition: width var(--dur-base) var(--ease-out);
-}
-
-.model__progress-text {
-  flex: none;
-  font-size: 11px;
+.source__arrow {
+  font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
+}
+
+/* 「推荐」只是给首选模型一个轻标记，不用彩色，也不加左侧饰线 */
+.tag--rec {
+  padding: 1px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-inset);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
 }
 </style>

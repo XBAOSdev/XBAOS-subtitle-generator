@@ -77,6 +77,8 @@ contextBridge.exposeInMainWorld('xbaos', {
     ackCloseRequest: () => ipcRenderer.send('app:close-ack'),
     /** 放行：真的关掉窗口 */
     forceClose: () => ipcRenderer.send('app:force-close'),
+    /** 在系统文件管理器里打开随包分发的开源许可原文 */
+    openLicenses: () => ipcRenderer.invoke('app:openLicenses'),
   },
 
   theme: {
@@ -205,12 +207,14 @@ contextBridge.exposeInMainWorld('xbaos', {
 
   // ---- 模型管理
   models: {
-    /** 可下载模型的目录（key / file / sizeLabel） */
+    /** 可下载模型的目录（含架构 / 发行者 / 协议 / 体积） */
     catalog: () => ipcRenderer.invoke('model:catalog'),
     download: (key) => ipcRenderer.invoke('model:download', key),
     cancelDownload: (key) => ipcRenderer.invoke('model:downloadCancel', key),
-    /** 删除用户模型目录中的文件，只接受纯文件名 */
-    remove: (fileName) => ipcRenderer.invoke('model:delete', fileName),
+    /** 正在下载的 key 列表（界面重开后恢复进度状态用） */
+    downloads: () => ipcRenderer.invoke('model:downloads'),
+    /** 删除模型：只接受纯标识名，kind 决定删文件还是删目录 */
+    remove: (id, kind) => ipcRenderer.invoke('model:delete', id, kind),
     /** 当前模型存储位置 { dir, defaultDir, custom } */
     getDir: () => ipcRenderer.invoke('model:getDir'),
     /** 设置自定义目录（会真写一个探针文件验证可写）。传空串恢复默认 */
@@ -218,8 +222,16 @@ contextBridge.exposeInMainWorld('xbaos', {
     /** 在系统文件管理器里打开模型文件夹 */
     openDir: () => ipcRenderer.invoke('model:openDir'),
     /**
-     * 这次实际会用哪个模型 `{ name, path, source } | null`。
-     * 传设置里的文件名；失效时主进程会告诉你回退到了哪个 ——
+     * 当前生效模型与架构 `{ entry, arch, archLabel, caps }`。
+     * 传设置里存的模型标识；主进程负责判定架构并记住 ——
+     * 界面不要自己按文件名猜架构。
+     */
+    active: (id) => ipcRenderer.invoke('models:active', id),
+    /** 重新扫一遍模型目录（用户在资源管理器里动了文件之后用） */
+    refresh: () => ipcRenderer.invoke('models:refresh'),
+    /**
+     * 这次实际会用哪个模型 `{ id, name, path, source, arch, kind } | null`。
+     * 传设置里的标识；失效时主进程会告诉你回退到了哪个 ——
      * 界面据此标「使用中」，不要拿文件名自己比。
      */
     resolve: (file) => ipcRenderer.invoke('models:resolve', file),
@@ -244,6 +256,10 @@ contextBridge.exposeInMainWorld('xbaos', {
     load: (opts) => ipcRenderer.invoke('engine:load', opts),
     unload: () => ipcRenderer.invoke('engine:unload'),
     transcribe: (opts) => ipcRenderer.invoke('engine:transcribe', opts),
+    /** 说话人分离：只认 ONNX 引擎，与当前识别模型无关 */
+    diarize: (opts) => ipcRenderer.invoke('engine:diarize', opts),
+    /** 分离进度。payload: { taskId, percent } */
+    onDiarizeProgress: (cb) => subscribe('engine:diarize-progress', cb),
     abort: () => ipcRenderer.invoke('engine:abort'),
     /** 流式进度与字幕段。payload: { taskId, msg }，taskId 为 null 表示全局消息（如后端回退） */
     onStream: (cb) => subscribe('engine:stream', cb),

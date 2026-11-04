@@ -94,6 +94,14 @@ export interface SubtitleSegment {
    * 做过的修改会被无声地丢掉。
    */
   originFileId?: string
+  /**
+   * 说话人编号（0 起），由音色分离得出。没开分离、或该条落在所有语音段之外时为 undefined。
+   *
+   * 刻意**不参与**任何其他逻辑：不进校验、不进 AI 提示词、不改时间码。它只是
+   * 一个「这条大概是谁说的」的标注，随时可以重新分离覆盖 —— 所以也不进
+   * `segmentsSignature`，重新分离后不会凭空冒出「有未保存的修改」。
+   */
+  speaker?: number
 }
 
 /** 一个音频文件及其识别结果 */

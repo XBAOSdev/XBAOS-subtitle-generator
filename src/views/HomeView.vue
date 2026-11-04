@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
 import { useSettingsStore } from '@/stores/settings'
+import { useModelStore } from '@/stores/model'
 import { useI18n } from '@/composables/useI18n'
 import type { BatchMode, FileStatus } from '@/types'
 import { formatBytes, formatDuration, formatEstimate } from '@/utils/format'
@@ -15,7 +16,15 @@ import Icon from '@/components/Icon.vue'
 const project = useProjectStore()
 const ui = useUiStore()
 const settings = useSettingsStore()
+const model = useModelStore()
 const { t } = useI18n()
+
+/**
+ * 架构能力。不支持的项一律**留在原位、变灰、写明原因** —— 直接藏掉会让用户
+ * 以为软件少了一块，下次换回 whisper 也找不到。
+ */
+const canPrompt = computed(() => model.caps.prompt)
+const canTune = computed(() => model.caps.decode)
 
 const LANGUAGE_OPTIONS = [
   { value: 'zh', label: '简体中文' },
@@ -24,6 +33,15 @@ const LANGUAGE_OPTIONS = [
   { value: 'ja', label: '日语' },
   { value: 'ko', label: '韩语' },
 ]
+
+/**
+ * 说话人数上限只到 6。
+ *
+ * 不是技术限制，是「报的人数越多、每个声纹样本越少」的取舍：6 个人分摊一段
+ * 对话，每人常常只剩十几秒，再往上分就主要是在噪声里找人了。真要更多，用户
+ * 需要的是更强的声纹模型，而不是多给几个选项。
+ */
+const SPEAKER_COUNT_OPTIONS = [2, 3, 4, 5, 6]
 
 /** 提示词实时预览：占用多少预算、注入了多少词、是否被截断 */
 const promptPreview = computed(() =>
@@ -64,12 +82,22 @@ const canStart = computed(() => pendingFiles.value.length > 0 && !project.recogn
 const estimate = computed(() => {
   const kind: 'gpu' | 'cpu' | 'unknown' =
     settings.backend === 'cpu' ? 'cpu' : settings.backend === 'vulkan' ? 'gpu' : 'unknown'
-  return formatEstimate(
-    estimateSeconds(project.totalDuration, settings.reasoningDepth, kind),
-  )
+  // 与 depthHint 同一条判据：不支持多遍解码的模型按单遍算
+  const depth = model.caps.decode ? settings.reasoningDepth : 'standard'
+  return formatEstimate(estimateSeconds(project.totalDuration, depth, kind))
 })
 
-const depthHint = computed(() => DEPTH_PRESETS[settings.reasoningDepth])
+/**
+ * 推理深度的展示值。
+ *
+ * 当前模型不支持多遍解码时（`.caps.decode` 为假），实际只跑一遍 ——
+ * 界面上的「约 ×3 耗时」必须跟着变成 ×1，否则三处信息互相矛盾：
+ * 说明写着「固定单遍」、store 里也确实传 1，标签却承诺三倍耗时。
+ */
+const depthHint = computed(() => {
+  const preset = DEPTH_PRESETS[settings.reasoningDepth]
+  return model.caps.decode ? preset : { ...preset, timeFactor: 1 }
+})
 
 function move(index: number, delta: number): void {
   project.reorder(index, index + delta)
@@ -406,7 +434,7 @@ async function start(event?: MouseEvent): Promise<void> {
                   </select>
                 </label>
 
-                <div class="field">
+                <div class="field" :class="{ 'is-off': !canTune }">
                   <div class="field__head">
                     <span class="field__label">推理深度</span>
                     <span class="field__tag mono">约 ×{{ depthHint.timeFactor }} 耗时</span>
@@ -418,18 +446,23 @@ async function start(event?: MouseEvent): Promise<void> {
                       class="choice"
                       :class="{ 'is-active': settings.reasoningDepth === id }"
                       type="button"
+                      :disabled="!canTune"
                       @click="settings.reasoningDepth = id"
                     >
                       {{ DEPTH_PRESETS[id].label }}
                     </button>
                   </div>
-                  <span class="field__hint">{{ depthHint.hint }}</span>
+                  <span class="field__hint">
+                    <template v-if="!canTune">当前模型不支持多遍解码，固定单遍识别</template>
+                    <template v-else>{{ depthHint.hint }}</template>
+                  </span>
                 </div>
 
                 <div class="field">
                   <div class="field__head">
                     <span class="field__label">领域词库</span>
                     <span
+                      v-if="canPrompt"
                       class="lex-budget mono"
                       :class="{ 'is-over': promptPreview.truncated }"
                     >
@@ -454,7 +487,12 @@ async function start(event?: MouseEvent): Promise<void> {
                     </label>
                   </div>
                   <span class="field__hint">
-                    <template v-if="promptPreview.truncated">
+                    <!-- 不支持提示词注入时，词库仍然生效 —— 它还要参与识别后的断句，
+                         所以勾选保持可用，只把「注入」这件事讲清楚 -->
+                    <template v-if="!canPrompt">
+                      当前模型不接收提示词，所选词库仍用于字幕断句与识别后的同音纠正
+                    </template>
+                    <template v-else-if="promptPreview.truncated">
                       核心词已超出预算，被舍弃的前几个：{{
                         promptPreview.droppedCore.slice(0, 6).join('、')
                       }}
@@ -477,7 +515,26 @@ async function start(event?: MouseEvent): Promise<void> {
                     rows="2"
                     placeholder="节目名、人名、专业术语，用换行或逗号分隔"
                   />
+                  <span class="field__hint">
+                    <!-- 输入框在任何模型下都可编辑：不支持提示词的模型虽然收不到这些词，
+                         它们仍要参与断句与识别后的同音纠正，禁掉等于把这条路也堵死 -->
+                    <template v-if="canPrompt">
+                      注入模型受 {{ PROMPT_BUDGET_CHARS }} 字预算限制，超出的词仍全部参与识别后的同音纠正
+                    </template>
+                    <template v-else>
+                      当前模型不接收提示词，全部热词用于断句与识别后的同音纠正
+                    </template>
+                  </span>
                 </label>
+
+                <div class="fix">
+                  <label class="switch">
+                    <input v-model="settings.termFix" type="checkbox" />
+                    <span class="switch__track" />
+                    <span>识别后按热词纠正同音字</span>
+                  </label>
+                  <span class="fix__note">全量热词参与，字数相同、读音一致才替换</span>
+                </div>
 
                 <details class="adv">
                   <summary class="adv__sum">
@@ -526,7 +583,21 @@ async function start(event?: MouseEvent): Promise<void> {
                         <span class="switch__track" />
                         <span>静音检测与长音频切分</span>
                       </label>
+                      <label class="switch">
+                        <input v-model="settings.speakerDiarization" type="checkbox" />
+                        <span class="switch__track" />
+                        <span>识别后分析说话人</span>
+                      </label>
                     </div>
+
+                    <!-- 分离模型随包，不需要下载；人数留白就按音色聚类自动判断 -->
+                    <label v-if="settings.speakerDiarization" class="speaker-count">
+                      <span>说话人数</span>
+                      <select v-model.number="settings.speakerCount" class="select">
+                        <option :value="0">自动</option>
+                        <option v-for="n in SPEAKER_COUNT_OPTIONS" :key="n" :value="n">{{ n }}</option>
+                      </select>
+                    </label>
                   </div>
                 </details>
               </div>
@@ -837,6 +908,36 @@ async function start(event?: MouseEvent): Promise<void> {
   gap: var(--space-2);
 }
 
+/* 人数选择：跟在开关后面，同一行对齐，不另起一块 */
+.speaker-count {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.speaker-count .select {
+  width: 88px;
+}
+
+/* 热词纠正开关：与上面的输入框同属一组，但不受模型能力限制，永远可点 */
+.fix {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+}
+
+.fix__note {
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
 /* ---- 队列 ---- */
 .queue {
   padding: var(--space-2);
@@ -1110,5 +1211,28 @@ async function start(event?: MouseEvent): Promise<void> {
   font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
   line-height: var(--line-base);
+}
+
+/* ---- 当前模型不支持的功能：留在原位、变灰、附原因 ---- */
+.field.is-off .field__label,
+.field.is-off .field__tag {
+  color: var(--color-text-tertiary);
+}
+
+.field.is-off .choice,
+.field.is-off .textarea {
+  cursor: not-allowed;
+}
+
+.field.is-off .choice {
+  color: var(--color-text-tertiary);
+}
+
+.field.is-off .choice.is-active {
+  color: var(--color-text-secondary);
+}
+
+.field.is-off .textarea {
+  color: var(--color-text-tertiary);
 }
 </style>

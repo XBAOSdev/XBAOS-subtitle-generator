@@ -27,10 +27,26 @@ files:
 asar: true
 
 extraResources:
-  # 识别引擎。Vulkan 版同时含 CPU 后端，机器没显卡或用户选了 cpu 时会自动走 CPU，
-  # 所以只发这一个就够。用 /MT 静态链接，零外部 DLL 依赖。
+  # 识别引擎。两套并列，按模型架构选：
+  #   xbaos-engine.exe      whisper.cpp（ggml / Vulkan）—— Vulkan 版同时含 CPU 后端，
+  #                         机器没显卡或用户选了 cpu 时会自动走 CPU，所以只发这一个
+  #   xbaos-engine-asr.exe  sherpa-onnx（onnxruntime 静态链接）
+  # 两者都是 /MT 静态链接，零外部 DLL 依赖。
   - from: engine/build/vulkan/bin/xbaos-engine.exe
     to: engine/xbaos-engine.exe
+  - from: engine-onnx/build/bin/xbaos-engine-asr.exe
+    to: engine/xbaos-engine-asr.exe
+
+  # 说话人分离的两个小模型（合计 33MB）**随包分发**。
+  #
+  # 它们与识别模型是两回事：识别模型动辄几百 MB、按需下载；这两个只负责
+  # 「谁在什么时候说话」，体积小且不随模型切换而变化，让用户为它单独下载
+  # 没有意义。分离是可选功能，但模型始终在场，开关一开就能用。
+  #
+  # 与识别模型分开放在 diarization/ 下，不进模型清单、也不出现在模型管理页 ——
+  # 它们不是「可切换的识别模型」，混进去只会让用户困惑。
+  - from: resources/diarization
+    to: diarization
 
   # 模型**不随包分发**（2026-10-14 起）：安装包里不含任何模型文件。
   # 用户要么在软件内下载（模型管理页），要么自行把 ggml-*.bin 放进模型目录后导入。

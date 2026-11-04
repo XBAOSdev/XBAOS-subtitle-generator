@@ -35,6 +35,8 @@ import {
 } from '../src/utils/timelineLayout'
 import { countIssues, visibleIssues, widthUnits } from '../src/utils/validate'
 import { applyLineWrap, breakIntoLines } from '../src/utils/lineWrap'
+import { applyTermFix, collectFixTerms, createTermFixer } from '../src/utils/termFix'
+import { assignSpeakers, speakerLabel } from '../src/utils/speaker'
 import { buildWrapWords } from '../src/utils/wrapWords'
 import { COMMON_WORDS, COMMON_WORD_GROUPS } from '../src/data/commonWords'
 import {
@@ -2333,6 +2335,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
 
   const modelViewSrc = readSource('src/views/ModelView.vue')
+  const modelsSrc = readSource('electron/models.js')
   check(
     '模型下载状态来自 store，而不是页面自己订阅',
     /useDownloadsStore\(\)/.test(modelViewSrc) && !/models\.onProgress\(/.test(modelViewSrc),
@@ -2347,35 +2350,167 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
    * 「使用中」、回退不许死盯默认档、报错不许写死文件名、自放的模型必须可见。
    */
   const mainModelsSrc = readSource('electron/main.js')
+  const scanModelsSrc = readSource('electron/models.js')
+  const catalogSrc = readSource('electron/model-catalog.js')
   const appModelsSrc = readSource('src/App.vue')
   const preloadModelsSrc = readSource('electron/preload.cjs')
+  const engineClientSrc = readSource('electron/engine-client.js')
+  const downloaderSrc = readSource('electron/model-download.js')
+
+  /*
+   * 这一组守的是「静默出错」：不报错、不崩溃，只是悄悄用错东西，
+   * 用户过几天才发现结果不对，而那时早已没有现场。
+   */
+  check(
+    '换模型后必须重新加载，不能只看 modelLoaded 这个布尔',
+    /client\.loadedModel !== entry\.path/.test(mainModelsSrc) &&
+      /this\.loadedModel = model/.test(engineClientSrc),
+    '同一架构内换模型不重启进程，只看布尔会用旧模型跑完、界面却显示新模型的名字',
+  )
+  check(
+    '自定义模型目录要落盘，重启后仍然生效',
+    /function readCustomModelsDir/.test(mainModelsSrc) &&
+      /writeCustomModelsDir\(value\)/.test(mainModelsSrc) &&
+      /customModelsDir = readCustomModelsDir\(\)/.test(mainModelsSrc),
+    '只存内存的话，换过目录的用户一重启就回落到默认目录，界面显示「没有模型」',
+  )
+  check(
+    '取消下载不能被当成失败',
+    /if \(job\.canceled\) \{\s*this\.finish\(job, 'canceled'\)/.test(downloaderSrc),
+    '取消时 fetchOne 返回 false，会走到「所有下载源都失败了」那条分支',
+  )
 
   check(
     '「使用中」由主进程判定，界面不拿文件名自己比',
-    /resolvedModel\.value !== '' && resolvedModel\.value === modelFileOf\(item\.key\)/.test(modelViewSrc) &&
-      !/return activeModelFile\.value === modelFileOf\(item\.key\)/.test(modelViewSrc),
+    /const activeEntry = computed\(\(\) => model\.entry\)/.test(modelViewSrc) &&
+      /activeEntry\.value\?\.id === id/.test(modelViewSrc) &&
+      !/settings\.modelFile === item\.id/.test(modelViewSrc),
     '只比名字的话，文件被手动删掉后界面会一直挂着「使用中」的空壳',
   )
+  /*
+   * 漏导入一个常量 = 运行时 ReferenceError，而且症状不像错误。
+   *
+   * 真实发生过：main.js 从 model-catalog.js 只导入了 ARCH_WHISPER，app:info 里
+   * 却在遍历 ARCH_SHERPA —— 整个 IPC 抛错，模型页的内置清单连同下载入口一起
+   * 消失，界面上只剩「正在读取」。语法检查看不出（名字合法），类型检查不覆盖
+   * .js，只能靠这条扫描守住。
+   */
+  const mainImported = new Set(
+    // [^}]* 而不是 [\s\S]*?：后者会从文件里第一个 `import {`（electron 那行）
+    // 一路吃到 model-catalog 的 `}`，把中间的 import 全当成一份名单
+    [...mainModelsSrc.matchAll(/import\s*\{([^}]*)\}\s*from\s*'\.\/model-catalog\.js'/g)]
+      .flatMap((m) => m[1].split(',').map((s) => s.trim()))
+      .filter(Boolean),
+  )
+  const mainArchUsed = [...new Set([...mainModelsSrc.matchAll(/\bARCH_[A-Z_]+\b/g)].map((m) => m[0]))]
+  const mainArchMissing = mainArchUsed.filter((name) => !mainImported.has(name))
   check(
-    '主进程提供 models:resolve 只读查询通道',
+    '主进程用到的架构常量都从 model-catalog 导入了',
+    mainArchMissing.length === 0,
+    `未导入：${mainArchMissing.join('、')}`,
+  )
+  check(
+    '主进程提供 models:resolve 与 models:active 两条查询通道',
     /ipcMain\.handle\('models:resolve'/.test(mainModelsSrc) &&
-      /resolve: \(file\) => ipcRenderer\.invoke\('models:resolve', file\)/.test(preloadModelsSrc),
+      /ipcMain\.handle\('models:active'/.test(mainModelsSrc) &&
+      /resolve: \(file\) => ipcRenderer\.invoke\('models:resolve', file\)/.test(preloadModelsSrc) &&
+      /active: \(id\) => ipcRenderer\.invoke\('models:active', id\)/.test(preloadModelsSrc),
     '判定规则只能存一份，放主进程',
   )
   check(
     '回退按「任一已装模型」，不死盯默认档',
-    /const fallback = pickInstalledModel\(\)/.test(mainModelsSrc) &&
-      /function pickInstalledModel\(\)/.test(mainModelsSrc),
-    '只回退 DEFAULT_MODEL 的话，只装了 base 的用户会被判「找不到模型」',
+    /export function resolveModel\(requested, ctx\)/.test(scanModelsSrc) &&
+      /export function pickModel\(ctx\)/.test(scanModelsSrc),
+    '只回退默认档的话，只装了 base 的用户会被判「找不到模型」',
   )
   check(
     '识别失败的报错指向模型管理页，不写死文件名',
     /没有可用的识别模型/.test(mainModelsSrc) && !/找不到模型文件（\$\{DEFAULT_MODEL\}）/.test(mainModelsSrc),
   )
   check(
-    '文件名不在内置目录里的模型也要列出来',
-    /const extraModels = computed/.test(modelViewSrc) && /v-for="m in extraModels"/.test(modelViewSrc),
+    '不在内置目录里的模型也要列出来',
+    /const ownModels = computed/.test(modelViewSrc) && /v-for="m in ownModels"/.test(modelViewSrc),
     '识别用得上、界面看不到的话，用户既不知道它生效了，也删不掉',
+  )
+  /*
+   * 只信主进程的 `catalogKey` 不够：主进程没重启、下发的是旧结构时，
+   * 内置模型会全部落进「自己的模型」，和上方卡片重复一遍（用户复现过）。
+   * 渲染层必须拿当前清单的 id 再核一次。
+   */
+  check(
+    '「自己的模型」按清单 id 再过滤一遍',
+    /const catalogIds = computed/.test(modelViewSrc) &&
+      /!m\.catalogKey && !catalogIds\.value\.has\(m\.id\)/.test(modelViewSrc),
+    '两重条件缺一不可，否则旧数据会让官方模型重复显示',
+  )
+  /*
+   * 内置条目不许在「自己的模型」里再列一遍。
+   *
+   * 真实踩过（2026-11-04）：`catalogKeyOf` 拿逻辑短名（`small`）去比磁盘标识
+   * （`ggml-small.bin`），永远匹配不上，于是用户装了三个模型就看到六行 ——
+   * 上面三张卡片，下面三个「自己的模型」，全是同一批文件。
+   */
+  check(
+    '内置条目不会在「自己的模型」里重复出现',
+    /function catalogKeyOf\(id\)[\s\S]{0,200}findCatalogByDiskId\(id\)/.test(modelsSrc) &&
+      /export function findCatalogByDiskId/.test(catalogSrc),
+    '按 key 比文件名永远落空，必须按磁盘标识 id 比对',
+  )
+  /*
+   * 下载源与责任边界必须在界面上说清楚（2026-11-04 明确要求）。
+   * 这不是「多写一段介绍」：模型来自第三方站点，出问题时要让用户知道
+   * 该找谁，以及软件做到哪一步为止（校验、拒收），没做到哪一步（站点可用性）。
+   */
+  check(
+    '模型页公示下载源与回退顺序',
+    /ModelScope/.test(modelViewSrc) &&
+      /hf-mirror/.test(modelViewSrc) &&
+      /huggingface\.co/.test(modelViewSrc),
+    '用户要知道模型是从哪下的、下不动时软件会不会换源',
+  )
+  check(
+    'SenseVoice 是唯一的推荐位',
+    /item\.key === 'sensevoice-small'[\s\S]{0,100}推荐/.test(modelViewSrc) &&
+      (modelViewSrc.match(/tag--rec/g) ?? []).length <= 2,
+    '推荐只能给一个模型，而且必须是中文效果最好的那个',
+  )
+  check(
+    '模型页写明第三方源的责任边界',
+    /不对第三方站点负责/.test(modelViewSrc) && /SHA-256/.test(modelViewSrc),
+    '第三方的可用性必须与软件本身切开，但一句话说完就够，不铺陈',
+  )
+  /*
+   * 「不对可用性负责」只切开了服务，没切开内容本身（2026-11-04 明确要求）。
+   * 必须白纸黑字写出：模型文件不是本软件的一部分、权利归原权利人、
+   * 软件只是下载与校验，不重新分发。否则用户会以为模型跟着软件的许可走。
+   */
+  check(
+    '模型页明确第三方内容与本软件的切割',
+    /不属于本软件/.test(modelViewSrc) && /权利与许可归各自发布者/.test(modelViewSrc),
+    '只写「不负责可用性」不够，必须点明模型不是软件的一部分',
+  )
+  /*
+   * 用户明确要求：UI 不写又长又复杂的提示（2026-11-04 晚）。
+   * 底部只留来源、校验、责任切割三件事，各一句，不加饰线。
+   * 这条守的是「别哪天又好心补回一段解释」。
+   */
+  check(
+    '模型页底部说明保持精简',
+    (modelViewSrc.match(/class="source__text"/g) ?? []).length <= 2 &&
+      !/source__cut|source__warn/.test(modelViewSrc),
+    '说明超过两句就该删，宁可少说也别让人读一屏免责声明',
+  )
+  check(
+    '底部说明不使用文本框左侧饰线',
+    !/border-left[^;]*;[\s\S]{0,80}\.source/.test(modelViewSrc) &&
+      !/\.source__cut\s*\{[^}]*border-left/.test(modelViewSrc),
+    '左侧竖线属于装饰性提示，与「少写提示」是同一类问题',
+  )
+  check(
+    'README 与模型页同一套下载源与切割口径',
+    /ModelScope → hf-mirror → huggingface\.co/.test(readSource('README.md')) &&
+      /不属于本软件的一部分/.test(readSource('README.md')),
+    '对外文档漏了这段，用户只会在出错时才发现责任边界没写清楚',
   )
   /*
    * 「下载了但没启用」这一组。
@@ -2384,13 +2519,73 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
    * 因为界面上「下完了」和「在用了」长得几乎一样 —— 卡片上只是多出一个
    * 「切换使用」按钮，没人会去点。这类问题不报错、不抛异常，只能扫源码守住。
    */
-  const preferBlock = mainModelsSrc.match(/const preferOrder = \[[\s\S]*?\]/)
-  const belleAt = preferBlock ? preferBlock[0].indexOf('ggml-belle-large-v3-turbo-zh.bin') : -1
-  const smallAt = preferBlock ? preferBlock[0].indexOf('ggml-small.bin') : -1
+  const preferBlock = catalogSrc.match(/export const FALLBACK_ORDER = \[[\s\S]*?\]/)
+  const belleAt = preferBlock ? preferBlock[0].indexOf("'belle'") : -1
+  const smallAt = preferBlock ? preferBlock[0].indexOf("'small'") : -1
   check(
-    '兜底挑选按能力排：中文微调排在 small 之前',
-    belleAt >= 0 && smallAt >= 0 && belleAt < smallAt,
+    '兜底挑选按能力排：SenseVoice 在首位，中文微调排在 small 之前',
+    /export const FALLBACK_ORDER = \[\s*'sensevoice-small'/.test(catalogSrc) &&
+      belleAt >= 0 &&
+      smallAt >= 0 &&
+      belleAt < smallAt,
     '顺序错了的话，装了 Belle 的用户在「没选过模型」时还是会被塞回 small',
+  )
+  check(
+    '内置清单里 SenseVoice 排在最前',
+    /export const MODEL_CATALOG = \[\s*\{[\s\S]{0,200}?key: 'sensevoice-small'/.test(catalogSrc),
+    '默认推荐必须是清单第一项，否则模型页第一眼看到的还是旧的 whisper 档位',
+  )
+  check(
+    '两套引擎都要打进安装包',
+    /to: engine\/xbaos-engine\.exe/.test(readSource('electron-builder.yml')) &&
+      /to: engine\/xbaos-engine-asr\.exe/.test(readSource('electron-builder.yml')),
+    '少打一个的话，安装后换到另一种架构就没有引擎可用',
+  )
+  /*
+   * ---- 下载完整性（2026-11-04）
+   *
+   * 清单里每个文件都必须带真实 sha256。Hugging Face 的 LFS 对象 id 与 ModelScope 的
+   * `Sha256` 字段就是文件自身的 sha256，逐一核对过是同一个值 —— 也就是说「拿不到哈希」
+   * 从来不是事实，只是没去取。少了哈希就只能靠「魔数 + 体积」放行，
+   * 一次 CDN 的错误页（403 HTML）或截断包都会当成模型装进去，直到识别时才炸。
+   */
+  const sizedEntries = (catalogSrc.match(/^\s+size: \d+,$/gm) ?? []).length
+  const hashedEntries = (catalogSrc.match(/^\s+sha256: '[0-9a-f]{64}',$/gm) ?? []).length
+  check(
+    '清单里每个下载文件都带真实 sha256',
+    sizedEntries > 0 && sizedEntries === hashedEntries,
+    `size 条目 ${sizedEntries} 个，sha256 ${hashedEntries} 个 —— 新增文件必须一并给出哈希`,
+  )
+  /*
+   * ---- 下载源顺序（2026-11-04）
+   *
+   * urls 的顺序就是尝试顺序。huggingface.co 在国内通常拿不动，放在第一位等于
+   * 「先卡几十秒再换源」；ModelScope 与 hf-mirror 才是能跑满带宽的那条路。
+   */
+  const firstUrls = [...catalogSrc.matchAll(/urls: \[\s*\n\s*'([^']+)'/g)].map((m) => m[1])
+  check(
+    '每个文件的首选下载源都不是 huggingface.co 直连',
+    firstUrls.length === sizedEntries && firstUrls.every((u) => !/^https:\/\/huggingface\.co\//.test(u)),
+    `首选源：${firstUrls.join(' / ')}`,
+  )
+  check(
+    'SenseVoice 的首选源是国内的 ModelScope',
+    (firstUrls.find((u) => u.includes('SenseVoiceSmallOnnx')) ?? '').includes('modelscope.cn'),
+    '默认推荐的模型必须能从国内平台直接下载',
+  )
+  /*
+   * ---- 「固定单遍」口径一致（2026-11-04）
+   *
+   * SenseVoice 是贪心 CTC，多跑几遍结果一样，所以 store 里把 passes 压成 1、
+   * 界面也写了「固定单遍识别」。可「约 ×3 耗时」那个标签仍按设置里的档位算 ——
+   * 同一块区域里三句话互相矛盾，用户只会得出「这软件在瞎说」的结论。
+   */
+  const homeSrc = readSource('src/views/HomeView.vue')
+  check(
+    '不支持多遍解码的模型按单遍显示耗时',
+    /model\.caps\.decode \? preset : \{ \.\.\.preset, timeFactor: 1 \}/.test(homeSrc) &&
+      /const depth = model\.caps\.decode \? settings\.reasoningDepth : 'standard'/.test(homeSrc),
+    '说明写「固定单遍」、store 传 1，标签却按三档算耗时，三处对不上',
   )
   check(
     '「已下载但未启用」要在卡片上看得见',
@@ -4103,6 +4298,286 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '页面不再渲染 .view__head / .view__title',
     headLeftovers.length === 0,
     headLeftovers.join(','),
+  )
+
+  /*
+   * 热词同音纠正（2026-11-04）。
+   *
+   * 这套规则的每一条都是「宁漏勿错」的取舍，所以断言必须**成对**：
+   * 该改的要改，容易误伤的必须原样留着。只测前一半等于没测。
+   */
+  {
+    const homeSrc = readSource('src/views/HomeView.vue')
+    const projSrc = readSource('src/stores/project.ts')
+    /*
+     * 这条守的是两套通道的分工：提示词只有一百多字预算，超出的词**不能消失**。
+     * 界面要写明白「注入有限额、纠正用全量」，后端要真的拿全量词表去纠正。
+     */
+    check(
+      '首页讲清注入预算与全量热词后处理',
+      /PROMPT_BUDGET_CHARS/.test(homeSrc) &&
+        /超出的词仍全部参与识别后的同音纠正/.test(homeSrc) &&
+        /全量热词参与/.test(homeSrc),
+      '预算只约束注入，被截掉的词仍要在结果文本里生效',
+    )
+    check(
+      '纠正用全量热词且受开关控制',
+      /settings\.termFix\s*\?\s*collectFixTerms\(settings\.promptTerms, settings\.lexiconIds\)/.test(
+        projSrc,
+      ),
+      '若拿 buildPrompt 的 usedTerms 去纠正，超预算的词就被悄悄丢掉了',
+    )
+
+    /*
+     * 误伤回归：内置常见词表里的 3180 个词，每一个都是「本来就写对了」的文本。
+     * 拿**全量词库**（不是只塞三个手填词）去跑，任何一个被改都是 bug。
+     *
+     * 真实踩过（2026-11-04）：拼音表收了古音，「百 / 跑」都有 bo2、
+     * 「位 / 机」都有 wei4，于是「百分 → 跑分」「单位 → 单机」；
+     * 「必须 / 必需」这类两个都合法的同音词也会被改。加了常见词与歧义词
+     * 白名单后归零。这条断言是「宁可漏不可误伤」的底线，不许删。
+     */
+    const fullTerms = collectFixTerms('扫盲、贝叶斯、直播带货', LEXICONS.map((l) => l.id))
+    const fullFixer = createTermFixer(fullTerms)
+    const wrongly = COMMON_WORDS.filter((w) => fullFixer(w).hits.length > 0)
+    check('常见词在全量词库下零误伤', wrongly.length === 0, wrongly.slice(0, 8).join('、'))
+
+    const contextSamples = [
+      '我们今天登陆了网站',
+      '订金与定金不是一个意思',
+      '必须把这个权力说清楚',
+      '学位和学历不是一回事',
+    ]
+    const contextHits = contextSamples.filter((s) => fullFixer(s).hits.length > 0)
+    check('语境歧义词一律不改写', contextHits.length === 0, contextHits.join(' / '))
+
+    const basic = createTermFixer(['扫盲', '贝叶斯', '直播带货'])
+
+    const typo = basic('这期讲讲扫忙的意义')
+    check('同音错字被纠正（扫忙 → 扫盲）', typo.text === '这期讲讲扫盲的意义', typo.text)
+
+    const already = basic('这期讲讲扫盲的意义')
+    check('原文已经正确时不重复替换', already.hits.length === 0 && already.text === '这期讲讲扫盲的意义')
+
+    const semi = basic('还讲了贝叶思公式')
+    check('部分字错也能纠正（贝叶思 → 贝叶斯）', semi.text === '还讲了贝叶斯公式', semi.text)
+
+    // 反例：三个字全不一样，没有任何一个字面锚点 —— 改它没有任何依据
+    const noAnchor = basic('这期讲讲别的')
+    check('整段都不相同则不替换', noAnchor.hits.length === 0, noAnchor.text)
+
+    // 反例：声调不同。「事实」shí shí / 「实施」shí shī，改错就把原意写反
+    const toneDiff = createTermFixer(['实施'])('这是事实')
+    check(
+      '声调不同不算同音（事实 ≠ 实施）',
+      toneDiff.text === '这是事实' && toneDiff.hits.length === 0,
+      toneDiff.text,
+    )
+
+    // 反例：同一个字面上的坑 —— 「现存」xiàn cún / 「显存」xiǎn cún
+    const toneDiff2 = createTermFixer(['显存'])('现存的空间不够')
+    check('声调不同不误改（现存 ≠ 显存）', toneDiff2.text === '现存的空间不够', toneDiff2.text)
+
+    // 反例：原文片段本身就是另一个热词，不许被覆盖
+    const literal = createTermFixer(['实施', '事实'])('这是事实')
+    check('原文是另一个热词时不覆盖', literal.text === '这是事实', literal.text)
+
+    // 反例：等长才替换。长度不同意味着要增删字，时间码就对不上了
+    const lenDiff = createTermFixer(['直播带货'])('直播带祸')
+    check('四字词照常纠正', lenDiff.text === '直播带货', lenDiff.text)
+    const lenDiff2 = createTermFixer(['直播带货'])('直播带')
+    check('长度不同不替换', lenDiff2.text === '直播带' && lenDiff2.hits.length === 0, lenDiff2.text)
+
+    // 反例：不能跨标点。跨过去就等于改了另一句的开头
+    const cut = createTermFixer(['扫盲'])('扫，忙')
+    check('不跨标点匹配', cut.text === '扫，忙' && cut.hits.length === 0, cut.text)
+
+    // 单字热词不参与：一个字换掉的收益抵不上误伤面
+    const single = createTermFixer(['熵'])('这个商很重要')
+    check('单字热词不参与替换', single.text === '这个商很重要', single.text)
+
+    // 含英文 / 数字的热词没有拼音可言，直接放弃
+    const latin = createTermFixer(['GPT4'])('用的 GPD4')
+    check('非纯汉字热词不参与', latin.text === '用的 GPD4', latin.text)
+
+    // 歧义：两个不同的热词都能对上，没有任何依据二选一
+    const ambiguous = createTermFixer(['扫盲', '扫芒'])('讲讲扫忙')
+    check('歧义时原地不动', ambiguous.text === '讲讲扫忙', ambiguous.text)
+
+    // 等长是硬约束：时间码按字数不变的前提才敢动
+    const samples = ['扫忙', '贝叶思', '直播带祸', '扫盲', '随便说点什么']
+    const sameLen = samples.every((s) => {
+      const r = createTermFixer(['扫盲', '贝叶斯', '直播带货'])(s)
+      return Array.from(r.text).length === Array.from(s).length
+    })
+    check('替换前后字数完全一致', sameLen)
+
+    // 分段：只改 text，不动 origin（识别流程末尾会用 alignOrigin 统一对齐）
+    const fixed = applyTermFix([seg(0, 1, '讲讲扫忙')], ['扫盲'])
+    check(
+      '纠正只改 text，不动 origin',
+      fixed.segments[0].text === '讲讲扫盲' && fixed.segments[0].origin === '讲讲扫忙',
+      `${fixed.segments[0].text} / ${fixed.segments[0].origin}`,
+    )
+    check('纠正记录可用于提示', fixed.hits.length === 1 && fixed.hits[0].to === '扫盲')
+
+    // 没有热词时整条链路必须零改动（老用户没填热词，升级后不该有任何意外）
+    const empty = applyTermFix([seg(0, 1, '讲讲扫忙')], [])
+    check('热词为空时完全不动', empty.segments[0].text === '讲讲扫忙' && empty.hits.length === 0)
+  }
+}
+
+/* ------------------------------------------------------------ 说话人分离 */
+
+{
+  /** 只有时间与编号的说话人段，字段与引擎输出一致 */
+  const span = (start: number, end: number, speaker: number) => ({ start, end, speaker })
+
+  // 完全落在同一段里：最理想的情况，必须判对
+  const inside = assignSpeakers([seg(1, 2, '甲')], [span(0.5, 3, 0)])
+  check('落在同一段内直接归属', inside.segments[0].speaker === 0 && inside.speakers === 1)
+
+  // 跨越换人点：一句横跨两个人，按重叠时长取最长的那一边
+  const across = assignSpeakers(
+    [seg(1, 5, '甲乙')],
+    [span(0, 2, 0), span(2, 6, 1)],
+  )
+  check('跨越换人点按重叠时长取最长', across.segments[0].speaker === 1, String(across.segments[0].speaker))
+
+  /*
+   * 擦边：两个字的一条正好卡在两人之间，两边各盖一点点。
+   * 这时「谁盖得多」由噪声决定，不构成证据 —— 宁可沿用上一条。
+   */
+  const edge = assignSpeakers(
+    [seg(0, 3, '甲甲'), seg(2.8, 3.6, '乙')],
+    [span(0, 3, 0), span(3.5, 9, 1)],
+  )
+  check('覆盖比例不足时沿用上一条', edge.segments[1].speaker === 0, String(edge.segments[1].speaker))
+
+  // 首条就落空：没有任何前文可继承，留空而不是瞎猜
+  const lonely = assignSpeakers([seg(10, 11, '丙')], [span(0, 5, 0)])
+  check('首条无依据时不猜', lonely.segments[0].speaker === undefined && lonely.untouched === 1)
+
+  // 没跑分离（或分离失败返回空）：一个字都不许动
+  const none = assignSpeakers([seg(1, 2, '甲')], [])
+  check(
+    '没有分离结果时完全不动',
+    none.segments[0].speaker === undefined && none.tagged === 0 && none.untouched === 1,
+  )
+
+  // 人数按最大编号 + 1 推算：聚类编号不保证连续，不能拿段数当人数
+  const people = assignSpeakers([seg(1, 2, '甲')], [span(0, 3, 2)])
+  check('人数按最大编号推算', people.speakers === 3, String(people.speakers))
+
+  // 只写 speaker，时间码与文本一个都不许变
+  const orig = seg(1, 2, '原文')
+  const kept = assignSpeakers([orig], [span(0, 3, 0)]).segments[0]
+  check(
+    '只补标注，不动时间码与文本',
+    kept.start === 1 && kept.end === 2 && kept.text === '原文' && kept.speaker === 0,
+  )
+
+  // 单人音频：整段只有一个编号，不该被拆成多人
+  const single = assignSpeakers(
+    [seg(0, 3, '甲'), seg(3, 6, '乙'), seg(6, 9, '丙')],
+    [span(0, 3, 0), span(3, 6, 0), span(6, 9, 0)],
+  )
+  check(
+    '单人音频不会被拆成多人',
+    single.speakers === 1 && single.segments.every((s) => s.speaker === 0),
+  )
+
+  check('标签从 1 开始数', speakerLabel(0) === '说话人 1' && speakerLabel(undefined) === '')
+
+  /*
+   * 导出：默认不写说话人前缀。
+   *
+   * 这条断言守的是「默认行为不变」—— 升级之后，没开分离的老工程导出来的
+   * 文件必须和以前逐字节一样。
+   */
+  const withSpk: SubtitleSegment = { ...seg(0, 2, '第一句'), speaker: 0 }
+  const plain = serializeSrt([withSpk], {})
+  check('默认导出不带说话人前缀', !plain.includes('说话人'), plain.split('\n')[2])
+
+  const prefixed = serializeSrt([withSpk], { speakerPrefix: true })
+  check('开启后才写前缀', prefixed.includes('[说话人 1] 第一句'), prefixed.split('\n')[2])
+
+  // 双语只标首行：同一条字幕的两行不属于两个说话人
+  const bilingual: SubtitleSegment = {
+    ...seg(0, 2, '第一句'),
+    speaker: 1,
+    translations: { en: 'First line' },
+  }
+  const bi = serializeSrt([bilingual], { lang: 'both', translationLang: 'en', speakerPrefix: true })
+  check(
+    '双语音只标第一行',
+    (bi.match(/\[说话人 2\]/g) ?? []).length === 1,
+    bi.split('\n').slice(2).join(' | '),
+  )
+}
+
+/* ---- 说话人分离的接线（源码扫描） ---- */
+{
+  const readSource = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const engineSrc = readSource('engine-onnx/src/main.cpp')
+  const onnxCmake = readSource('engine-onnx/CMakeLists.txt')
+  const mainSrc = readSource('electron/main.js')
+  const projectSrc = readSource('src/stores/project.ts')
+  const settingsSrc = readSource('src/stores/settings.ts')
+
+  // 引擎侧：命令真的实现了，且 sherpa 的分离模块真的编进去了。
+  // 只写命令不打开模块，运行时会返回 "Speaker diarization is not enabled"，
+  // 而单元测试和打包都不会报错 —— 这个坑实际踩过一次。
+  check('引擎实现 diarize 命令', /cmd\s*==\s*"diarize"/.test(engineSrc))
+  check(
+    '分离模块编译开关已打开',
+    /SHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION\s+ON/.test(onnxCmake),
+    '关着的时候引擎能编过、跑起来才报 not enabled',
+  )
+
+  // 主进程：一次性进程，跑完必须退出，别留常驻。
+  check('主进程注册分离接口', /ipcMain\.handle\('engine:diarize'/.test(mainSrc))
+  check(
+    '分离进程用完即退',
+    /client\.diarize\([\s\S]{0,900}?finally\s*\{[\s\S]{0,200}?client\.stop\(\)/.test(mainSrc),
+    '分离是一次性任务，常驻会白占几十 MB',
+  )
+
+  // 渲染层：默认关闭，且分离必须排在整条流水线最后一步 ——
+  // 放前面的话，后面的标点切分与按规格折行都会重排条目，编号跟着错位。
+  check('说话人分离默认关闭', /speakerDiarization:\s*false/.test(settingsSrc))
+  const assignAt = projectSrc.indexOf('assignSpeakers(')
+  const wrapAt = projectSrc.indexOf('applyLineWrap(')
+  const fixAt = projectSrc.indexOf('applyTermFix(')
+  check(
+    '分离排在字幕后处理之后',
+    assignAt > wrapAt && assignAt > fixAt && wrapAt > 0,
+    `assign=${assignAt} wrap=${wrapAt} fix=${fixAt}`,
+  )
+
+  /*
+   * 字幕表的说话人列是「随数据出现」的：没开分离就不占宽度。
+   * 列数与格子数必须一起变 —— 表头 7 个格子配 6 条轨道（或反过来），
+   * 整张表会从「字幕文本」那一列开始错位，而且只在有说话人时才看得出来。
+   */
+  const tableSrc = readSource('src/components/SubtitleTable.vue')
+  const tracks = (sel: string): number => {
+    const at = tableSrc.indexOf(sel)
+    if (at < 0) return -1
+    const m = tableSrc.slice(at, at + 600).match(/grid-template-columns:\s*([^;]+);/)
+    if (!m) return -1
+    // minmax(0, 1fr) 里带空格和逗号，先整体折成一个记号再数，否则会被算成两列
+    return m[1].replace(/minmax\([^)]*\)/g, 'X').trim().split(/\s+/).length
+  }
+  const plainTracks = tracks('.subtable__head,\n.row {')
+  const spkTracks = tracks('.subtable__head.has-spk,\n.row.has-spk {')
+  const cells = (tableSrc.match(/v-if="hasSpeakers"/g) ?? []).length
+  check('说话人列默认不占宽度', plainTracks === 6, `轨道数 ${plainTracks}`)
+  check('有说话人时多一列', spkTracks === 7, `轨道数 ${spkTracks}`)
+  check(
+    '表头与行同时切列',
+    cells === 2,
+    `v-if="hasSpeakers" 出现 ${cells} 次，应为 2（表头 + 行）`,
   )
 }
 console.log(`\n通过 ${pass}，失败 ${fail}`)

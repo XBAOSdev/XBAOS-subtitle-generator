@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
+import { useModelStore } from '@/stores/model'
 import { useUiStore } from '@/stores/ui'
 import type { PunctuationMode } from '@/types'
 import { PAUSE_PUNCT_LABELS } from '@/utils/punctuation'
@@ -25,6 +26,7 @@ import Icon from '@/components/Icon.vue'
 import WordbookDialog from '@/components/dialogs/WordbookDialog.vue'
 
 const settings = useSettingsStore()
+const model = useModelStore()
 const ui = useUiStore()
 
 /** 词表里能解析出多少条可用规则。给个即时反馈，免得手滑写了不生效还不知道 */
@@ -33,6 +35,9 @@ const dictRuleCount = computed(() => parseReplaceDict(settings.dictReplacements)
 /** 内置词表的规模，界面上直接报数，用户不用点开也心里有数 */
 const commonWordCount = COMMON_WORDS.length
 const commonGroupCount = COMMON_WORD_GROUPS.length
+/** 显卡加速是否可用：由当前模型架构决定，见 stores/model.ts */
+const canUseGpu = computed(() => model.caps.gpu)
+
 /** 当前实际参与断句的词数：常用词库 + 勾选的领域词库 + 手填术语，去重后 */
 const activeWrapCount = computed(
   () => buildWrapWords(settings.lexiconIds, settings.promptTerms).length,
@@ -452,14 +457,19 @@ function reset(): void {
               </div>
               <div class="block__body">
                 <p class="field__label">推理后端</p>
-                <div id="field-backend" class="backend-list">
+                <div id="field-backend" class="backend-list" :class="{ 'is-off': !canUseGpu }">
                   <label
                     v-for="item in BACKEND_OPTIONS"
                     :key="item.value"
                     class="backend"
                     :class="{ 'is-active': settings.backend === item.value }"
                   >
-                    <input v-model="settings.backend" type="radio" :value="item.value" />
+                    <input
+                      v-model="settings.backend"
+                      type="radio"
+                      :value="item.value"
+                      :disabled="!canUseGpu"
+                    />
                     <span class="backend__body">
                       <span class="backend__label">
                         {{ item.label }}
@@ -474,6 +484,9 @@ function reset(): void {
                     </span>
                   </label>
                 </div>
+                <p v-if="!canUseGpu" class="hint">
+                  当前模型只支持处理器推理，换到 Whisper 模型后可选显卡加速
+                </p>
               </div>
             </section>
 
@@ -1373,6 +1386,21 @@ function reset(): void {
 
 .backend:hover {
   border-color: var(--color-border-strong);
+}
+
+/* 当前模型不支持显卡加速：整组变灰且不可点，附一行原因（见模板） */
+.backend-list.is-off .backend {
+  cursor: not-allowed;
+}
+
+.backend-list.is-off .backend:hover {
+  border-color: var(--color-border);
+}
+
+.backend-list.is-off .backend__label,
+.backend-list.is-off .backend__hint,
+.backend-list.is-off .backend__zap {
+  color: var(--color-text-tertiary);
 }
 
 .backend.is-active {

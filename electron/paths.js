@@ -14,16 +14,9 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const here = path.dirname(fileURLToPath(import.meta.url))
+import { ARCH_INFO, ARCH_WHISPER } from './model-catalog.js'
 
-/**
- * 默认优先使用的模型名。
- *
- * 注意这只是「优先挑谁」，不代表这个文件一定存在 —— 2026-10-14 起模型
- * **不随安装包分发**，装完软件磁盘上一个模型都没有，要靠 `pickInstalledModel()`
- * 在用户自己的目录里挑。
- */
-export const DEFAULT_MODEL = 'ggml-small.bin'
+const here = path.dirname(fileURLToPath(import.meta.url))
 
 /** 目录字符串归一化：非字符串与纯空白一律当「没设置」 */
 function normalizeDir(value) {
@@ -39,40 +32,40 @@ export function resolveRendererDist() {
 }
 
 /**
- * 引擎可执行文件的位置。
+ * 引擎可执行文件的位置 —— **按架构选**。
+ *
+ * 两套引擎是两个独立的 exe（whisper 用 ggml，ONNX 用 onnxruntime），
+ * 启动哪个由模型架构决定，见 models.js 的判定逻辑。
  *
  * 优先序：
- *   1. 环境变量 XBAOS_ENGINE_EXE —— 调试指定版本用
+ *   1. 环境变量（各架构一个，调试指定版本用）
  *   2. 打包态：resources/engine/
- *   3. 开发态：Vulkan 版优先，退回 CPU 版
+ *   3. 开发态：编译产物目录
  *
- * 注意 Vulkan 版不是「只能跑 GPU」——它同时包含 CPU 后端，
+ * 注意 whisper 的 Vulkan 版不是「只能跑 GPU」——它同时包含 CPU 后端，
  * 用户选 cpu 或机器没显卡时会自动走 CPU。所以能拿到 Vulkan 版就用它。
  */
-export function resolveEngineExe({ isPackaged, resourcesPath }) {
-  const fromEnv = process.env.XBAOS_ENGINE_EXE
+export function resolveEngineExe({ isPackaged, resourcesPath, arch = ARCH_WHISPER }) {
+  const info = ARCH_INFO[arch] ?? ARCH_INFO[ARCH_WHISPER]
+
+  const fromEnv = process.env[info.envVar]
   if (fromEnv && fs.existsSync(fromEnv)) {
-    return { exe: fromEnv, source: 'env' }
+    return { exe: fromEnv, source: 'env', arch: info.id }
   }
 
   if (isPackaged && resourcesPath) {
-    const packaged = path.join(resourcesPath, 'engine', 'xbaos-engine.exe')
+    const packaged = path.join(resourcesPath, 'engine', info.exe)
     if (fs.existsSync(packaged)) {
-      return { exe: packaged, source: 'packaged' }
+      return { exe: packaged, source: 'packaged', arch: info.id }
     }
   }
 
-  const candidates = [
-    path.join(repoRoot, 'engine', 'build', 'vulkan', 'bin', 'xbaos-engine.exe'),
-    path.join(repoRoot, 'engine', 'build', 'cpu', 'bin', 'xbaos-engine.exe'),
-  ]
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return { exe: candidate, source: 'dev' }
-    }
+  for (const rel of info.devExe) {
+    const full = path.join(repoRoot, ...rel.split('/'))
+    if (fs.existsSync(full)) return { exe: full, source: 'dev', arch: info.id }
   }
 
-  return { exe: '', source: 'missing' }
+  return { exe: '', source: 'missing', arch: info.id }
 }
 
 /**
@@ -126,56 +119,6 @@ export function modelSearchDirs({
   return dirs
 }
 
-/**
- * 找一个模型文件，返回命中的绝对路径。
- * @param {string} fileName
- * @returns {{path: string, dir: string, source: string} | null}
- */
-export function findModel(fileName, ctx) {
-  for (const { dir, source } of modelSearchDirs(ctx)) {
-    const full = path.join(dir, fileName)
-    if (fs.existsSync(full)) return { path: full, dir, source }
-  }
-  return null
-}
-
-/**
- * 列出所有能找到的模型文件。
- *
- * 同一个文件名只保留优先级最高的那一份 —— 否则「用户目录还有一份同样的模型」
- * 会在界面上显示成两条一模一样的记录。source 字段用来告诉用户这个模型是哪来的。
- *
- * @returns {Array<{name: string, path: string, dir: string, source: string, size: number}>}
- */
-export function listAvailableModels(ctx) {
-  const found = new Map()
-
-  for (const { dir, source } of modelSearchDirs(ctx)) {
-    let entries
-    try {
-      entries = fs.readdirSync(dir)
-    } catch {
-      continue // 目录不存在或没权限，跳过
-    }
-
-    for (const name of entries) {
-      if (!name.toLowerCase().endsWith('.bin')) continue
-      if (found.has(name)) continue // 优先级更高的目录已经给过这个文件了
-
-      const full = path.join(dir, name)
-      try {
-        const st = fs.statSync(full)
-        if (!st.isFile()) continue
-        found.set(name, { name, path: full, dir, source, size: st.size })
-      } catch {
-        /* 读不到就跳过，不要因为一个坏文件让整份列表失败 */
-      }
-    }
-  }
-
-  return [...found.values()]
-}
-
 /** 用户数据目录下的默认模型目录 */
 export function userModelsDir(userDataPath) {
   return path.join(userDataPath, 'models')
@@ -195,4 +138,25 @@ export function writableModelsDir(userDataPath, customModelsDir) {
 /** 用户数据目录下的日志文件（引擎 stderr 会镜像一份到这里，方便排查） */
 export function logFilePath(userDataPath) {
   return path.join(userDataPath, 'logs', 'engine.log')
+}
+
+/**
+ * 说话人分离模型的目录。
+ *
+ * 与识别模型彻底分开：这两个小模型（切分 + 声纹，共 33MB）随包分发，
+ * 不从模型清单下载、也不归用户目录管 —— 它们不是「可切换的识别模型」，
+ * 少一个分离就直接不可用，不该有第二条查找路径让它半残。
+ *
+ * 打包态在 `resources/diarization`（见 electron-builder.yml），开发态在仓库的
+ * `resources/diarization`。
+ */
+export function diarizationModelDir({ isPackaged, resourcesPath }) {
+  if (isPackaged && resourcesPath) return path.join(resourcesPath, 'diarization')
+  return path.join(repoRoot, 'resources', 'diarization')
+}
+
+/** 分离所需的两个模型文件，缺任何一项都视为不可用 */
+export const DIARIZATION_FILES = {
+  segmentation: 'segmentation.onnx',
+  embedding: 'speaker-embedding.onnx',
 }

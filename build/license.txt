@@ -5,10 +5,21 @@
 本软件的品牌名称、标识、界面美术与文档，其著作权及一切权利归 XBAOS 所有。
 本许可未明示授予的权利，均由 XBAOS 保留。
 
-随软件使用的语音识别模型文件由使用者自行获取，其许可由各自的权利人单独确定
-（多数采用 MIT 许可，部分中文微调版采用 Apache License 2.0），版权归其各自权
-利人所有，不属于本软件的权利范围。使用某个模型前，请以该模型随附的许可条款
-为准。
+本软件支持两套语音识别架构（whisper.cpp 与 sherpa-onnx），可换用 Whisper、
+Belle 中文微调版、SenseVoice 等多种模型。模型文件不随本软件分发，由使用者自行
+获取，其许可由各自的权利人单独确定。
+
+  - Whisper 官方权重采用 MIT 许可。
+  - Belle-whisper-large-v3-turbo-zh 采用 Apache License 2.0。
+  - SenseVoice-Small 采用 FunASR Model License 1.1：允许免费商用，但要求署名
+    并保留模型名称。
+
+上述模型的版权归其各自权利人所有，不属于本软件的权利范围。使用某个模型前，
+请以该模型随附的许可条款为准。
+
+说话人分离所用的两个小模型（pyannote 切分模型、3D-Speaker CAM++ 声纹模型）随本
+软件分发，分别采用 MIT 与 Apache License 2.0，版权归 CNRS 与阿里巴巴通义实验室，
+本软件保持文件原样、不作修改。原文见安装目录下的 licenses 文件夹。
 
 二、开源许可
 本软件的源代码依照 Apache License 2.0（https://www.apache.org/licenses/LICENSE-2.0）

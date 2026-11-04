@@ -29,9 +29,12 @@ import {
 } from '@/utils/llmResult'
 import { validateSegment, countIssues } from '@/utils/validate'
 import { alignOrigin, enforceMonotonicCues, hasText, segmentsSignature } from '@/utils/segmentOps'
+import { applyTermFix, collectFixTerms } from '@/utils/termFix'
+import { assignSpeakers } from '@/utils/speaker'
 import { MAX_LANES, overflowLaneIds } from '@/utils/timelineLayout'
 import { useUiStore } from '@/stores/ui'
 import { useSettingsStore } from '@/stores/settings'
+import { useModelStore } from '@/stores/model'
 import { useHistoryStore } from '@/stores/history'
 
 /**
@@ -1029,6 +1032,7 @@ const MIME_BY_EXT: Record<string, string> = {
     const ui = useUiStore()
     const settings = useSettingsStore()
     const history = useHistoryStore()
+    const model = useModelStore()
 
     // 浏览器预览：没有桥就走旧的模拟进度，演示数据里已备好「结果」
     if (!window.xbaos) {
@@ -1087,7 +1091,12 @@ const MIME_BY_EXT: Record<string, string> = {
     const engine = window.xbaos.engine
     const language = settings.autoDetectLanguage ? 'auto' : settings.language
     const preset = depthPreset(settings.reasoningDepth)
-    const passes = preset.passes
+    /*
+     * 多遍只对「能改解码参数」的引擎有意义：贪心 CTC 每遍结果完全一致，
+     * 跑三遍等于把耗时翻三倍、结果一个字不差。所以按架构能力把遍数压到 1
+     * —— 界面上那一栏此时也是灰的，两边结论必须一致。
+     */
+    const passes = model.caps.decode ? preset.passes : 1
     const terms = settings.promptTerms.trim()
     const threads = threadCount()
 
@@ -1293,8 +1302,23 @@ const MIME_BY_EXT: Record<string, string> = {
         // 不夹的话用户会看到「相邻两条字幕重叠，上一条结束时间偏长」。
         const monotonic = enforceMonotonicCues(chosen.segments)
 
+        /*
+         * ---- 按热词做同音纠正 ----
+         *
+         * 放在标点后处理**之前**：这时文本还是识别原始句，上下文最完整，
+         * 而标点处理会按标点把长句拆成多条，拆完再改容易让一个词跨两条。
+         * 替换严格等长，所以这一步不会动任何时间码。
+         *
+         * 与提示词是两条独立通道：提示词受预算限制、且只对 whisper 有效；
+         * 这里用全量热词，SenseVoice 这类不支持提示词的模型同样生效。
+         */
+        const fixTerms = settings.termFix
+          ? collectFixTerms(settings.promptTerms, settings.lexiconIds)
+          : []
+        const termFixed = applyTermFix(monotonic, fixTerms)
+
         // ---- 标点后处理：识别结果进入编辑器之前完成 ----
-        const processed = applyPunctuation(monotonic, settings.punctuation)
+        const processed = applyPunctuation(termFixed.segments, settings.punctuation)
 
         // 只保留有实际内容的条目。模型在纯静音上偶尔会吐出一个孤零零的句号，
         // 留着会让整段识别看起来像「什么都没识别出来」
@@ -1318,7 +1342,50 @@ const MIME_BY_EXT: Record<string, string> = {
          * 折行）都会改写 text 却不同步 origin，若不在这里对齐一次，识别一完成
          * 就有一批条目顶着「已改动」的小圆点 —— 那个圆点本该只表示人改过。
          */
-        const baseline = alignOrigin(wrapped.segments)
+        let baseline = alignOrigin(wrapped.segments)
+
+        /*
+         * ---- 说话人分离 ----
+         *
+         * 放在整条流水线的**最后**：它既不读文本也不改文本，只按音色给每个条目
+         * 补一个编号。放前面的话，后面按标点切分、按规格折行都会重排条目，
+         * 编号就跟着错位了。
+         *
+         * 失败不算识别失败 —— 字幕已经拿到了，少一个标签不是硬伤。提示一句
+         * 让用户知道这次没有分离结果，但不要因此把整段识别标成失败。
+         */
+        if (settings.speakerDiarization && !cancelRequested && !file.demo && file.path) {
+          const owner = `diarize:${file.id}`
+          ui.beginTask(owner, '分析说话人')
+          const offProgress = window.xbaos?.engine.onDiarizeProgress?.(({ percent }) => {
+            ui.updateTask(owner, percent, '分析说话人')
+          })
+          try {
+            const diar = await engine.diarize({
+              audio: file.path,
+              numSpeakers: settings.speakerCount > 0 ? settings.speakerCount : undefined,
+              threads,
+            })
+            const assigned = assignSpeakers(baseline, diar.spans)
+            baseline = assigned.segments
+            if (assigned.speakers > 1) {
+              ui.notify(
+                'info',
+                '说话人分析完成',
+                `${file.name}：${assigned.speakers} 位说话人，${assigned.tagged} 条已标注`,
+              )
+            }
+          } catch (err) {
+            ui.notify(
+              'warning',
+              '说话人分析未完成',
+              `${file.name}：${err instanceof Error ? err.message : String(err)}`,
+            )
+          } finally {
+            offProgress?.()
+            ui.endTask(owner)
+          }
+        }
 
         // 用历史提交的方式写入，识别结果本身也可以整体撤销
         history.commit(file.id, file.segments, '识别结果', () => {
@@ -1327,6 +1394,24 @@ const MIME_BY_EXT: Record<string, string> = {
           file.status = 'pending'
           file.message = undefined
         })
+
+        if (termFixed.hits.length > 0) {
+          // 只报前几组：几十处全列出来没人看，但「改了哪些词」必须能一眼看到
+          const grouped = new Map<string, number>()
+          for (const hit of termFixed.hits) {
+            const key = `${hit.from} → ${hit.to}`
+            grouped.set(key, (grouped.get(key) ?? 0) + 1)
+          }
+          const top = [...grouped.entries()]
+            .slice(0, 3)
+            .map(([key, count]) => (count > 1 ? `${key}（${count}）` : key))
+          const more = grouped.size > 3 ? ` 等 ${grouped.size} 组` : ''
+          ui.notify(
+            'info',
+            '已按热词纠正同音字',
+            `${file.name}：${termFixed.hits.length} 处，${top.join('、')}${more}`,
+          )
+        }
 
         if (processed.splitCount > 0 || processed.strippedCount > 0) {
           const parts: string[] = []

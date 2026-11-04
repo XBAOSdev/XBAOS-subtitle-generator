@@ -38,10 +38,15 @@ export interface SettingsSnapshot {
   /** 推理后端 */
   backend: InferenceBackend
   /**
-   * 识别用的模型文件名（如 ggml-base.bin）。空串表示让主进程自己挑一个。
-   * 模型管理页「切换使用」写入；识别时随请求传给主进程解析。
-   * 「使用中」的判定以主进程 `models:resolve` 的返回为准，不要拿这个字段自己比 ——
-   * 用户可能从软件外部删掉文件，这个字段不会跟着变。
+   * 识别用的模型**标识**：文件型是文件名（ggml-base.bin），目录型是目录名
+   * （sensevoice-small）。空串表示让主进程按兜底顺序自己挑一个。
+   *
+   * 字段沿用旧名字是为了不丢老用户的既有选择 —— 取值空间本来就是「一个字符串」，
+   * 改名的收益抵不上迁移风险。架构不在这里记：那要读模型内容，由主进程判定
+   * 并记住（见 electron/models.js）。
+   *
+   * 「使用中」的判定同样以主进程 `models:active` 的返回为准，不要拿这个字段
+   * 自己比 —— 用户可能从软件外部删掉文件，这个字段不会跟着变。
    */
   modelFile: string
   /** 识别语言，zh 表示简体中文 */
@@ -50,6 +55,33 @@ export interface SettingsSnapshot {
   autoDetectLanguage: boolean
   /** 热词提示，逗号或换行分隔 */
   promptTerms: string
+  /**
+   * 识别完成后按热词做同音纠正（见 utils/termFix.ts）。
+   *
+   * 与提示词是两条独立通道：提示词有 200 多 token 的预算、且只对 whisper 有效；
+   * 这一步在结果文本上跑，全量热词参与，两套架构都能用。
+   * 只在「字数相同、读音一致、至少一个字面相同」时才动，且热词为空时完全不生效。
+   */
+  termFix: boolean
+  /**
+   * 说话人分离：识别完成后按音色判断「谁在什么时候说话」，给每条字幕打上说话人编号。
+   *
+   * 默认**关**。它与识别是两条独立流水线（同一份音频、两个随包小模型），
+   * 开不开都不影响字幕本身，但会让每次识别多花约 8% 的时间，属于「需要的人
+   * 才要」的能力，不该默认塞给所有人。
+   *
+   * 与识别模型架构无关：whisper 与 SenseVoice 识别的结果，用的是同一份分离结果。
+   */
+  speakerDiarization: boolean
+  /**
+   * 已知的说话人数。0 = 自动判断。
+   *
+   * 自动判断靠聚类阈值猜，人多了容易拆多、人少了容易合并；知道人数时直接填
+   * 会让结果稳得多，所以把它做成设置项而不是藏起来。
+   */
+  speakerCount: number
+  /** 导出字幕时给每条加上「说话人 N」前缀（默认不加，避免污染原始文本） */
+  speakerPrefix: boolean
   /**
    * 勾选的内置词库 id。与热词提示一起拼成提示词注入引擎，
    * 拼装规则见 utils/prompt.ts（优先级：热词 > 风格句 > 精选词 > 核心词 > 扩展词）
@@ -181,6 +213,14 @@ export const DEFAULT_SETTINGS: SettingsSnapshot = {
   language: 'zh',
   autoDetectLanguage: false,
   promptTerms: '',
+  // 默认开：热词为空时它完全不生效，填了热词才动手；误改可整份 Ctrl+Z 撤回
+  termFix: true,
+  // 默认关：分离是可选能力，多花约 8% 的识别时间，不该默认塞给所有人
+  speakerDiarization: false,
+  /** 0 = 自动判断人数（阈值 0.7）；填了人数就按它聚类 */
+  speakerCount: 0,
+  /** 默认不写前缀：字幕文本要保持干净，需要的人自己开 */
+  speakerPrefix: false,
   lexiconIds: [],
   // 默认增强档：多跑两遍换来的准确率提升对交付质量更关键，标准档仍可选
   reasoningDepth: 'enhanced',
@@ -281,6 +321,10 @@ export const useSettingsStore = defineStore('settings', () => {
   const language = ref(initial.language)
   const autoDetectLanguage = ref(initial.autoDetectLanguage)
   const promptTerms = ref(initial.promptTerms)
+  const termFix = ref(initial.termFix)
+  const speakerDiarization = ref(initial.speakerDiarization)
+  const speakerCount = ref(initial.speakerCount)
+  const speakerPrefix = ref(initial.speakerPrefix)
   const lexiconIds = ref<string[]>([...initial.lexiconIds])
   const reasoningDepth = ref<ReasoningDepth>(initial.reasoningDepth)
   const vadEnabled = ref(initial.vadEnabled)
@@ -324,6 +368,10 @@ export const useSettingsStore = defineStore('settings', () => {
       language: language.value,
       autoDetectLanguage: autoDetectLanguage.value,
       promptTerms: promptTerms.value,
+      termFix: termFix.value,
+      speakerDiarization: speakerDiarization.value,
+      speakerCount: speakerCount.value,
+      speakerPrefix: speakerPrefix.value,
       lexiconIds: [...lexiconIds.value],
       reasoningDepth: reasoningDepth.value,
       vadEnabled: vadEnabled.value,
@@ -433,6 +481,10 @@ export const useSettingsStore = defineStore('settings', () => {
     language.value = d.language
     autoDetectLanguage.value = d.autoDetectLanguage
     promptTerms.value = d.promptTerms
+    termFix.value = d.termFix
+    speakerDiarization.value = d.speakerDiarization
+    speakerCount.value = d.speakerCount
+    speakerPrefix.value = d.speakerPrefix
     lexiconIds.value = [...d.lexiconIds]
     reasoningDepth.value = d.reasoningDepth
     vadEnabled.value = d.vadEnabled
@@ -476,6 +528,10 @@ export const useSettingsStore = defineStore('settings', () => {
     language,
     autoDetectLanguage,
     promptTerms,
+    termFix,
+    speakerDiarization,
+    speakerCount,
+    speakerPrefix,
     lexiconIds,
     reasoningDepth,
     vadEnabled,

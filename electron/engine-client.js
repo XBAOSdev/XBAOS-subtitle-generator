@@ -131,12 +131,40 @@ export class EngineClient extends EventEmitter {
     }
   }
 
+  /**
+   * 切换到另一个引擎可执行文件（换架构时用）。
+   *
+   * 可执行文件只在 spawn 那一刻生效，运行中的进程改不了自己 —— 所以有进程
+   * 在跑时必须先停掉。模型也随之卸载，调用方要负责重新 load。
+   */
+  async setExe(exe) {
+    const next = typeof exe === 'string' ? exe : ''
+    if (this.#exe === next) return
+    const wasRunning = this.running
+    this.#exe = next
+    this.modelLoaded = false
+    this.loadedModel = ''
+    this.backend = 'unknown'
+    if (wasRunning) {
+      this.emit('log', 'info', '切换识别引擎，重启进程')
+      await this.stop()
+    }
+  }
+
   get running() {
     return this.#proc !== null && this.#proc.exitCode === null && !this.#proc.killed
   }
 
   /** 引擎是否已经加载了模型（由 ping / load / unload 的结果推断） */
   modelLoaded = false
+  /**
+   * 已加载模型的路径。
+   *
+   * `modelLoaded` 只回答「有没有加载过」，回答不了「加载的是哪一个」——
+   * 同一架构内换模型（small → Belle）不会重启进程，只看布尔值就会跳过
+   * 重新加载，用旧模型跑完还显示新模型的名字。所以两者要一起看。
+   */
+  loadedModel = ''
   /** 当前实际生效的后端，'cpu' | 'vulkan' | 'unknown' */
   backend = 'unknown'
 
@@ -150,6 +178,7 @@ export class EngineClient extends EventEmitter {
     if (this.running) return this
     if (this.#starting) return this.#starting
     if (this.#disposed) throw new Error('引擎客户端已关闭')
+    if (!this.#exe) throw new Error('引擎可执行文件未指定')
 
     const starting = new Promise((resolve, reject) => {
       let proc
@@ -240,6 +269,7 @@ export class EngineClient extends EventEmitter {
     }
 
     this.modelLoaded = false
+    this.loadedModel = ''
     this.backend = 'unknown'
     this.emit('exit', { code, signal, crashed })
   }
@@ -416,12 +446,17 @@ export class EngineClient extends EventEmitter {
   }
 
   load({ model, backend = 'auto' }) {
-    return this.request('load', { model, backend })
+    return this.request('load', { model, backend }).then((res) => {
+      // 记下加载的是哪一个：换模型不换进程时，调用方靠它判断要不要重新加载
+      this.loadedModel = model
+      return res
+    })
   }
 
   unload() {
     return this.request('unload').finally(() => {
       this.modelLoaded = false
+      this.loadedModel = ''
     })
   }
 
@@ -450,6 +485,32 @@ export class EngineClient extends EventEmitter {
     if (Array.isArray(opts.ranges) && opts.ranges.length > 0) payload.ranges = opts.ranges
 
     return this.request('transcribe', payload, { onEvent })
+  }
+
+  /**
+   * 说话人分离：切出「谁在什么时候说话」。
+   *
+   * 只认 ONNX 引擎（whisper 引擎没有这个命令）。与识别互不影响 ——
+   * 分离读的是同一份音频与两个独立小模型，跟当前识别的是 whisper 还是
+   * SenseVoice 无关，所以两套架构都能用同一份分离结果。
+   *
+   * @param {{audio: string, segModel: string, embedModel: string,
+   *          numSpeakers?: number, threshold?: number, threads?: number}} opts
+   * @param {(msg: object) => void} [onEvent]
+   */
+  diarize(opts, onEvent) {
+    const payload = {
+      audio: opts.audio,
+      segModel: opts.segModel,
+      embedModel: opts.embedModel,
+    }
+    if (typeof opts.numSpeakers === 'number' && opts.numSpeakers > 0) {
+      payload.numSpeakers = opts.numSpeakers
+    }
+    if (typeof opts.threshold === 'number') payload.threshold = opts.threshold
+    if (opts.threads) payload.threads = opts.threads
+
+    return this.request('diarize', payload, { onEvent })
   }
 
   /** 取消不影响后续请求 —— 引擎处理完 abort 后还能继续用 */

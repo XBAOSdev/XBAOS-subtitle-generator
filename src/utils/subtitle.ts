@@ -11,6 +11,7 @@ import type {
   SubtitleSegment,
   SubtitleFormat,
 } from '@/types'
+import { speakerLabel } from '@/utils/speaker'
 
 function pad(n: number, len = 2): string {
   return String(Math.floor(n)).padStart(len, '0')
@@ -64,6 +65,14 @@ export interface SerializeOptions {
    * 译文在下（观众视线先落在母语上）。
    */
   sourceFirst?: boolean
+  /**
+   * 在每条字幕开头加 `[说话人 N]` 标记。默认不加。
+   *
+   * 默认不加是有意的：说话人编号只对做后期的人有意义，加到成片字幕里就是
+   * 噪声。需要它的人（比如交给剪辑师对齐音轨）自己勾。
+   * 双语时只加在**第一行**，不在两种语言上各加一遍。
+   */
+  speakerPrefix?: boolean
 }
 
 /** 导出时的一条字幕：文本已按语言维度合好 */
@@ -130,6 +139,10 @@ export function composeForExport(
     }
 
     if (text.trim() === '') continue
+    // 说话人标记只加在首行：双语时两行属于同一条字幕，重复标注没有意义
+    if (opts.speakerPrefix && typeof seg.speaker === 'number') {
+      text = `[${speakerLabel(seg.speaker)}] ${text}`
+    }
     lines.push({ start: seg.start, end: seg.end, text })
   }
 
