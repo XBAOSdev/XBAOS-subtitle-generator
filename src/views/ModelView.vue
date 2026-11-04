@@ -40,7 +40,7 @@ const MODELS: ModelItem[] = [
     sizeLabel: '约 480MB',
     quality: '可用',
     license: 'MIT',
-    note: '推荐。体积与准确度较平衡，首次使用建议先装这个',
+    note: '入门档。体积小、速度快，中文同音字容易听错',
   },
   {
     key: 'base',
@@ -67,7 +67,7 @@ const MODELS: ModelItem[] = [
     sizeLabel: '约 1.6GB',
     quality: '最佳',
     license: 'Apache-2.0',
-    note: '中文语料微调，中文口播与访谈首选',
+    note: '中文语料微调，同音字与专有名词明显更准。体积大，识别比 small 慢',
   },
 ]
 
@@ -327,6 +327,8 @@ function goModelsDirSetting(): void {
             <div class="model__title-row">
               <h2 class="model__name">{{ item.name }}</h2>
               <span v-if="activeKeyOf(item)" class="tag tag--ok">使用中</span>
+              <!-- 「装着但没在用」必须看得见：这是最容易发生的误解 -->
+              <span v-else-if="isDownloaded(item)" class="tag tag--idle">未启用</span>
               <span v-if="downloading === item.key" class="tag">下载中</span>
             </div>
             <p class="model__note">{{ item.note }}</p>
@@ -635,6 +637,13 @@ function goModelsDirSetting(): void {
 .tag--ok {
   background: var(--color-success-subtle);
   color: var(--color-success);
+}
+
+/* 「装着但没在用」：需要被看见，但不能抢「使用中」的视觉权重 */
+.tag--idle {
+  background: var(--color-bg-raised);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  color: var(--color-text-tertiary);
 }
 
 .model__note {

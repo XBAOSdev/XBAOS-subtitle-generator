@@ -3646,6 +3646,8 @@ const scenarios = {
           return {
             name: nameEl ? nameEl.textContent.trim() : '',
             active: !!el.querySelector('.tag--ok'),
+            // 「已下载但未启用」的标识：这正是「下了 1.6GB 却一直在用 small」的可见化
+            idle: !!el.querySelector('.tag--idle'),
           }
         })
         const currentEl = document.querySelector('.own__current')
@@ -3744,6 +3746,61 @@ const scenarios = {
       await goto(cdp, BASE + '/?theme=light')
       const second = await modelPage()
       check('提醒过一次后不再反复拦人', second.title === '导入音频', second.title)
+
+      // ---- 4) 下载了更好的中文模型却没启用：卡片上必须能看出来
+      const smallFile = '/probe/models/ggml-small.bin'
+      const belleFile = '/probe/models/ggml-belle-large-v3-turbo-zh.bin'
+      const bothModels = () => [
+        { name: 'ggml-small.bin', path: smallFile, dir: '/probe/models', source: 'user', size: 480 * 1024 * 1024 },
+        {
+          name: 'ggml-belle-large-v3-turbo-zh.bin',
+          path: belleFile,
+          dir: '/probe/models',
+          source: 'user',
+          size: 1600 * 1024 * 1024,
+        },
+      ]
+
+      await stub(bothModels(), { name: 'ggml-small.bin', path: smallFile, source: 'user' })
+      await seedSettings({ modelFile: 'ggml-small.bin' })
+      await goto(cdp, BASE + '/?theme=light&view=models')
+      await waitFor(cdp, `!!document.querySelector('.own__current')`, 10_000)
+
+      const idlePage = await modelPage()
+      check(
+        '更好的模型已下载但没在用：卡片标出「未启用」',
+        idlePage.builtins.some((b) => b.name.includes('Belle') && b.idle),
+        JSON.stringify(idlePage.builtins),
+      )
+      /*
+       * 反向断言：顶部那条劝导提示条是**明确删掉**的。
+       *
+       * 它一开始是用来解决「下了 1.6GB 却没启用」的，但用户看过之后认为太吵、
+       * 要求去掉 —— 改成靠卡片上的「未启用」标签表达就够了。加这条是为了防止
+       * 以后有人「好心」把它加回来。
+       */
+      check(
+        '不再用顶部提示条劝导（用户明确要求删掉）',
+        (await cdp.evaluate(`document.querySelectorAll('.notice--action').length`)) === 0,
+        '提示条又出现了',
+      )
+
+      // 切换仍然走卡片右上角的按钮
+      await cdp.evaluate(`(() => {
+        const secs = [...document.querySelectorAll('.model')]
+        const belle = secs.find((el) => el.textContent.includes('Belle-whisper'))
+        if (!belle) return false
+        const btn = [...belle.querySelectorAll('button')].find((b) => b.textContent.trim() === '切换使用')
+        if (btn) btn.click()
+        return !!btn
+      })()`)
+      await sleep(400)
+      const switched = await modelPage()
+      check(
+        '「未启用」的模型可以从卡片上的按钮切过去',
+        switched.activeBuiltin.includes('Belle-whisper-large-v3-turbo-zh'),
+        JSON.stringify(switched.activeBuiltin),
+      )
     } finally {
       if (injectedId) {
         await cdp

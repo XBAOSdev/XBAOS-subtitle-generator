@@ -167,7 +167,23 @@ function pickInstalledModel() {
   const installed = listAvailableModels(modelCtx())
   if (installed.length === 0) return null
 
-  const preferOrder = ['ggml-small.bin', 'ggml-base.bin', 'ggml-large-v3-turbo.bin']
+  /*
+   * 顺序按**能力**排，不按体积、更不按字母序。
+   *
+   * 曾经是 `small → base → turbo`，结果磁盘上装着 1.6GB 的 Belle 中文微调时
+   * 也会被跳过 —— 用户下了更好的模型、却因为这一行永远用着 244M 的 small，
+   * 这跟「下了没用」没有区别。Belle 是中文语料微调的 large-v3-turbo，
+   * 中文同音字与专有名词明显更准，所以排第一。
+   *
+   * 只在「用户从未选过模型」（modelFile 为空）时生效；用户显式选过谁就用谁。
+   * 代价是首次会慢一些，但「默认更准」比「默认更快」更符合这里的用途。
+   */
+  const preferOrder = [
+    'ggml-belle-large-v3-turbo-zh.bin',
+    'ggml-large-v3-turbo.bin',
+    'ggml-small.bin',
+    'ggml-base.bin',
+  ]
   for (const name of preferOrder) {
     const hit = installed.find((m) => m.name === name)
     if (hit) return hit
