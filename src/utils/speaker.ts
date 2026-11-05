@@ -108,6 +108,135 @@ export function defaultSpeakerName(index: number): string {
   return `讲话人 ${index + 1}`
 }
 
+/**
+ * 这个称呼是不是**用户自己起的**（能不能拿来做跨文件推断的证据）。
+ *
+ * 只有用户起的名字才算证据：「讲话人 1」是系统给的，A 文件的「讲话人 1」
+ * 与 B 文件的「讲话人 1」未必是同一个人 —— 拿它当依据就是把两个陌生人
+ * 绑成一个人（这正是「所有文件共用一套称呼」的老毛病）。
+ */
+export function isUserSpeakerName(index: number, name: string | undefined): boolean {
+  const trimmed = name?.trim() ?? ''
+  return trimmed !== '' && trimmed !== defaultSpeakerName(index)
+}
+
+/** 全局讲话人（跨文件的「同一个人」） */
+export interface GlobalSpeaker {
+  /** 用户定的统一称呼；空串表示「用兜底称呼」 */
+  name: string
+  /** 兜底称呼：建这一位时它在源文件里的默认称呼 */
+  fallback: string
+}
+
+/** 参与推断的一个文件 */
+export interface SpeakerFileInput {
+  id: string
+  /** 该文件里出现过的讲话人编号 */
+  indexes: number[]
+  /** 该文件里用户手动改过的称呼：编号 → 称呼 */
+  names: Record<string, string>
+}
+
+export interface SpeakerMappingPlan {
+  /** fileId → 局部编号 → 全局编号 */
+  mapping: Record<string, Record<string, number>>
+  /** 全局讲话人表，下标即全局编号 */
+  globals: GlobalSpeaker[]
+}
+
+/**
+ * 推断跨文件的讲话人对应关系。
+ *
+ * 依据只有一条：**同名即同一人**。而且只认用户自己起的名字 ——
+ * 系统给的「讲话人 N」在每个文件里都叫这个数，拿它当依据会把两个陌生人
+ * 绑成一个人（这正是「所有文件共用一套称呼」的老毛病）。
+ *
+ * 认不出名字的，各算各的：每个文件的每一个编号都单独开一位全局讲话人。
+ * 宁可多开几位让人去合，也不要替用户做「这两个肯定是同一个人」的判断。
+ */
+export function planSpeakerMapping(files: SpeakerFileInput[]): SpeakerMappingPlan {
+  const mapping: Record<string, Record<string, number>> = {}
+  const globals: GlobalSpeaker[] = []
+  /** 称呼 → 全局编号 */
+  const byName = new Map<string, number>()
+
+  // 先把「有证据的」定下来：同名归成一位
+  for (const file of files) {
+    for (const index of file.indexes) {
+      if (!isUserSpeakerName(index, file.names[String(index)])) continue
+      const name = file.names[String(index)].trim()
+      if (byName.has(name)) continue
+      const g = globals.length
+      globals.push({ name, fallback: defaultSpeakerName(index) })
+      byName.set(name, g)
+    }
+  }
+
+  // 再把每个文件的每个编号都落到某一位上
+  for (const file of files) {
+    const map: Record<string, number> = {}
+    for (const index of file.indexes) {
+      const raw = file.names[String(index)]
+      let g: number | undefined
+      if (isUserSpeakerName(index, raw)) {
+        g = byName.get(raw!.trim())
+      }
+      if (g === undefined) {
+        // 认不出是谁的：单独开一位，别乱绑
+        g = globals.length
+        globals.push({ name: '', fallback: defaultSpeakerName(index) })
+      }
+      map[String(index)] = g
+    }
+    mapping[file.id] = map
+  }
+
+  return { mapping, globals }
+}
+
+/** 试听片段至少要这么长（秒）——太短听不出是谁 */
+export const MIN_SAMPLE_SEC = 3
+
+/**
+ * 给某位讲话人挑一段可试听的音频。
+ *
+ * 单条字幕不够长就顺着往下攒（中间断开的就不接了），凑够 3 秒为止。
+ * 还是不够就把区间撑到 3 秒：多出来的那截可能是别人的声音，
+ * 但「听不出是谁」比「多听了别人两句话」更糟。
+ */
+export function pickSampleRange(
+  segments: { start: number; end: number }[],
+  durationSec = 0,
+): { start: number; end: number } | null {
+  if (segments.length === 0) return null
+  const sorted = [...segments].sort((a, b) => a.start - b.start)
+
+  // 先看有没有单条就够长的
+  let longest = sorted[0]
+  for (const seg of sorted) {
+    if (seg.end - seg.start > longest.end - longest.start) longest = seg
+  }
+  if (longest.end - longest.start >= MIN_SAMPLE_SEC) {
+    return { start: longest.start, end: longest.end }
+  }
+
+  // 不够长：顺着连续的条目攒
+  let start = sorted[0].start
+  let end = sorted[0].end
+  for (const seg of sorted) {
+    if (seg.start - end > 0.6) break // 中间断开了，接不上
+    if (seg.end > end) end = seg.end
+    if (end - start >= MIN_SAMPLE_SEC) break
+  }
+
+  // 还是不到 3 秒：把区间撑到 3 秒（不超过音频总长）
+  if (end - start < MIN_SAMPLE_SEC) {
+    const limit = durationSec > 0 ? durationSec : end + MIN_SAMPLE_SEC
+    end = Math.min(limit, Math.max(end, start + MIN_SAMPLE_SEC))
+  }
+  return { start, end }
+}
+
 /** 导出用的称呼（没人改过时退回默认） */
 export function speakerName(
   index: number | undefined,

@@ -30,6 +30,7 @@ withDefaults(
     aria-hidden="true"
     focusable="false"
     class="icon"
+    :class="{ 'icon--spin': name === 'spinner' }"
   >
     <!-- 导入 / 添加文件 -->
     <template v-if="name === 'import'">
@@ -363,5 +364,23 @@ withDefaults(
 .icon {
   display: block;
   flex: none;
+}
+
+/*
+ * spinner 自带旋转。
+ *
+ * 之前每个用到它的地方都要自己再写一遍 animation，于是「文件正在处理」
+ * 那个角标漏掉了两处（导入页的素材方块、编辑器的文件树），图标静止不动，
+ * 用户完全看不出在跑。旋转属于这个图标的语义，就放在图标自己身上。
+ */
+.icon--spin {
+  transform-origin: 50% 50%;
+  animation: icon-spin 900ms linear infinite;
+}
+
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>

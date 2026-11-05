@@ -2177,6 +2177,315 @@ const scenarios = {
     check('删除讲话人可以撤销', JSON.stringify(undone) === '[1,0,0]', JSON.stringify(undone))
   },
 
+  async 'speaker-map'(cdp) {
+    /*
+     * 跨文件讲话人对应关系表。
+     *
+     * 要验的是三件事：
+     *  ① 编号不再被当成身份 —— A 文件的 1 号与 B 文件的 1 号默认不是同一个人；
+     *  ② 同名才认定为同一个人；
+     *  ③ 第一次勾「共用」要先弹窗确认，确认之后侧栏与导出都用统一称呼。
+     */
+
+    const store = (body) =>
+      cdp.evaluate(`(() => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        const settings = pinia.get('settings')
+        const speakers = pinia.get('speakers')
+        ${body}
+      })()`)
+
+    const centerOf = (js) =>
+      cdp.evaluate(`(() => {
+        const el = ${js}
+        if (!el) return null
+        el.scrollIntoView({ block: 'center' })
+        const r = el.getBoundingClientRect()
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      })()`)
+
+    await goto(cdp, BASE + '/?demo=1&view=editor')
+    await sleep(400)
+
+    /*
+     * 两个文件，各两位讲话人。
+     * A：0 号叫「小包」（用户起的），1 号没起名
+     * B：0 号也叫「小包」，1 号没起名
+     * 按规则：两个「小包」是同一个人；两个没起名的「1 号」各算各的。
+     */
+    const seed = await store(`
+      // 浏览器 profile 的 localStorage 会留到下次运行：先把共用开关复位，
+      // 否则这个场景的起点取决于上一个场景跑到哪了
+      settings.speakerNamesShared = false
+      const list = project.files.filter((f) => f.status !== 'unsupported').slice(0, 2)
+      const mk = (id, start, end, text, speaker) => ({ id, start, end, text, origin: text, issues: [], speaker })
+      list[0].segments = [
+        mk('a1', 0, 4, 'A 的第一句', 0),
+        mk('a2', 4, 8, 'A 的第二句', 1),
+      ]
+      list[1].segments = [
+        mk('b1', 0, 4, 'B 的第一句', 0),
+        mk('b2', 4, 8, 'B 的第二句', 1),
+      ]
+      list[0].durationSec = 8
+      list[1].durationSec = 8
+      speakers.rename(list[0].id, 0, '小包')
+      speakers.rename(list[1].id, 0, '小包')
+      project.activeFileId = list[0].id
+      return [list[0].id, list[1].id, JSON.parse(JSON.stringify(speakers.byFile))]
+    `)
+    check('注入两个带讲话人的文件', Array.isArray(seed) && seed.length === 3, JSON.stringify(seed))
+    check(
+      '用户起的名字真的记进了这两个文件的称呼表',
+      seed?.[2]?.[seed[0]]?.['0'] === '小包' && seed?.[2]?.[seed[1]]?.['0'] === '小包',
+      JSON.stringify(seed?.[2]),
+    )
+    await sleep(300)
+
+    // ---- 第一次勾「共用」要弹窗 ----
+    const box = await centerOf(`document.querySelector('.speakers__share-check input')`)
+    check('侧栏有「共用同一套称呼」开关', Boolean(box), JSON.stringify(box))
+    await cdp.click(box.x, box.y)
+    await sleep(400)
+
+    const opened = await cdp.evaluate(`(() => {
+      const panel = document.querySelector('.spkmap')
+      if (!panel) return null
+      const rows = [...panel.querySelectorAll('.spkmap__row')]
+      return {
+        heads: [...panel.querySelectorAll('.spkmap__file')].map((h) => h.textContent.trim()),
+        rowCount: rows.length,
+        cells: rows.map((r) => [...r.querySelectorAll('.spkmap__chip-name')].map((c) => c.textContent.trim())),
+        names: rows.map((r) => r.querySelector('.spkmap__input')?.value ?? ''),
+        placeholders: rows.map((r) => r.querySelector('.spkmap__input')?.placeholder ?? null),
+      }
+    })()`)
+    check('勾上之后弹出对应关系表', Boolean(opened), JSON.stringify(opened))
+    const dump = await store(`
+      // store 里的是 Vue 的响应式代理，CDP 直接序列化会丢内容，必须显式 JSON 往返
+      return {
+        globals: JSON.parse(JSON.stringify(speakers.globals)),
+        mapping: JSON.parse(JSON.stringify(speakers.mapping)),
+        used: speakers.usedGlobals(),
+        names: JSON.parse(JSON.stringify(speakers.byFile)),
+      }
+    `)
+    check('对应关系是推断出来的（同名归一，其余各算各的）', Boolean(dump), JSON.stringify(dump))
+    check(
+      '表里每个文件一列',
+      opened?.heads.length === 2,
+      JSON.stringify(opened?.heads),
+    )
+    check(
+      '末尾留两个空行',
+      opened?.rowCount === (opened?.cells.length ?? 0) &&
+        (opened?.cells[opened.cells.length - 1]?.length ?? 1) === 0 &&
+        (opened?.cells[opened.cells.length - 2]?.length ?? 1) === 0,
+      JSON.stringify(opened?.cells),
+    )
+
+    /*
+     * 同名的两位必须落在**同一行**（一行里两个标签）；
+     * 两个没起名的「1 号」必须分开（各占各的行）。
+     */
+    const rowsWith = (name) =>
+      (opened?.cells ?? [])
+        .map((names, i) => (names.includes(name) ? i : -1))
+        .filter((i) => i >= 0)
+    check(
+      '同名认定为同一个人（同一行里两个标签）',
+      rowsWith('小包').length === 1 &&
+        (opened?.cells[rowsWith('小包')[0]] ?? []).filter((n) => n === '小包').length === 2,
+      JSON.stringify(opened?.cells),
+    )
+    check(
+      '没起名的两位各占各的行（不按编号硬绑）',
+      rowsWith('讲话人 2').length === 2,
+      JSON.stringify(rowsWith('讲话人 2')),
+    )
+    check(
+      '统一称呼沿用用户的名字',
+      (opened?.names ?? []).includes('小包'),
+      JSON.stringify(opened?.names),
+    )
+
+    // ---- 拖动：把 B 文件的 1 号挪到 A 文件 1 号那一行 ----
+    const before = await store(`
+      const f = project.files.filter((x) => x.status !== 'unsupported')
+      return f.map((x) => speakers.usedGlobals().map((g) => speakers.localOf(x.id, g)))
+    `)
+    await store(`
+      const f = project.files.filter((x) => x.status !== 'unsupported')
+      const used = speakers.usedGlobals()
+      // 目标行 = A 文件 1 号所在的那一行
+      const rowA1 = used.findIndex((g) => speakers.localOf(f[0].id, g) === 1)
+      speakers.moveToRow(f[1].id, 1, rowA1)
+      return true
+    `)
+    await sleep(300)
+    const after = await store(`
+      const f = project.files.filter((x) => x.status !== 'unsupported')
+      return f.map((x) => speakers.usedGlobals().map((g) => speakers.localOf(x.id, g)))
+    `)
+    check(
+      '把标签拖到某一行 = 归入那一行',
+      JSON.stringify(before) !== JSON.stringify(after),
+      `${JSON.stringify(before)} → ${JSON.stringify(after)}`,
+    )
+
+    // ---- 确认之后侧栏用统一称呼 ----
+    const confirm = await centerOf(`document.querySelector('.modal__foot .btn--primary')`)
+    await cdp.click(confirm.x, confirm.y)
+    await sleep(450)
+
+    const shared = await store(`
+      const f = project.files.filter((x) => x.status !== 'unsupported')
+      return {
+        flag: settings.speakerNamesShared,
+        a: speakers.namesOf(f[0].id),
+        b: speakers.namesOf(f[1].id),
+      }
+    `)
+    check('确认之后才真正打开共用', shared?.flag === true, JSON.stringify(shared))
+    check(
+      '共用模式下各文件都取统一称呼',
+      shared?.a['0'] === '小包' && shared?.b['0'] === '小包',
+      JSON.stringify(shared),
+    )
+    const sidebar = await cdp.evaluate(
+      `(() => [...document.querySelectorAll('.spkrow__name')].map((n) => n.textContent.trim()))()`,
+    )
+    check('侧栏显示统一称呼', sidebar.includes('小包'), JSON.stringify(sidebar))
+
+    // ---- 从「调整对应关系」进表：确认不该顺手打开共用 ----
+    // 独立处理下用户点这个按钮只是想整理关系，确认一次就被强行共用，
+    // 就等于又出现「自己勾上的勾选框」。
+    await store(`
+      settings.speakerNamesShared = false
+      speakers.pendingShareConfirm = false
+    `)
+    await sleep(200)
+    const btn = await cdp.evaluate(
+      `(() => { const b = document.querySelector('.speakers__mapbtn'); if (!b) return false; b.click(); return true })()`,
+    )
+    await sleep(300)
+    const mapOpened = await cdp.evaluate(
+      `Boolean(document.querySelector('.modal__foot .btn--primary'))`,
+    )
+    await cdp.evaluate(
+      `document.querySelector('.modal__foot .btn--primary')?.click()`,
+    )
+    await sleep(300)
+    const afterManual = await store(`
+      return {
+        shared: settings.speakerNamesShared,
+        box: document.querySelector('.speakers__share-check input')?.checked ?? null,
+      }
+    `)
+    check(
+      '从「调整对应关系」进表，确认后共用开关保持原样',
+      btn === true &&
+        mapOpened === true &&
+        afterManual?.shared === false &&
+        afterManual?.box === false,
+      JSON.stringify({ btn, mapOpened, afterManual }),
+    )
+
+    // ---- 5. 文件多：表头不能被压成「S···」，要能横向滚 ----
+    await cdp.evaluate(`(() => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+      const project = pinia.get('project')
+      const settings = pinia.get('settings')
+      const speakers = pinia.get('speakers')
+      const ui = pinia.get('ui')
+      const mk = (id, sp) => ({ id, start: 0, end: 2, text: 'x', origin: 'x', issues: [], speaker: sp })
+      const list = project.files.filter((f) => f.status !== 'unsupported')
+      list.forEach((f, i) => {
+        f.durationSec = 4
+        f.segments = [mk('z' + i + 'a', 0), mk('z' + i + 'b', 1)]
+      })
+      // demo 只有三份，列数撑不满；补几份假文件模拟「一次拖进来十几段」
+      const base = list[0]
+      for (let i = 0; i < 6; i += 1) {
+        project.files.push({
+          ...base,
+          id: 'wide' + i,
+          name: '长录音文件名测试 ' + (i + 1) + '.wav',
+          segments: [mk('w' + i + 'a', 0)],
+          status: 'pending',
+          durationSec: 4,
+        })
+      }
+      settings.speakerNamesShared = false
+      speakers.ensureMapping(project.speakerMappingFiles)
+      ui.openDialog('speaker-map')
+    })()`)
+    await sleep(500)
+    const wide = await cdp.evaluate(`(() => {
+      const wrap = document.querySelector('.spkmap__scroll')
+      if (!wrap) return null
+      const ths = [...document.querySelectorAll('.spkmap__file')]
+      return {
+        columns: ths.length,
+        // 表头自己的宽度放得下文字才算「显示完整」
+        clipped: ths.filter((th) => th.scrollWidth > th.clientWidth + 1).length,
+        layout: getComputedStyle(document.querySelector('.spkmap__table')).tableLayout,
+        scrollW: wrap.scrollWidth,
+        clientW: wrap.clientWidth,
+      }
+    })()`)
+    check(
+      '文件多时表头也完整显示',
+      Boolean(wide) && wide.columns >= 6 && wide.clipped === 0 && wide.layout === 'auto',
+      JSON.stringify(wide),
+    )
+    check(
+      '文件多时表格可以横向滚动',
+      Boolean(wide) && wide.scrollW > wide.clientW,
+      JSON.stringify(wide),
+    )
+
+    // ---- 6. 删掉一位讲话人，表里不该还挂着它 ----
+    const afterForget = await cdp.evaluate(`(() => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+      const project = pinia.get('project')
+      const speakers = pinia.get('speakers')
+      const file = project.files.filter((f) => f.status !== 'unsupported')[0]
+      const chipsBefore = document.querySelectorAll('.spkmap__chip').length
+      // 字幕里已经没有这一位了，再删一次标签
+      file.segments = file.segments.filter((s) => s.speaker !== 1)
+      speakers.forget(file.id, 1)
+      const immediate = JSON.parse(JSON.stringify(speakers.mapping))[file.id]
+      // 再进一次表：历史脏数据也该在这一步被收拾干净
+      speakers.ensureMapping(project.speakerMappingFiles)
+      const healed = JSON.parse(JSON.stringify(speakers.mapping))[file.id]
+      return { chipsBefore, immediate, healed }
+    })()`)
+    await sleep(350)
+    const chipsAfter = await cdp.evaluate(`document.querySelectorAll('.spkmap__chip').length`)
+    check(
+      '删掉一位讲话人，对应关系当场跟着删',
+      afterForget?.immediate && afterForget.immediate['1'] === undefined,
+      JSON.stringify(afterForget),
+    )
+    check(
+      '旧残留进表时也会被清掉',
+      afterForget?.healed && afterForget.healed['1'] === undefined,
+      JSON.stringify(afterForget),
+    )
+    check(
+      '删掉之后表里那个标签也没了',
+      typeof chipsAfter === 'number' && chipsAfter < afterForget.chipsBefore,
+      `${afterForget?.chipsBefore} → ${chipsAfter}`,
+    )
+
+    await cdp.evaluate(`(() => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+      pinia.get('ui').closeDialog()
+    })()`)
+  },
+
   async 'glass-setting'(cdp) {
     await cdp.send('Page.enable')
     await goto(cdp, BASE + '/?demo=1&view=settings&theme=light')
@@ -6247,6 +6556,280 @@ const scenarios = {
       Object.keys(localStorage).filter((k) => k.startsWith('xbaos.settings')).forEach((k) => localStorage.removeItem(k))
       return true
     })()`)
+  },
+  /* 共用称呼的默认值 / 取消后回归原称呼 / 进度条悬停摊开日志 */
+  'share-default': async (cdp) => {
+    const run = (body) =>
+      cdp.evaluate(`(() => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        const settings = pinia.get('settings')
+        const speakers = pinia.get('speakers')
+        const logs = pinia.get('logs')
+        ${body}
+      })()`)
+
+    await goto(cdp, BASE + '/?demo=1&view=editor')
+    await sleep(400)
+
+    // 先造出带讲话人的文件：侧栏的开关要有人才渲染
+    await run(`
+      const list = project.files.filter((f) => f.status !== 'unsupported').slice(0, 2)
+      const mk = (id, start, end, text, speaker) => ({ id, start, end, text, origin: text, issues: [], speaker })
+      list[0].segments = [mk('a1', 0, 4, 'A 的第一句', 0), mk('a2', 4, 8, 'A 的第二句', 1)]
+      list[1].segments = [mk('b1', 0, 4, 'B 的第一句', 0), mk('b2', 4, 8, 'B 的第二句', 1)]
+      list[0].durationSec = 8
+      list[1].durationSec = 8
+      project.activeFileId = list[0].id
+      settings.speakerNamesShared = false
+      project.batchModeLocked = false
+      project.batchMode = 'separate'
+    `)
+    await sleep(350)
+
+    // ---- 1. 独立处理：默认不共用 ----
+    const initial = await run(`return settings.speakerNamesShared`)
+    const boxOff = await cdp.evaluate(
+      `document.querySelector('.speakers__share-check input')?.checked ?? null`,
+    )
+    check('独立处理时共用称呼默认关着', initial === false && boxOff === false, `${initial} / ${boxOff}`)
+
+    // ---- 2. 合并为一条时间轴：默认打开 ----
+    const merged = await run(`
+      project.batchModeLocked = false
+      const ok = project.setBatchMode('merge')
+      return { ok, shared: settings.speakerNamesShared }
+    `)
+    check(
+      '合并成一条时间轴时默认打开共用称呼',
+      merged?.ok === true && merged?.shared === true,
+      JSON.stringify(merged),
+    )
+
+    // ---- 2b. 再切回独立处理：必须回到关 ----
+    // 真机上踩到的就是这个：合并时被自动打开、勾选框一直勾着，
+    // 切回独立处理也不放，几个互不相干的文件共享一套称呼。
+    const backToSeparate = await run(`
+      project.batchModeLocked = false
+      const ok = project.setBatchMode('separate')
+      return { ok, shared: settings.speakerNamesShared }
+    `)
+    await sleep(250)
+    const boxAfter = await cdp.evaluate(
+      `document.querySelector('.speakers__share-check input')?.checked ?? null`,
+    )
+    check(
+      '切回独立处理后共用称呼回到关',
+      backToSeparate?.ok === true &&
+        backToSeparate?.shared === false &&
+        boxAfter === false,
+      JSON.stringify({ backToSeparate, boxAfter }),
+    )
+
+    // ---- 2c. 这个开关的值不落盘 ----
+    // 落盘的话，下次启动（批量模式恒为独立处理）就会带着一个「已经勾上」的状态。
+    const stored = await cdp.evaluate(
+      `JSON.parse(localStorage.getItem('xbaos.settings.v6') || '{}').speakerNamesShared ?? null`,
+    )
+    check('共用称呼不写进设置存档', stored !== true, `存档里是 ${stored}`)
+
+    // ---- 3. 取消共用：回到各文件原来的称呼 ----
+    const back = await run(`
+      const list = project.files.filter((f) => f.status !== 'unsupported').slice(0, 2)
+      // 先在「各自一套」下起名，这是各文件原来的称呼
+      settings.speakerNamesShared = false
+      project.batchMode = 'separate'
+      speakers.rename(list[0].id, 0, '小包')
+      speakers.rename(list[1].id, 0, '小包')
+      // 再打开共用，把统一称呼改掉
+      settings.speakerNamesShared = true
+      speakers.ensureMapping(project.speakerMappingFiles)
+      const g = speakers.globalOf(list[0].id, 0)
+      speakers.setGlobalName(g, '统一叫法')
+      const shared = speakers.nameOf(list[0].id, 0)
+      settings.speakerNamesShared = false
+      const own = speakers.nameOf(list[0].id, 0)
+      return { shared, own }
+    `)
+    check(
+      '共用时侧栏用统一称呼',
+      back?.shared === '统一叫法',
+      JSON.stringify(back),
+    )
+    check(
+      '取消共用后回到各文件原来的称呼',
+      back?.own === '小包',
+      `期望「小包」，实际「${back?.own}」—— 改全局称呼时往各文件的表里写，就回不去了`,
+    )
+
+    // ---- 4. 进度条悬停摊开日志 ----
+    await run(`
+      project.progress = 42
+      project.progressLabel = '正在识别 demo.mp3'
+      project.recognizing = true
+      logs.clear()
+      logs.push('info', 'PROBE-LOG-1 加载模型 ggml-belle-large')
+      logs.push('warn', 'PROBE-LOG-2 跳过长静音 3 段')
+    `)
+    await sleep(250)
+    const bar = await cdp.evaluate(`Boolean(document.querySelector('.statusbar__progress'))`)
+    check('识别时底栏有进度区', bar === true, String(bar))
+
+    await cdp.evaluate(
+      `document.querySelector('.statusbar__progress').dispatchEvent(new MouseEvent('mouseenter'))`,
+    )
+    await sleep(250)
+    const opened = await cdp.evaluate(`(() => {
+      const box = document.querySelector('.statusbar__log')
+      if (!box) return null
+      return {
+        head: box.querySelector('.statusbar__log-head')?.textContent.trim() ?? '',
+        lines: [...box.querySelectorAll('.statusbar__log-body li')].map((li) => li.textContent.trim()),
+      }
+    })()`)
+    check('鼠标停在进度区上会摊开日志', Boolean(opened), JSON.stringify(opened))
+    check(
+      '日志里能看到引擎那几行（含级别）',
+      Boolean(opened) &&
+        opened.lines.length === 2 &&
+        opened.lines[0].includes('PROBE-LOG-1') &&
+        opened.lines[1].includes('PROBE-LOG-2'),
+      JSON.stringify(opened?.lines),
+    )
+
+    await cdp.evaluate(
+      `document.querySelector('.statusbar__progress').dispatchEvent(new MouseEvent('mouseleave'))`,
+    )
+    await sleep(250)
+    const closed = await cdp.evaluate(`Boolean(document.querySelector('.statusbar__log'))`)
+    check('鼠标移开后日志收起', closed === false, String(closed))
+
+    // ---- 4b. 指针往气泡上走，气泡不能先关掉 ----
+    // 气泡浮在底栏上方、与进度区之间有 10px 空隙：离开进度区那一刻如果立刻关，
+    // 用户永远够不到那几十行日志。
+    await cdp.evaluate(
+      `document.querySelector('.statusbar__progress').dispatchEvent(new MouseEvent('mouseenter'))`,
+    )
+    await sleep(150)
+    await cdp.evaluate(
+      `document.querySelector('.statusbar__progress').dispatchEvent(new MouseEvent('mouseleave'))`,
+    )
+    await sleep(40)
+    await cdp.evaluate(
+      `document.querySelector('.statusbar__log')?.dispatchEvent(new MouseEvent('mouseenter'))`,
+    )
+    await sleep(320)
+    const survived = await cdp.evaluate(`Boolean(document.querySelector('.statusbar__log'))`)
+    check('指针移进日志气泡后气泡不消失', survived === true, String(survived))
+
+    await cdp.evaluate(
+      `document.querySelector('.statusbar__log')?.dispatchEvent(new MouseEvent('mouseleave'))`,
+    )
+    await sleep(320)
+    const gone = await cdp.evaluate(`Boolean(document.querySelector('.statusbar__log'))`)
+    check('离开气泡与进度区之后才收起', gone === false, String(gone))
+
+    // ---- 4c. 文案长短不改变进度条位置 ----
+    const barPos = () =>
+      cdp.evaluate(`(() => {
+        const t = document.querySelector('.statusbar__progress-track')
+        const r = t.getBoundingClientRect()
+        return { left: Math.round(r.left), width: Math.round(r.width) }
+      })()`)
+    await run(`project.progressLabel = '正在处理 a.mp3'`)
+    await sleep(120)
+    const posShort = await barPos()
+    await run(`project.progressLabel = '正在处理 一个很长很长很长很长的录音文件名用来试探布局.wav'`)
+    await sleep(120)
+    const posLong = await barPos()
+    check(
+      '提示文字变长也不推走进度条',
+      posShort.left === posLong.left && posShort.width === posLong.width,
+      `${JSON.stringify(posShort)} → ${JSON.stringify(posLong)}`,
+    )
+
+    await run(`project.recognizing = false; logs.clear()`)
+  },
+
+  'editor-order': async (cdp) => {
+    const run = (body) =>
+      cdp.evaluate(`(() => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        const settings = pinia.get('settings')
+        ${body}
+      })()`)
+
+    await goto(cdp, BASE + '/?demo=1&view=editor')
+    await sleep(400)
+
+    await run(`
+      const list = project.files.filter((f) => f.status !== 'unsupported').slice(0, 3)
+      const mk = (id, start, end, text) => ({ id, start, end, text, origin: text, issues: [] })
+      list.forEach((f, i) => {
+        f.durationSec = 4 + i * 2
+        f.segments = [mk('s' + i, 0, f.durationSec, '文件' + (i + 1) + '的一句')]
+        f.status = 'pending'
+      })
+      project.batchModeLocked = false
+      project.batchMode = 'separate'
+      project.activeFileId = list[0].id
+    `)
+    await sleep(300)
+
+    const orderOf = () => run(`return project.supportedFiles.slice(0, 3).map((f) => f.id)`)
+    const dragFirstToLast = (selector) =>
+      cdp.evaluate(`(() => {
+        const items = [...document.querySelectorAll(${JSON.stringify(selector)})]
+        if (items.length < 3) return { ok: false, count: items.length }
+        const dt = new DataTransfer()
+        items[0].dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }))
+        const last = items[items.length - 1]
+        const r = last.getBoundingClientRect()
+        last.dispatchEvent(new DragEvent('dragover', {
+          bubbles: true, cancelable: true, dataTransfer: dt,
+          clientY: r.top + r.height * 0.8,
+        }))
+        last.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }))
+        return { ok: true, count: items.length }
+      })()`)
+
+    // ---- 1. 独立处理：侧栏能拖 ----
+    const before = await orderOf()
+    const dragged = await dragFirstToLast('.filetree__list > li')
+    await sleep(250)
+    const after = await orderOf()
+    check(
+      '独立处理时侧栏能拖动调整顺序',
+      dragged?.ok === true && JSON.stringify(before) !== JSON.stringify(after),
+      `${JSON.stringify(before)} → ${JSON.stringify(after)}`,
+    )
+
+    // ---- 2. 合并处理：顺序 = 时间轴先后，时间码跟着走 ----
+    await run(`project.setBatchMode('merge')`)
+    await sleep(400)
+    const mergedBefore = await run(`
+      return project.mergedParts.map((p) => ({ id: p.fileId, offset: Math.round(p.offsetSec) }))
+    `)
+    const draggedMerge = await dragFirstToLast('.filetree__segment')
+    await sleep(500)
+    const mergedAfter = await run(`
+      return project.mergedParts.map((p) => ({ id: p.fileId, offset: Math.round(p.offsetSec) }))
+    `)
+    const firstIdBefore = mergedBefore?.[0]?.id
+    const firstIdAfter = mergedAfter?.[0]?.id
+    // 起点必须从 0 开始、按新顺序累加
+    const offsetsOk =
+      Array.isArray(mergedAfter) &&
+      mergedAfter[0]?.offset === 0 &&
+      mergedAfter.every((p, i) => i === 0 || p.offset > mergedAfter[i - 1].offset)
+    check(
+      '合并处理时侧栏也能拖，且合并时间码跟着重排',
+      draggedMerge?.ok === true && firstIdBefore !== firstIdAfter && offsetsOk,
+      `${JSON.stringify(mergedBefore)} → ${JSON.stringify(mergedAfter)}`,
+    )
+
+    await run(`project.setBatchMode('separate')`)
   },
 }
 

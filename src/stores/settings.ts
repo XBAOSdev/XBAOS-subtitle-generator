@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import type { ReasoningDepth } from '@/utils/reasoningDepth'
 import type {
   ExportLangMode,
@@ -83,11 +83,26 @@ export interface SettingsSnapshot {
   /** 导出字幕时给每条加上讲话人标签（默认不加，避免污染原始文本） */
   speakerPrefix: boolean
   /**
+   * 用户是否**手动**改过「导出讲话人标签」。
+   *
+   * 没有这个标记，「按需默认勾上」和「记住用户的选择」就分不开：
+   * 开了区分讲话人的用户，导出时理应默认带上标签；但要是把这份默认值
+   * 当成用户的选择写回磁盘，下次他就再也关不掉了 —— 而且分不清
+   * 「这是默认」还是「这是他选的」。
+   *
+   * 所以默认值的来源单独记一个标记：没动过就按需给默认，动过就听他的。
+   * 纯新增字段，load() 合并即可，不需要升 STORAGE_KEY。
+   */
+  speakerPrefixUserSet: boolean
+  /**
    * 讲话人称呼跨文件共用。
    *
    * 默认关：分离是对每份音频各跑一遍的，A 里的 0 号与 B 里的 0 号不必是同一个人。
    * 只有同一场录制被拆成多个文件时，把它们当成同一批人才对 —— 那种情况下
    * 开着它，改一次称呼所有文件一起变。
+   *
+   * 默认值**只由批量处理模式决定**：合并为一条时间轴时开启，独立处理时关闭；
+   * 切换模式即重置（`project.setBatchMode`）。不落盘，见 `persist`。
    */
   speakerNamesShared: boolean
   /**
@@ -229,7 +244,9 @@ export const DEFAULT_SETTINGS: SettingsSnapshot = {
   speakerCount: 0,
   /** 默认不写前缀：字幕文本要保持干净，需要的人自己开 */
   speakerPrefix: false,
-  /** 默认每个文件各自一套称呼（纯新增字段，load() 合并即可，不需要升键） */
+  /** 用户还没手动改过上面那项，默认值可以随「区分讲话人」按需给 */
+  speakerPrefixUserSet: false,
+  /** 默认每个文件各自一套称呼；只有合并成一条时间轴时由模式自动打开 */
   speakerNamesShared: false,
   lexiconIds: [],
   // 默认增强档：多跑两遍换来的准确率提升对交付质量更关键，标准档仍可选
@@ -315,6 +332,12 @@ function load(): SettingsSnapshot {
     merged.vadSceneEnabled = false
     merged.beamSize = 1
     merged.bestOf = 1
+    /*
+     * 启动时批量模式恒为「独立处理」，所以「共用一套称呼」必须是关的。
+     * 旧存档里可能留着 true（上一版在合并模式下被自动打开后写进了盘），
+     * 放行就会看到「独立处理却共用一套称呼」—— 勾选框自己勾着，用户没点过。
+     */
+    merged.speakerNamesShared = false
     return merged
   } catch {
     return structuredClone(DEFAULT_SETTINGS)
@@ -335,7 +358,24 @@ export const useSettingsStore = defineStore('settings', () => {
   const speakerDiarization = ref(initial.speakerDiarization)
   const speakerCount = ref(initial.speakerCount)
   const speakerPrefix = ref(initial.speakerPrefix)
+  const speakerPrefixUserSet = ref(initial.speakerPrefixUserSet)
   const speakerNamesShared = ref(initial.speakerNamesShared)
+
+  /**
+   * 导出时**实际生效**的「写讲话人标签」。
+   *
+   * 用户手动改过就听他的；没改过、但开了「区分不同的讲话人」，就默认带上 ——
+   * 分离出来的标签不写进字幕等于白分离。
+   *
+   * 这份「实际生效值」是唯一口径：导出弹窗的勾选、导出的内容、
+   * 就地保存的内容都读它。三处各判一次迟早会打架（导出带标签、
+   * 按一次保存就把标签抹掉）。
+   */
+  const speakerPrefixEffective = computed(() =>
+    speakerPrefixUserSet.value
+      ? speakerPrefix.value
+      : speakerPrefix.value || speakerDiarization.value,
+  )
   const lexiconIds = ref<string[]>([...initial.lexiconIds])
   const reasoningDepth = ref<ReasoningDepth>(initial.reasoningDepth)
   const vadEnabled = ref(initial.vadEnabled)
@@ -383,7 +423,13 @@ export const useSettingsStore = defineStore('settings', () => {
       speakerDiarization: speakerDiarization.value,
       speakerCount: speakerCount.value,
       speakerPrefix: speakerPrefix.value,
-      speakerNamesShared: speakerNamesShared.value,
+      speakerPrefixUserSet: speakerPrefixUserSet.value,
+      /**
+       * **不落盘**：启动时批量模式恒为「独立处理」，这个开关的默认值由模式给，
+       * 存下来只会在下次启动时留下一个「独立处理却共用一套称呼」的状态。
+       * 已踩过：在合并模式下被自动打开 → 写盘 → 重启后勾选框还是勾着的。
+       */
+      speakerNamesShared: false,
       lexiconIds: [...lexiconIds.value],
       reasoningDepth: reasoningDepth.value,
       vadEnabled: vadEnabled.value,
@@ -497,6 +543,7 @@ export const useSettingsStore = defineStore('settings', () => {
     speakerDiarization.value = d.speakerDiarization
     speakerCount.value = d.speakerCount
     speakerPrefix.value = d.speakerPrefix
+    speakerPrefixUserSet.value = d.speakerPrefixUserSet
     speakerNamesShared.value = d.speakerNamesShared
     lexiconIds.value = [...d.lexiconIds]
     reasoningDepth.value = d.reasoningDepth
@@ -545,6 +592,8 @@ export const useSettingsStore = defineStore('settings', () => {
     speakerDiarization,
     speakerCount,
     speakerPrefix,
+    speakerPrefixUserSet,
+    speakerPrefixEffective,
     speakerNamesShared,
     lexiconIds,
     reasoningDepth,

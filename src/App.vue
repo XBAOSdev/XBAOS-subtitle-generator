@@ -5,6 +5,7 @@ import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { useUpdateStore } from '@/stores/update'
 import { useModelStore } from '@/stores/model'
+import { useLogStore } from '@/stores/logs'
 import { confirmDestructive } from '@/utils/confirm'
 
 import AppTitlebar from '@/components/AppTitlebar.vue'
@@ -27,6 +28,7 @@ import UnsupportedFormatDialog from '@/components/dialogs/UnsupportedFormatDialo
 import FormatHelpDialog from '@/components/dialogs/FormatHelpDialog.vue'
 import GapFillDialog from '@/components/dialogs/GapFillDialog.vue'
 import ExportDialog from '@/components/dialogs/ExportDialog.vue'
+import SpeakerMapDialog from '@/components/dialogs/SpeakerMapDialog.vue'
 import UpdateDialog from '@/components/dialogs/UpdateDialog.vue'
 import LegalDialog from '@/components/dialogs/LegalDialog.vue'
 import RecordView from '@/views/RecordView.vue'
@@ -36,6 +38,7 @@ const project = useProjectStore()
 const settings = useSettingsStore()
 const update = useUpdateStore()
 const model = useModelStore()
+const logs = useLogStore()
 
 const views = {
   home: HomeView,
@@ -494,19 +497,30 @@ watch(
  *
  * 与上面那个 watch 分开是刻意的：上面管「谁在跑、跑到哪」，这里只管「任务栏
  * 怎么画」。合在一起的话，将来每加一个长任务都得爬进识别那段代码里插一行。
+ *
+ * **识别期间一律报总进度**：任务栈里那个 percent 是「当前这个文件」的进度，
+ * 多文件时每个文件结束都会回到 0，任务栏上就是一根反复倒退的条，还跟底栏
+ * 显示的总进度对不上。其它长任务（下载模型等）没有这个概念，仍走任务栈。
  */
 watch(
-  () => ui.taskProgress,
-  (task) => {
+  [() => ui.taskProgress, () => project.progress, () => project.recognizing],
+  () => {
     if (isSubWindow) return
     const api = window.xbaos?.app
     if (!api?.setProgress) return
     // Electron 约定：0–1 显示进度，负数清除
+    if (project.recognizing) {
+      api.setProgress(Math.min(1, Math.max(0, project.progress / 100)))
+      return
+    }
+    const task = ui.taskProgress
     api.setProgress(task ? Math.min(1, Math.max(0, task.percent / 100)) : -1)
   },
 )
 
 let offCloseRequest: (() => void) | undefined
+/** 引擎日志：攒在 logs store 里，底栏进度区悬停时摊给用户看 */
+let offEngineLog: (() => void) | undefined
 
 onMounted(() => {
   // 先套主题：附属窗口（辅助 / 录音）在这一行之后就返回了，它们同样要认 `?theme=`
@@ -549,6 +563,17 @@ onMounted(() => {
   offRecordSaved = window.xbaos?.record?.onSaved((filePath) => void onRecordSaved(filePath))
   offRecordClosed = window.xbaos?.record?.onClosed(onRecordClosed)
   offCloseRequest = window.xbaos?.app?.onCloseRequest(() => void onCloseRequest())
+
+  /*
+   * 引擎日志全量收下来。
+   *
+   * 「正在预处理」「正在分析讲话人」这两段进度条只能显示一个不动的百分比，
+   * 具体卡在哪一步只有引擎自己知道（解码到第几块、加载了哪个模型、聚类收了
+   * 几轮）。这里原样攒着，底栏进度区悬停时摊开。
+   */
+  offEngineLog = window.xbaos?.engine?.onLog(({ level, text }) => {
+    logs.push(level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info', text)
+  })
 })
 
 onBeforeUnmount(() => {
@@ -557,6 +582,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('dragleave', onDragLeave)
   window.removeEventListener('drop', onDrop)
   offAssistResult?.()
+  offEngineLog?.()
   offAssistClosed?.()
   offRecordSaved?.()
   offRecordClosed?.()
@@ -595,6 +621,7 @@ onBeforeUnmount(() => {
     <FormatHelpDialog v-if="ui.dialog === 'format-help'" />
     <GapFillDialog v-if="ui.dialog === 'gap-fill'" />
     <ExportDialog v-if="ui.dialog === 'export'" />
+    <SpeakerMapDialog v-if="ui.dialog === 'speaker-map'" />
     <UpdateDialog v-if="ui.dialog === 'update'" />
     <LegalDialog v-if="ui.dialog === 'legal'" />
 

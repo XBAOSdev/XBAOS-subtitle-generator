@@ -1822,7 +1822,17 @@ function registerIpc() {
     // 后端意图必须在 load 之前落地：whisper 的 Vulkan 初始化就发生在加载模型这一步
     const backend = await applyBackendIntent(client, opts.backend, entry.arch)
 
+    const loadStartedAt = Date.now()
     const result = await client.load({ model: entry.path, backend, threads: opts.threads })
+    /*
+     * 模型加载是「进度条钉在原地」最常见的一段（几百 MB，十几秒）。
+     * 引擎自己一行日志都不打，这里替它说一句 —— 底栏悬停的日志气泡靠这个
+     * 才看得出「在等什么」。
+     */
+    mainWindow?.webContents.send('engine:log', {
+      level: 'info',
+      text: `模型已加载：${entry.path}（${archLabel(entry.arch)}，后端 ${backend}，用时 ${Date.now() - loadStartedAt} ms）`,
+    })
     return {
       ok: true,
       ...result,
@@ -1865,6 +1875,12 @@ function registerIpc() {
     // 后端意图先落地：选「仅 CPU」时这里可能重启引擎（环境变量改不了运行中的进程）
     const backend = await applyBackendIntent(client, opts.backend, entry.arch)
 
+    // 引擎自己不报「在跑什么」，这行给底栏的日志气泡用
+    mainWindow?.webContents.send('engine:log', {
+      level: 'info',
+      text: `开始识别 ${path.basename(opts.audio)}：模型 ${entry.path}，线程 ${opts.threads ?? '自动'}，语言 ${opts.language ?? 'auto'}`,
+    })
+
     /**
      * 跑一遍「必要时加载模型 + 识别」。
      * 抽成函数是为了崩溃降级之后能原样再走一次。
@@ -1874,7 +1890,12 @@ function registerIpc() {
       // 只看 modelLoaded 的话，同一架构内换模型不会重载 —— 用旧模型跑完，
       // 界面上却显示新模型的名字。
       if (!client.modelLoaded || client.loadedModel !== entry.path) {
+        const loadStartedAt = Date.now()
         await client.load({ model: entry.path, backend: backendForLoad, threads: opts.threads })
+        mainWindow?.webContents.send('engine:log', {
+          level: 'info',
+          text: `模型已加载：${entry.path}（${archLabel(entry.arch)}，后端 ${backendForLoad}，用时 ${Date.now() - loadStartedAt} ms）`,
+        })
       }
 
       return client.transcribe(
@@ -1988,6 +2009,8 @@ function registerIpc() {
     client.on('log', (level, text) => {
       if (level === 'error' || level === 'warn') console.error(`[diarize:${level}] ${text}`)
       else if (isDev) console.log(`[diarize:${level}] ${text}`)
+      // 分离是另一个进程，日志默认到不了界面上；进度条悬停要看的正是它
+      mainWindow?.webContents.send('engine:log', { level, text })
     })
 
     const spans = []

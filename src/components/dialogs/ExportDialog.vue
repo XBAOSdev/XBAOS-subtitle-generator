@@ -141,6 +141,27 @@ const hasSpeakers = computed(() =>
 )
 
 /**
+ * 「导出讲话人标签」的勾选状态。
+ *
+ * 开了「区分不同的讲话人」的人，分离出来的标签不写进字幕等于白分离 ——
+ * 所以这种人导出时应该默认勾上。
+ *
+ * 但**用户自己的记忆优先**：他手动改过这个选项（开或关都算）之后就按记忆走，
+ * 不再被默认值覆盖。区分「默认值」与「记忆」靠 `speakerPrefixUserSet` 这个
+ * 单独标记 —— 否则默认勾上之后写回磁盘，下次就分不清是他选的还是我们给的，
+ * 于是他再也关不掉。
+ *
+ * 写回磁盘只发生在用户真的动过这个勾的时候，开弹窗本身不写。
+ */
+const speakerPrefixOn = computed({
+  get: () => settings.speakerPrefixEffective,
+  set: (value: boolean) => {
+    settings.speakerPrefix = value
+    settings.speakerPrefixUserSet = true
+  },
+})
+
+/**
  * 可选（可按）的讲话人清单。
  *
  * 键是「来源文件 + 编号」而不是光一个编号：分别导出多个文件时，A 里的 0 号
@@ -415,7 +436,7 @@ async function doExport(): Promise<void> {
         lang: entry.bundle,
         translationLang: entry.lang,
         sourceFirst: sourceFirst.value,
-        speakerPrefix: hasSpeakers.value && settings.speakerPrefix,
+        speakerPrefix: hasSpeakers.value && speakerPrefixOn.value,
         speakerNames: namesOf.get(entry.fileId) ?? {},
       })
       const content = applyLineEnding(body, lineEnding.value)
@@ -538,7 +559,7 @@ function close(): void {
         </h3>
 
         <label class="checkbox export__spk-toggle">
-          <input v-model="settings.speakerPrefix" type="checkbox" />
+          <input v-model="speakerPrefixOn" type="checkbox" />
           <span>导出讲话人标签</span>
         </label>
         <p class="hint export__spk-hint">{{ speakerStyleHint }}</p>

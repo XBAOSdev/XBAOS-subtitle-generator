@@ -6,7 +6,7 @@
  * 或右键），这里不重复提供 ——— 同一件事两个入口而且判断条件还不一样，是
  * 最容易出现「界面上说改了、实际没改」的地方。
  */
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { useSpeakerStore } from '@/stores/speakers'
 import { useEditorStore } from '@/stores/editor'
@@ -92,6 +92,98 @@ function addSpeaker(): void {
   }
   ui.notify('info', `已新增「${name}」`, '先在表格里选中字幕，再点这一位即可归入')
 }
+
+/* ------------------------------------------------------------ 跨文件共用 */
+
+/** 参与对应关系的文件（合并模式下是一条合并产物） */
+const mappingFiles = computed(() => project.speakerMappingFiles)
+
+/** 有讲话人的文件数：只有一个文件时没什么可对应的，不用打断用户 */
+const speakerFileCount = computed(
+  () =>
+    mappingFiles.value.filter((f) => f.segments.some((s) => typeof s.speaker === 'number')).length,
+)
+
+/**
+ * 勾上「所有文件共用同一套称呼」。
+ *
+ * 第一次勾要**先让人确认**不同文件之间谁是谁 —— 直接按编号绑一起，
+ * A 文件的 1 号与 B 文件的 1 号会被当成同一个人（编号只是「这个文件里的
+ * 第几个人」，两个文件各拍各的，编号相同纯属巧合）。
+ *
+ * 确认之前勾选框弹回去：没确认就没生效，界面上也不能显示成已经生效。
+ */
+function onShareChange(event: Event): void {
+  const el = event.target as HTMLInputElement
+  if (!el.checked) {
+    /*
+     * 取消共用：**什么都不用清**。
+     *
+     * 各文件一直各自留着一份称呼（`byFile`），共用只是在上面盖了一层统一
+     * 叫法。关掉开关，`namesOf()` 立刻回到各自那份 —— 也就是共用之前
+     * 用户已经改好的称呼。
+     */
+    settings.speakerNamesShared = false
+    return
+  }
+  if (!speakers.mappingConfirmed && speakerFileCount.value > 1) {
+    // 先确认，后生效：勾选框弹回去，界面上不能显示成已经生效。
+    // 取消弹窗时等于什么都没发生，开关也就留在原位
+    el.checked = false
+    if (speakers.mappingBuilt) speakers.ensureMapping(mappingFiles.value)
+    else speakers.rebuildMapping(mappingFiles.value)
+    // 记下这次弹窗是勾选引来的：确认后才由弹窗打开共用
+    speakers.pendingShareConfirm = true
+    ui.openDialog('speaker-map')
+    return
+  }
+  speakers.ensureMapping(mappingFiles.value)
+  settings.speakerNamesShared = true
+}
+
+/** 重新打开对应关系表调整（只是调整，不因此打开共用开关） */
+function openMap(): void {
+  speakers.pendingShareConfirm = false
+  if (speakers.mappingBuilt) speakers.ensureMapping(mappingFiles.value)
+  else speakers.rebuildMapping(mappingFiles.value)
+  ui.openDialog('speaker-map')
+}
+
+/**
+ * 新识别出来的讲话人也要挂到全局位上。
+ *
+ * 共用模式下没挂上的人没有统一称呼：侧栏退回「讲话人 N」，表里也看不见他 ——
+ * 用户会以为分离没生效。
+ */
+watch(
+  () =>
+    project.speakerMappingFiles
+      .map(
+        (f) =>
+          f.segments
+            .filter((s) => typeof s.speaker === 'number')
+            .map((s) => s.speaker)
+            .join(','),
+      )
+      .join('|'),
+  () => {
+    if (settings.speakerNamesShared) speakers.ensureMapping(mappingFiles.value)
+  },
+  { immediate: true },
+)
+
+/**
+ * 开关被「合并为一条时间轴」的默认值打开时，同样要先把对应关系补齐 ——
+ * 没有对应关系就没有统一称呼，侧栏会显示成一片「讲话人 N」。
+ */
+watch(
+  () => settings.speakerNamesShared,
+  (on) => {
+    if (on) speakers.ensureMapping(mappingFiles.value)
+  },
+  // 面板挂载时也要补一次：开关可能是在别的页面被「合并模式」的默认值打开
+  { immediate: true },
+)
 
 const pending = ref<SpeakerEntry | null>(null)
 const mode = ref<'clear' | 'merge'>('clear')
@@ -188,10 +280,17 @@ function doDelete(): void {
       </li>
     </ul>
 
-    <label class="speakers__share">
-      <input v-model="settings.speakerNamesShared" type="checkbox" />
-      <span>所有文件共用同一套称呼</span>
-    </label>
+    <div class="speakers__share">
+      <label class="speakers__share-check">
+        <input
+          type="checkbox"
+          :checked="settings.speakerNamesShared"
+          @change="onShareChange"
+        />
+        <span>所有文件共用同一套称呼</span>
+      </label>
+      <button class="speakers__mapbtn" type="button" @click="openMap">调整对应关系</button>
+    </div>
 
     <ModalDialog
       v-if="pending"
@@ -370,6 +469,14 @@ function doDelete(): void {
   margin-top: var(--space-1);
   font-size: 11px;
   color: var(--color-text-tertiary);
+}
+
+.speakers__share-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
   cursor: pointer;
 }
 
@@ -379,6 +486,25 @@ function doDelete(): void {
   flex: none;
   margin: 0;
   accent-color: var(--color-accent);
+}
+
+/* 开关旁边的入口：随时能重新打开对应关系表改 */
+.speakers__mapbtn {
+  flex: none;
+  height: 20px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.speakers__mapbtn:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
 }
 
 /* 删除时的两个选项 */

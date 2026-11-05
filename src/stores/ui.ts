@@ -22,6 +22,8 @@ export type DialogKey =
   | 'format-help'
   | 'shortcuts'
   | 'update'
+  /** 跨文件讲话人对应关系表 */
+  | 'speaker-map'
   /** 用户协议 / 隐私政策。看哪一份由 `dialogPayload.doc` 决定（`'terms' | 'privacy'`） */
   | 'legal'
   | null

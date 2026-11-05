@@ -483,7 +483,7 @@ async function writeSubtitleTo(path: string, record?: ExportRecord): Promise<voi
     translationLang: record?.lang ?? '',
     sourceFirst: settings.exportLangSourceFirst,
     // 导出时带了讲话人标签，就地保存也必须带 —— 否则按一次保存就把标签抹掉了
-    speakerPrefix: settings.speakerPrefix,
+    speakerPrefix: settings.speakerPrefixEffective,
     speakerNames: speakerStore.namesOf(file.id),
   })
   const content = applyLineEnding(body, settings.exportLineEnding)

@@ -40,9 +40,12 @@ import {
   assignSpeakers,
   clearSpeaker,
   defaultSpeakerName,
+  isUserSpeakerName,
   listSpeakers,
   mergeSpeakerInto,
   nextSpeakerIndex,
+  pickSampleRange,
+  planSpeakerMapping,
   setSpeakerFor,
   speakerLabel,
   speakerName,
@@ -4981,6 +4984,422 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     existsSync(new URL('../licenses/Open-Font-License-1.1.txt', import.meta.url)) &&
       /SIL Open Font License/i.test(readSource('licenses/Open-Font-License-1.1.txt')),
     'OFL 要求分发时随附许可全文',
+  )
+}
+
+/* ------------------------------------------------ 进度条三态（源码扫描） */
+{
+  /*
+   * 进度条以前会停在 99% 不动，根因是**两套进度各走各的**：
+   * 状态栏读 `project.progress`（按文件数折算，识别占满全程），
+   * 而讲话人分离只往 `ui` 的任务栈里写，任务栈是另一套 UI。
+   * 于是分离在跑、进度条却停在识别最后那个 99%。
+   *
+   * 现在改成「工作单元」：识别一遍算一单元，启用分离再加一单元，
+   * 识别与分离共用同一条进度条；拿不到可信百分比时走不确定态。
+   *
+   * 这些都是「少写一行就退化、且退化后界面不报错」的接线，只能靠守门。
+   */
+  const readSrc = (rel: string): string =>
+    readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const projectSrc = readSrc('src/stores/project.ts')
+  const statusSrc = readSrc('src/components/AppStatusBar.vue')
+  const appSrc = readSrc('src/App.vue')
+  const mainSrc = readSrc('electron/main.js')
+  const iconSrc = readSrc('src/components/Icon.vue')
+  const materialSrc = readSrc('src/components/MaterialBoard.vue')
+  const filetreeSrc = readSrc('src/components/FileTree.vue')
+
+  check(
+    '进度不再按「文件数」折算',
+    !/const perFile = 100 \/ queue\.length/.test(projectSrc) &&
+      projectSrc.includes('const setUnitProgress ='),
+    '旧的折算把每个文件占满 1/队列长度，讲话人分离因此无处安放，只能把进度钉在 99%',
+  )
+  check(
+    '分离的真实百分比接进了同一条进度条',
+    /onDiarizeProgress[\s\S]{0,800}setUnitProgress\(currentUnitBase, passes, percent \/ 100\)/.test(
+      projectSrc,
+    ),
+    '分离只写任务栈的话，状态栏那条进度条在分离阶段是死的',
+  )
+  check(
+    '拿不到百分比时仍记录下来（界面不再据此换形态）',
+    projectSrc.includes('const progressStalled = ref(false)') &&
+      /progressStalled\.value = true/.test(projectSrc),
+    '预处理与分离聚类这两段确实拿不到可信百分比，值得留一笔；但界面不能再跟着它变',
+  )
+  check(
+    '底栏文案只说「正在处理 某个文件」',
+    /progressLabel\.value = queue\[0\] \? `正在处理 \$\{queue\[0\]\.name\}`/.test(projectSrc) &&
+      /currentUnitLabel = `正在处理 \$\{file\.name\}`/.test(projectSrc) &&
+      // 遍数、阶段都进日志，不再出现在底栏文案里
+      !projectSrc.includes('（第 ${k + 1}/${passes} 遍）'),
+    '文案一长一短，底栏中间那块就跟着动，进度条看起来像在抖',
+  )
+  check(
+    '进度条回到单一形态（没有滑动短条、没有省略号）',
+    !statusSrc.includes('progress-glide') &&
+      !statusSrc.includes('is-indeterminate') &&
+      !statusSrc.includes('···') &&
+      statusSrc.includes('statusbar__progress-bar'),
+    '一有进度就切数字条、一超时就切滑动条，2.5 秒来回一次，观感上就是进度条在跳',
+  )
+  check(
+    '进度区悬停摊开运行日志，且关得不那么急',
+    statusSrc.includes('@mouseenter="openLog"') &&
+      statusSrc.includes('@mouseleave="scheduleClose"') &&
+      statusSrc.includes('statusbar__log') &&
+      // 进度区与气泡之间有空隙，立刻关就够不到气泡了
+      statusSrc.includes('closeTimer') &&
+      statusSrc.includes('statusbar__log::after'),
+    '进度条说不清在等什么，就把引擎日志给用户看；移开即收，但不许收得让人够不到',
+  )
+  check(
+    '引擎日志收进日志 store',
+    appSrc.includes('onLog') && appSrc.includes('logs.push'),
+    '主进程发了 engine:log，渲染层没人听就等于没有',
+  )
+  check(
+    '分离进程的日志也转发到界面',
+    /client\.on\('log'[\s\S]{0,400}send\('engine:log'/.test(mainSrc),
+    '分离是另一个引擎进程，日志不转发的话分离阶段气泡里一片空白',
+  )
+  check(
+    'spinner 自带旋转',
+    iconSrc.includes('icon--spin') && iconSrc.includes('@keyframes icon-spin'),
+    '旋转属于这个图标的语义，放在图标自己身上才不会漏掉使用点',
+  )
+  check(
+    '处理中的角标都指向同一个 spinner 图标',
+    materialSrc.includes("processing: 'spinner'") &&
+      filetreeSrc.includes("processing: 'spinner'"),
+    '导入页方块与编辑器文件树都要转起来',
+  )
+  check(
+    '旋转只做一处（状态栏不再自己写动画）',
+    !/statusbar__spin\s*\{[\s\S]{0,120}animation/.test(statusSrc),
+    '两处动画叠在同一个元素上会互相覆盖，且以后改转速要改两处',
+  )
+}
+
+/* ------------------------------------------------ 导出讲话人标签的默认值 */
+{
+  /*
+   * 开了「区分不同的讲话人」的人，导出时不带标签等于白分离 —— 所以要默认勾上。
+   * 但**用户手动改过之后必须听他的**，否则他再也关不掉。
+   *
+   * 「默认值」和「记忆」要分开记，所以有个 `speakerPrefixUserSet` 标记。
+   * 少了这个标记，默认勾上之后写回磁盘，下次就分不清是默认还是他选的。
+   *
+   * 还有一处容易打架：导出弹窗、导出内容、就地保存三处各判一次，
+   * 迟早出现「导出带标签、按一次保存标签没了」。统一读 `speakerPrefixEffective`。
+   */
+  const readSrc = (rel: string): string =>
+    readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const settingsSrc = readSrc('src/stores/settings.ts')
+  const exportSrc = readSrc('src/components/dialogs/ExportDialog.vue')
+  const editorSrc = readSrc('src/views/EditorView.vue')
+
+  check(
+    '默认值与用户记忆分开记',
+    settingsSrc.includes('speakerPrefixUserSet: boolean') &&
+      settingsSrc.includes('const speakerPrefixEffective = computed'),
+    '合成一个布尔值就分不清「这是默认」还是「这是他选的」',
+  )
+  check(
+    '用户动过勾之后就记成他的选择',
+    /settings\.speakerPrefix = value[\s\S]{0,120}settings\.speakerPrefixUserSet = true/.test(
+      exportSrc,
+    ),
+    '不记这个标记，他下次打开弹窗又被默认值覆盖',
+  )
+  check(
+    '导出弹窗读的是生效值',
+    exportSrc.includes('settings.speakerPrefixEffective') &&
+      !/v-model="settings\.speakerPrefix"/.test(exportSrc),
+    '直接绑原值的话，勾选显示与导出内容会对不上',
+  )
+  check(
+    '就地保存与导出用同一口径',
+    editorSrc.includes('settings.speakerPrefixEffective'),
+    '两处各判一次，会出现「导出带标签、按一次保存就把标签抹掉」',
+  )
+}
+
+/* ------------------------------------------------ 跨文件讲话人对应关系 */
+{
+  /*
+   * 编号只是「这个文件里的第几个人」。A 文件的 1 号与 B 文件的 1 号
+   * 未必是同一个人 —— 两个文件各拍各的，编号相同纯属巧合。
+   *
+   * 推断只能靠**用户自己起的名字**：同名即同一人。
+   * 系统给的「讲话人 N」在每个文件里都叫这个数，拿它当依据等于把
+   * 两个陌生人绑成一个人 —— 这正是老版本「所有文件共用一套称呼」的病根。
+   */
+  const plan = planSpeakerMapping([
+    { id: 'a', indexes: [0, 1], names: { '0': '小包', '1': '王五' } },
+    { id: 'b', indexes: [0, 1], names: { '0': '小包' } },
+  ])
+  check(
+    '同名认定为同一个人',
+    plan.mapping.a['0'] === plan.mapping.b['0'],
+    `a0=${plan.mapping.a['0']} b0=${plan.mapping.b['0']}`,
+  )
+  check(
+    '统一称呼沿用用户的名字',
+    plan.globals[plan.mapping.a['0']]?.name === '小包',
+    plan.globals[plan.mapping.a['0']]?.name,
+  )
+  check(
+    '认不出名字的各算各的',
+    plan.mapping.a['1'] !== plan.mapping.b['1'],
+    '默认称呼不是证据，不能拿来绑人',
+  )
+
+  const defPlan = planSpeakerMapping([
+    { id: 'a', indexes: [0], names: {} },
+    { id: 'b', indexes: [0], names: {} },
+  ])
+  check(
+    '两个文件同名的「讲话人 1」不合并',
+    defPlan.mapping.a['0'] !== defPlan.mapping.b['0'],
+    '系统给的称呼不是证据',
+  )
+
+  check(
+    '默认称呼不算用户起的名字',
+    !isUserSpeakerName(0, defaultSpeakerName(0)) && isUserSpeakerName(0, '小包'),
+  )
+
+  /*
+   * 试听片段：不到 3 秒听不出是谁。
+   * 单条够长就用单条；不够就顺着往下攒；攒不够就把区间撑到 3 秒。
+   */
+  const longOne = pickSampleRange([{ start: 0, end: 5 }])
+  check('单条够长就用单条', longOne?.start === 0 && longOne?.end === 5)
+
+  const gathered = pickSampleRange([
+    { start: 0, end: 1.5 },
+    { start: 1.5, end: 3.2 },
+  ])
+  check(
+    '单条不够就顺着攒到 3 秒',
+    gathered !== null && gathered.end - gathered.start >= 3,
+    gathered ? String(gathered.end - gathered.start) : 'null',
+  )
+
+  const stretched = pickSampleRange([{ start: 0, end: 1 }], 10)
+  check(
+    '实在不够就把区间撑到 3 秒',
+    stretched !== null && stretched.end - stretched.start >= 3,
+    stretched ? String(stretched.end - stretched.start) : 'null',
+  )
+
+  const capped = pickSampleRange([{ start: 0, end: 1 }], 2)
+  check(
+    '音频本身就这么长时不越界',
+    capped !== null && capped.end <= 2,
+    capped ? String(capped.end) : 'null',
+  )
+}
+
+/* ------------------------------------------------ 跨文件共用：接线（源码扫描） */
+{
+  const readSrc = (rel: string): string =>
+    readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const speakerSrc = readSrc('src/stores/speakers.ts')
+  const panelSrc = readSrc('src/components/SpeakerPanel.vue')
+  const mapSrc = readSrc('src/components/dialogs/SpeakerMapDialog.vue')
+  const appSrc = readSrc('src/App.vue')
+  const uiSrc = readSrc('src/stores/ui.ts')
+
+  check(
+    '每个文件的称呼表永远保留',
+    speakerSrc.includes('const byFile = ref<Record<string, Record<string, string>>>({})') &&
+      speakerSrc.includes('const mapping = ref<Record<string, Record<string, number>>>({})'),
+    '共用模式只是多了一层对应关系，不该把各文件自己的称呼表换掉',
+  )
+  check(
+    '共用模式下改称呼改的是全局那一位',
+    /speakerNamesShared[\s\S]{0,400}setGlobalName\(g, name\)/.test(speakerSrc),
+    '否则改一个文件的名字、界面上显示的却是统一的称呼，两边对不上',
+  )
+  check(
+    '共用模式下的称呼来自对应关系，不是按编号硬取',
+    /function namesOf[\s\S]{0,600}globalName\(g\)/.test(speakerSrc),
+    '按编号硬取就是老毛病：A 的 1 号与 B 的 1 号被当成同一个人',
+  )
+  check(
+    '第一次勾选要先弹窗确认',
+    panelSrc.includes('mappingConfirmed') &&
+      panelSrc.includes("ui.openDialog('speaker-map')") &&
+      /el\.checked = false/.test(panelSrc),
+    '没确认就没生效，勾选框要弹回去',
+  )
+  check(
+    '开关旁边有「调整对应关系」入口',
+    panelSrc.includes('openMap') && panelSrc.includes('调整对应关系'),
+    '确认之后用户还得能回来改',
+  )
+  check(
+    '对应关系表挂在应用层',
+    appSrc.includes('SpeakerMapDialog') && uiSrc.includes("'speaker-map'"),
+    '弹窗要从侧栏之外也能打开',
+  )
+  check(
+    '表格末尾留两个空行',
+    mapSrc.includes('usedRows.value.length + 2'),
+    '空行是「新建一个对应关系」的入口，不能没有',
+  )
+  check(
+    '表格的行号是 0 起的显式数组',
+    mapSrc.includes('v-for="row in rowIndexes"') &&
+      // 只看模板段：脚本里的说明文字会原样写出那个反例写法
+      !/v-for="row in totalRows"/.test(mapSrc.slice(mapSrc.indexOf('<template>'))),
+    '`v-for="x in n"` 是从 1 数到 n 的，行号会整体差一位：第 0 行显示第 1 行的人',
+  )
+  check(
+    '拖拽落到某一行 = 归入那一行',
+    speakerSrc.includes('function moveToRow') && mapSrc.includes('onRowDrop'),
+    '拖拽语义要与表格的行对应起来',
+  )
+  check(
+    '试听至少 3 秒',
+    mapSrc.includes('pickSampleRange'),
+    '两个字的一声「嗯」谁也认不出来',
+  )
+}
+
+/* ------------------------------------------------ 共用称呼的默认值 / 合并模式分离 */
+{
+  const readSrc = (rel: string): string =>
+    readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const projectSrc = readSrc('src/stores/project.ts')
+  const settingsSrc = readSrc('src/stores/settings.ts')
+  const speakerSrc = readSrc('src/stores/speakers.ts')
+  const panelSrc = readSrc('src/components/SpeakerPanel.vue')
+  const mapSrc = readSrc('src/components/dialogs/SpeakerMapDialog.vue')
+
+  check(
+    '共用称呼默认关，只有合并成一条时间轴时默认开',
+    projectSrc.includes('settings.speakerNamesShared = mode === \'merge\'') &&
+      /speakerNamesShared: false,/.test(settingsSrc),
+    '独立处理时各文件各拍各的，默认绑在一起就是老毛病；合并成一条时间线才是一套人',
+  )
+  check(
+    '切换批量模式时共用称呼一律重置，不留「用户点过就不再跟」的例外',
+    !projectSrc.includes('speakerNamesSharedUserSet') &&
+      !panelSrc.includes('speakerNamesSharedUserSet') &&
+      !settingsSrc.includes('speakerNamesSharedUserSet'),
+    '留了这个例外，合并模式下被自动打开一次就再也关不掉 —— 切回独立处理依然勾着',
+  )
+  check(
+    '共用称呼不落盘，且启动时强制复位',
+    // 两处：DEFAULT_SETTINGS 与 persist 写出的快照
+    (settingsSrc.match(/speakerNamesShared: false,/g) ?? []).length >= 2 &&
+      settingsSrc.includes('merged.speakerNamesShared = false'),
+    '批量模式启动恒为独立处理，存下来的 true 只会变成一个「自己勾上」的勾选框',
+  )
+  check(
+    '从「调整对应关系」进表，确认后不会顺手打开共用开关',
+    mapSrc.includes('if (speakers.pendingShareConfirm) settings.speakerNamesShared = true') &&
+      /function openMap[\s\S]{0,200}pendingShareConfirm = false/.test(panelSrc) &&
+      /el\.checked = false[\s\S]{0,300}pendingShareConfirm = true/.test(panelSrc),
+    '只有勾选引来的那一次确认才该打开共用，否则用户点一次确认就被强行共用',
+  )
+  check(
+    '合并模式：分离放到最后统一跑',
+    projectSrc.includes('if (!isMerge.value && settings.speakerDiarization') &&
+      /isMerge\.value && settings\.speakerDiarization[\s\S]{0,600}nextIndex/.test(projectSrc),
+    '一边识别一边分离，A 的 0 号与 B 的 0 号拼到同一条时间轴上就成了同一个人',
+  )
+  check(
+    '合并模式下各文件的讲话人编号接着往下排',
+    /speaker: seg\.speaker \+ nextIndex/.test(projectSrc) &&
+      /nextIndex \+= assigned\.speakers/.test(projectSrc),
+    '不接着排就会撞号 —— 两段不同人说话共用一个称呼，改名字一起改',
+  )
+  check(
+    '取消共用回到各文件原来的称呼',
+    !/function setGlobalName[\s\S]{0,900}const target = \(byFile\.value\[fileId\] \?\?= \{\}\)/.test(
+      speakerSrc,
+    ),
+    '改全局称呼时往各文件的表里写，取消勾选就再也回不到原来的称呼',
+  )
+  check(
+    '没进对应关系的人仍用他自己的称呼',
+    speakerSrc.includes('const out: Record<string, string> = { ...own }'),
+    '少这个兜底，刚识别完 / 面板还没挂载时侧栏会整片退回「讲话人 N」，看着像名字被吃了',
+  )
+  check(
+    '改名遇到还没建对应的人也不会丢',
+    /if \(g !== undefined\)[\s\S]{0,700}const target = \(byFile\.value\[fileId\] \?\?= \{\}\)/.test(
+      speakerSrc,
+    ),
+    '共用模式下一改名就 no-op，用户会以为输入框坏了',
+  )
+}
+
+/* ------------------------------------------------ 讲话人表 / 侧栏排序 / 进度条 */
+{
+  const readSrc = (rel: string): string =>
+    readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const speakerSrc = readSrc('src/stores/speakers.ts')
+  const mapSrc = readSrc('src/components/dialogs/SpeakerMapDialog.vue')
+  const treeSrc = readSrc('src/components/FileTree.vue')
+  const statusSrc = readSrc('src/components/AppStatusBar.vue')
+  const appSrc = readSrc('src/App.vue')
+  const projectSrc = readSrc('src/stores/project.ts')
+
+  check(
+    '对应关系表按内容撑开、可横向滚动',
+    mapSrc.includes('width: max-content') &&
+      mapSrc.includes('table-layout: auto') &&
+      // 定宽均分会把文件列压成「S···」，认不出是哪一列
+      !/table-layout:\s*fixed/.test(mapSrc) &&
+      !/\.spkmap__file\s*\{[^}]*text-overflow:\s*ellipsis/.test(mapSrc),
+    '文件一多，每列被压到几十像素，表头只剩一个字母，等于这张表没法看',
+  )
+  check(
+    '删掉一位讲话人，对应关系也跟着删',
+    /function forget[\s\S]{0,700}delete map\[String\(index\)\]/.test(speakerSrc) &&
+      // 无条件删：不再只看共用模式
+      !/function forget[\s\S]{0,400}if \(settings\.speakerNamesShared\)/.test(speakerSrc),
+    '独立处理时删了人，mapping 里那条还留着 —— 打开表会看到一个已经没有语料的标签',
+  )
+  check(
+    '对应关系表会清掉已经不存在的编号',
+    /const alive = new Set\(indexes\.map\(String\)\)/.test(speakerSrc) &&
+      /if \(!alive\.has\(key\)\) delete map\[key\]/.test(speakerSrc),
+    '旧映射没人收拾，删除看着像没生效',
+  )
+  check(
+    '侧栏文件列表可拖拽排序（两种模式都是）',
+    treeSrc.includes(':draggable="!project.recognizing"') &&
+      treeSrc.includes('project.reorder(from, to)') &&
+      // 合并模式下顺序就是时间轴先后，必须走 store 的 reorder 去重建产物
+      /function onDrop[\s\S]{0,900}project\.reorder/.test(treeSrc) &&
+      (treeSrc.match(/:draggable="!project\.recognizing"/g) ?? []).length >= 2,
+    '拖来拖去只能改列表样子、不改合并时间码，就等于什么都没改',
+  )
+  check(
+    '底栏进度区宽度定死，进度条不随文案平移',
+    /\.statusbar__center\s*\{[^}]*width:\s*344px/.test(statusSrc) &&
+      /\.statusbar__progress-text\s*\{[^}]*flex:\s*1/.test(statusSrc),
+    '文案一换长度就变，进度条被顶得左右晃，看着像进度自己在抖',
+  )
+  check(
+    '任务栏进度用总进度',
+    /project\.recognizing[\s\S]{0,200}project\.progress \/ 100/.test(appSrc),
+    '任务栈那个百分比是「当前这个文件」的，多文件时每个文件结束都回 0',
+  )
+  check(
+    '识别文案只说在处理哪个文件',
+    /progressLabel\.value = queue\[0\] \? `正在处理/.test(projectSrc) &&
+      !projectSrc.includes('正在预处理') &&
+      !projectSrc.includes('正在分析讲话人'),
+    '阶段细节写日志就够了，底栏只说人话',
   )
 }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { useI18n } from '@/composables/useI18n'
 import type { AudioFile, FileStatus } from '@/types'
@@ -26,6 +26,78 @@ const isMerge = computed(() => project.isMerge)
 const parts = computed(() => project.mergedParts)
 
 const mergedSegments = computed(() => project.mergedFile?.segments.length ?? 0)
+
+/*
+ * ---- 拖拽排序 ----
+ *
+ * 顺序不只是排列顺序：合并模式下它就是时间轴上的先后，改顺序 = 重排字幕时间码
+ * 与音频拼接（`reorder()` 里会 rebuildMerged）。所以这里只负责「把 from 挪到 to」，
+ * 产物重建交给 store。
+ *
+ * 落点用**上下半区**判定（上=插到这一份之前，下=之后），与导入页的左右半区同构。
+ */
+const dragId = ref('')
+/** 插入位置，0..n（n 表示落在最后一份之后）；-1 = 没有落点 */
+const dropAt = ref(-1)
+
+function onDragStart(event: DragEvent, id: string): void {
+  // 识别中不许调顺序：这一轮的进度是按**启动时**的顺序算好的单元前缀和，
+  // 中途挪动会让「第几个文件跑到第几格」对不上，进度条直接跳。
+  if (project.recognizing) {
+    event.preventDefault()
+    return
+  }
+  dragId.value = id
+  dropAt.value = -1
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    // 某些环境不带数据就不给拖：塞一个占位，内容不用
+    event.dataTransfer.setData('text/plain', id)
+  }
+}
+
+function onDragOver(event: DragEvent, index: number): void {
+  if (!dragId.value) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  const el = event.currentTarget as HTMLElement
+  const rect = el.getBoundingClientRect()
+  dropAt.value = event.clientY < rect.top + rect.height / 2 ? index : index + 1
+}
+
+function onDrop(): void {
+  const from = project.files.findIndex((f) => f.id === dragId.value)
+  const list = project.supportedFiles
+  const at = dropAt.value
+  onDragEnd()
+  if (from < 0 || at < 0) return
+
+  // 落点换算成 `files` 里的下标：插到「第 at 份」之前，at === n 时是末尾
+  const anchor = list[at]?.id
+  let to = anchor
+    ? project.files.findIndex((f) => f.id === anchor)
+    : project.files.findIndex((f) => f.id === list[list.length - 1]?.id) + 1
+  if (to < 0) return
+  // splice 语义：先抽走再插入，往后挪要往前错一位
+  if (to > from) to -= 1
+  if (to === from) return
+  project.reorder(from, to)
+}
+
+function onDragEnd(): void {
+  dragId.value = ''
+  dropAt.value = -1
+}
+
+/** 落点指示线：往上插一条，落在末尾时补一条在下沿 */
+function dropClass(index: number): Record<string, boolean> {
+  if (!dragId.value) return {}
+  return {
+    'is-drop-before': dropAt.value === index,
+    'is-drop-after':
+      dropAt.value === index + 1 && index === project.supportedFiles.length - 1,
+  }
+}
 
 function iconOf(status: FileStatus): string {
   return STATUS_ICON[status]
@@ -78,6 +150,13 @@ function select(file: AudioFile): void {
             v-for="(file, index) in project.supportedFiles"
             :key="file.id"
             class="filetree__segment"
+            :class="[{ 'is-dragging': dragId === file.id }, dropClass(index)]"
+            :draggable="!project.recognizing"
+            :title="project.recognizing ? '识别过程中不能调整顺序' : '拖动可调整顺序（合并模式下就是时间轴上的先后）'"
+            @dragstart="onDragStart($event, file.id)"
+            @dragover="onDragOver($event, index)"
+            @drop="onDrop"
+            @dragend="onDragEnd"
           >
             <span class="filetree__seg-index mono">{{ index + 1 }}</span>
             <span class="filetree__seg-main">
@@ -91,9 +170,20 @@ function select(file: AudioFile): void {
         </ul>
       </template>
 
-      <!-- 独立模式：文件树。不支持的文件单独归到下方分区，这里不重复列出 -->
+      <!-- 独立模式：文件树。不支持的文件单独归到下方分区，这里不重复列出。
+           顺序同样可以拖 —— 两种模式下这一列都是「工程里的先后」 -->
       <ul v-else class="filetree__list">
-        <li v-for="file in project.supportedFiles" :key="file.id">
+        <li
+          v-for="(file, index) in project.supportedFiles"
+          :key="file.id"
+          :class="[{ 'is-dragging': dragId === file.id }, dropClass(index)]"
+          :draggable="!project.recognizing"
+          :title="project.recognizing ? '识别过程中不能调整顺序' : '拖动可调整顺序'"
+          @dragstart="onDragStart($event, file.id)"
+          @dragover="onDragOver($event, index)"
+          @drop="onDrop"
+          @dragend="onDragEnd"
+        >
           <button
             class="filetree__item"
             :class="{ 'is-active': project.activeFileId === file.id }"
@@ -178,6 +268,46 @@ function select(file: AudioFile): void {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.filetree__list > li {
+  position: relative;
+}
+
+/* ---------- 拖拽排序 ---------- */
+
+.filetree__list > li[draggable='true'] {
+  cursor: grab;
+  /* 条目里是按钮，先按住再拖容易变成「拖一段文字」；这里强制按元素拖 */
+  -webkit-user-drag: element;
+}
+
+.filetree__list > li.is-dragging {
+  opacity: 0.4;
+}
+
+/*
+ * 落点指示线用伪元素，不用 inset box-shadow：条目里的按钮是不透明底，
+ * 画在 li 上的内阴影会被它整块盖住，屏幕上什么都看不见。
+ */
+.filetree__list > li.is-drop-before::before,
+.filetree__list > li.is-drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+}
+
+.filetree__list > li.is-drop-before::before {
+  top: -1px;
+}
+
+.filetree__list > li.is-drop-after::after {
+  bottom: -1px;
 }
 
 .filetree__item {

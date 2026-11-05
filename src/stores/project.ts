@@ -33,6 +33,7 @@ import { applyTermFix, collectFixTerms } from '@/utils/termFix'
 import { assignSpeakers } from '@/utils/speaker'
 import { MAX_LANES, overflowLaneIds } from '@/utils/timelineLayout'
 import { useUiStore } from '@/stores/ui'
+import { useLogStore } from '@/stores/logs'
 import { useSettingsStore } from '@/stores/settings'
 import { useModelStore } from '@/stores/model'
 import { useHistoryStore } from '@/stores/history'
@@ -54,6 +55,14 @@ export const MERGED_FILE_ID = '__merged__'
  * 清空队列时会复位到这里 —— 「清空」是彻底重来，不该把上一次的合并模式留下。
  */
 export const DEFAULT_BATCH_MODE: BatchMode = 'separate'
+
+/**
+ * 识别进度的三个阶段。
+ *
+ * `prepare` 与 `diarize` 都是**总量未知**的工作（解码/加载模型、聚类），
+ * 硬算一个百分比只会让进度条停住；`decode` 才有模型给的真实百分比。
+ */
+export type ProgressStage = 'idle' | 'prepare' | 'decode' | 'diarize'
 
 /** 合并视图里的一段：某个音频在合并时间轴上的位置 */
 export interface MergedPart {
@@ -131,6 +140,24 @@ export const useProjectStore = defineStore('project', () => {
   const recognizing = ref(false)
   const progress = ref(0)
   const progressLabel = ref('')
+  /**
+   * 进度所处的阶段（只用于文案与日志，不再改变进度条的形态）。
+   *
+   * 三段：
+   *  - `prepare`  预处理：解码音频、加载模型，这一段引擎报不出百分比
+   *  - `decode`   识别：模型给的真实百分比
+   *  - `diarize`  分离：引擎给的真实百分比
+   */
+  const progressStage = ref<ProgressStage>('idle')
+  /**
+   * 当前这一段**拿不到**可信的百分比（预处理 / 分离聚类）。
+   *
+   * 曾经据此把进度条切成「短条来回滑」的不确定态，结果是：一有进度就切回
+   * 数字条、一超时就切回滑动条，2.5 秒来回一次 —— 观感上就是进度条在跳，
+   * 原本连贯的推进也被切碎了。现在**界面不再跟着它换形态**，进度条老老实实
+   * 按百分比走；「现在到底在等什么」交给进度区悬停弹出的运行日志回答。
+   */
+  const progressStalled = ref(false)
   const elapsedSec = ref(0)
   const remainingSec = ref(0)
   /** 当前正在识别的文件 id（取消按钮与高亮用） */
@@ -276,6 +303,34 @@ export const useProjectStore = defineStore('project', () => {
   const totalDuration = computed(() =>
     supportedFiles.value.reduce((sum, f) => sum + (f.durationSec ?? 0), 0),
   )
+
+  /**
+   * 参与跨文件讲话人对应关系的文件。
+   *
+   * 合并模式下只有一条合并产物 —— 各文件的字幕已经拼进同一条时间轴，
+   * 再按文件分列没有意义。独立模式下一个文件一列。
+   */
+  const speakerMappingFiles = computed(() => {
+    if (isMerge.value) {
+      const merged = mergedFile.value
+      return merged
+        ? [
+            {
+              id: merged.id,
+              name: merged.name,
+              durationSec: merged.durationSec ?? 0,
+              segments: merged.segments,
+            },
+          ]
+        : []
+    }
+    return supportedFiles.value.map((f) => ({
+      id: f.id,
+      name: f.name,
+      durationSec: f.durationSec ?? 0,
+      segments: f.segments,
+    }))
+  })
 
   const totalSegments = computed(() =>
     isMerge.value && mergedFile.value
@@ -677,6 +732,16 @@ export const useProjectStore = defineStore('project', () => {
   function setBatchMode(mode: BatchMode): boolean {
     if (batchModeLocked.value && mode !== batchMode.value) return false
     batchMode.value = mode
+    /*
+     * 「共用一套称呼」的默认值跟着模式走：合并成一条时间轴，本来就是一条
+     * 完整的时间线，讲话人自然是一套；独立处理时各文件各拍各的，默认不该绑。
+     *
+     * **换模式就是换一套默认**：上一版留了「用户点过就再也不自动改」的例外，
+     * 结果是「合并过再切回独立处理，勾选框还留着勾」—— 独立处理下几个文件
+     * 根本互不相干，却共享一套称呼，正是这个开关不该有的状态。
+     * 所以切模式时一律重置，用户想留着自己再点一下。
+     */
+    settings.speakerNamesShared = mode === 'merge'
     return true
   }
 
@@ -828,6 +893,8 @@ export const useProjectStore = defineStore('project', () => {
     // 一个没有产物的合并视图里 —— 文件读进来了却什么都看不见。
     // 真踩到过：合并模式 → 清空队列 → 直接拖入 SRT，界面上空空如也。
     batchMode.value = DEFAULT_BATCH_MODE
+    // 回到独立处理，「共用一套称呼」一定回到关：新工程里几个文件互不相干
+    settings.speakerNamesShared = false
     // 导出记录指向的是已经不在队列里的文件，一起释放
     exportRecords.value.clear()
     savedSignatures.value.clear()
@@ -1033,6 +1100,7 @@ const MIME_BY_EXT: Record<string, string> = {
     const settings = useSettingsStore()
     const history = useHistoryStore()
     const model = useModelStore()
+    const logs = useLogStore()
 
     // 浏览器预览：没有桥就走旧的模拟进度，演示数据里已备好「结果」
     if (!window.xbaos) {
@@ -1040,6 +1108,9 @@ const MIME_BY_EXT: Record<string, string> = {
       progress.value = 0
       elapsedSec.value = 0
       remainingSec.value = queue.length * 2.2
+      // 演示进度是模拟出来的百分比，一直是确定态
+      progressStage.value = 'decode'
+      progressStalled.value = false
 
       const TOTAL_MS = queue.length * 2200
       const startedAt = performance.now()
@@ -1055,7 +1126,7 @@ const MIME_BY_EXT: Record<string, string> = {
           const index = Math.min(queue.length - 1, Math.floor(ratio * queue.length))
           const current = queue[index]
           if (current) {
-            const label = `正在识别 ${current.name}`
+            const label = `正在处理 ${current.name}`
             if (progressLabel.value !== label) {
               progressLabel.value = label
               for (const f of queue) {
@@ -1071,6 +1142,7 @@ const MIME_BY_EXT: Record<string, string> = {
             recognizing.value = false
             progress.value = 100
             progressLabel.value = ''
+            progressStage.value = 'idle'
             remainingSec.value = 0
             resolve()
           }
@@ -1087,6 +1159,12 @@ const MIME_BY_EXT: Record<string, string> = {
     progress.value = 0
     elapsedSec.value = 0
     remainingSec.value = 0
+    // 刚点下「开始识别」到模型吐出第一个百分比之间有一段真空：解码音频、
+    // 加载几百 MB 的模型都要时间。文案先说清在弄哪个文件（此时第一个文件
+    // 已经定性，就是它），免得底栏一片空白像没点上。
+    progressStage.value = 'prepare'
+    progressLabel.value = queue[0] ? `正在处理 ${queue[0].name}` : '正在准备'
+    progressStalled.value = true
 
     const engine = window.xbaos.engine
     const language = settings.autoDetectLanguage ? 'auto' : settings.language
@@ -1107,20 +1185,87 @@ const MIME_BY_EXT: Record<string, string> = {
     let doneCount = 0
     let currentPass = 0
 
+    // 新一轮识别开一本新账：上一轮的日志留着只会让人对错时间
+    logs.clear()
+    logs.push(
+      'info',
+      `开始识别 ${queue.length} 个文件，每份 ${passes} 遍，批量模式：${isMerge.value ? '合并为一条时间轴' : '独立处理'}`,
+    )
+
+    /*
+     * ---- 进度：按「工作单元」累计 ----
+     *
+     * 以前是「每个文件占 1/队列长度，识别占其中一段」，讲话人分离**没有位置**：
+     * 它只能把进度钉在 99%，用户看到的就是「卡在 99% 不动了」。
+     *
+     * 现在把每个文件要干的活拆成**单元**：识别一遍算一单元，启用分离再加
+     * 一单元（分离）。识别与分离因此共用**同一条**进度条，分离阶段推着它
+     * 继续往前走，而不是另起一个进度。
+     *
+     * 各文件的单元数不一样（没开分离、演示文件取不到真实路径都不占分离
+     * 单元），所以总量按文件累加，起点用前缀和 —— 失败的文件照常占位，
+     * 下一个文件的起点不会往回退。
+     */
+    const canDiarize = (f: AudioFile): boolean =>
+      settings.speakerDiarization && !f.demo && Boolean(f.path)
+    const unitPrefix: number[] = []
+    let unitAcc = 0
+    let diarizeUnits = 0
+    for (const f of queue) {
+      unitPrefix.push(unitAcc)
+      const units = passes + (canDiarize(f) ? 1 : 0)
+      unitAcc += units
+      if (canDiarize(f)) diarizeUnits += 1
+    }
+    const totalUnits = Math.max(1, unitAcc)
+    /** 合并模式把所有分离并成一段，它占的也是这 diarizeUnits 个单元 */
+    const diarizeBase = unitAcc - diarizeUnits
+
+    /** 当前文件已完成的单元数（识别算 passes 个，分离算 1 个） */
+    let currentUnitBase = 0
+    /** 当前单元的标题文案（底栏只显示「正在处理 某个文件」） */
+    let currentUnitLabel = ''
+
+    /** 把「单元内的完成比例」换算成整体百分比 */
+    const setUnitProgress = (base: number, slot: number, fraction: number): void => {
+      const pct = ((base + slot + fraction) / totalUnits) * 100
+      // 封顶 99：整体完成由收尾那一步置 100，提前显示 100 属于撒谎
+      progress.value = Math.max(progress.value, Math.min(99, Math.round(pct)))
+    }
+
+    /*
+     * ---- 停滞检测 ----
+     *
+     * 判断的是「有没有新进度」，不是「现在是什么阶段」：引擎长时间不报
+     * 百分比（分离的聚类阶段就不报）时，百分比会钉在原地 —— 那正是用户
+     * 最难受的观感。改成不确定态，短条左右滑，至少看得见还在动。
+     */
+    let lastProgressAt = performance.now()
+    const markProgress = (): void => {
+      lastProgressAt = performance.now()
+      progressStalled.value = false
+    }
+    const stallTimer = window.setInterval(() => {
+      if (!recognizing.value) return
+      if (performance.now() - lastProgressAt > 2500) progressStalled.value = true
+    }, 500)
+
+    // 低置信复核是**另一个任务**，它的百分比不能混进主进度里
+    let rescueActive = false
+
     // 流式进度：只更新整体百分比，字幕段的收集走 done 的完整返回更可靠
     // —— segment 流式消息只用来驱动「当前句」预览，这里不逐条入库。
     const offStream = engine.onStream(({ taskId, msg }) => {
       if (taskId !== currentTaskId.value || msg.type !== 'progress') return
-      const perFile = 100 / queue.length
-      const perPass = perFile / passes
-      progress.value = Math.min(
-        99,
-        Math.round(doneCount * perFile + currentPass * perPass + (msg.percent * perPass) / 100),
-      )
+      if (rescueActive) return
+      markProgress()
+      progressStage.value = 'decode'
+      progressLabel.value = currentUnitLabel
+      setUnitProgress(currentUnitBase, currentPass, msg.percent / 100)
     })
 
     try {
-      for (const file of queue) {
+      for (const [fileIndex, file] of queue.entries()) {
         if (cancelRequested) {
           file.status = 'queued'
           continue
@@ -1128,6 +1273,8 @@ const MIME_BY_EXT: Record<string, string> = {
 
         currentFileId.value = file.id
         file.status = 'processing'
+        // 这个文件在整体进度里的起点（前面若干文件的单元已折算成百分比）
+        currentUnitBase = unitPrefix[fileIndex] ?? 0
 
         // 每一遍的结果都留下来，跑完统一整合（见 utils/transcriptMerge.ts）
         const runs: RecognitionRun[] = []
@@ -1141,8 +1288,20 @@ const MIME_BY_EXT: Record<string, string> = {
 
           currentPass = k
           currentTaskId.value = `t-${file.id}-${k}`
-          progressLabel.value =
-            passes > 1 ? `正在识别 ${file.name}（第 ${k + 1}/${passes} 遍）` : `正在识别 ${file.name}`
+          /*
+           * 界面只留「正在处理哪个文件」。
+           *
+           * 遍数、阶段这些细节写进日志（下面一行），不再塞进底栏：
+           * 文字一变长度就变，底栏中间那一块跟着左右晃，进度条看着像在抖。
+           */
+          currentUnitLabel = `正在处理 ${file.name}`
+          logs.push('info', `${file.name}：开始第 ${k + 1}/${passes} 遍识别`)
+          // 先顶着同一个文案：这一遍要解码音频、加载模型，那段时间引擎报不出百分比，
+          // 进度条只能先停着等第一个真实百分比
+          progressStage.value = 'prepare'
+          progressLabel.value = currentUnitLabel
+          progressStalled.value = true
+          lastProgressAt = performance.now()
 
           // 每个文件每一遍开一个段收集器：流式 segment 用于收集结果，
           // 引擎 done 不回传段落明细
@@ -1204,10 +1363,15 @@ const MIME_BY_EXT: Record<string, string> = {
             failed = true
             file.status = 'failed'
             file.message = result.message ?? '识别失败'
+            logs.push('error', `${file.name}：第 ${k + 1} 遍失败 —— ${file.message}`)
             break
           }
 
           lastResult = result
+          logs.push(
+            'info',
+            `${file.name}：第 ${k + 1} 遍完成，${result.count ?? collected.length} 条，音频 ${Math.round(result.duration ?? 0)} 秒，引擎耗时 ${((result.elapsed ?? 0) / 1000).toFixed(1)} 秒`,
+          )
           runs.push({
             temperature: preset.temperatures[k] ?? 0,
             segments: collected,
@@ -1251,10 +1415,17 @@ const MIME_BY_EXT: Record<string, string> = {
         if (settings.lowConfRescue && !cancelRequested && !failed && lastResult) {
           const ranges = planRescueRanges(chosen.segments, lastResult.duration ?? 0)
           if (ranges.length > 0) {
-            // 进度沿用最后一个 pass 的槽位，标签切换成「复核」
+            // 复核是**另一件事**，不占识别那一遍的进度槽位：它的百分比
+            // 相对的是几秒复核区间，混进去会让进度条来回跳。
+            // 这里让它走不确定态，标签说清楚在做什么。
             currentPass = passes - 1
             currentTaskId.value = `t-${file.id}-rescue`
-            progressLabel.value = `正在复核低置信段落 ${file.name}`
+            progressStage.value = 'decode'
+            progressLabel.value = `正在处理 ${file.name}`
+            progressStalled.value = true
+            lastProgressAt = performance.now()
+            rescueActive = true
+            logs.push('info', `${file.name}：复核低置信段落 ${ranges.length} 处`)
 
             const rescued: SubtitleSegment[] = []
             const offRescue = engine.onStream(({ taskId, msg }) => {
@@ -1287,6 +1458,7 @@ const MIME_BY_EXT: Record<string, string> = {
               })
             } finally {
               offRescue()
+              rescueActive = false
             }
 
             if (!cancelRequested && rescued.length > 0) {
@@ -1344,6 +1516,11 @@ const MIME_BY_EXT: Record<string, string> = {
          */
         let baseline = alignOrigin(wrapped.segments)
 
+        logs.push(
+          'info',
+          `${file.name}：保留 ${kept.length} 条${noiseCount > 0 ? `（丢弃无内容 ${noiseCount} 条）` : ''}，标点切分 ${processed.splitCount} 条，按规格折行 ${wrapped.splitCount} 条`,
+        )
+
         /*
          * ---- 讲话人分离 ----
          *
@@ -1354,20 +1531,50 @@ const MIME_BY_EXT: Record<string, string> = {
          * 失败不算识别失败 —— 字幕已经拿到了，少一个标签不是硬伤。提示一句
          * 让用户知道这次没有分离结果，但不要因此把整段识别标成失败。
          */
-        if (settings.speakerDiarization && !cancelRequested && !file.demo && file.path) {
+        /*
+         * 合并模式下**不在这里分离**：所有文件识别完再统一跑一遍（见循环之后）。
+         *
+         * 一边识别一边分离的话，A 文件的 0 号与 B 文件的 0 号各自独立编号，
+         * 拼到同一条时间轴上就变成「同一个人」—— 两段不同人说话却共用一个
+         * 称呼。统一放到最后，编号按序接着排，不会张冠李戴。
+         */
+        if (!isMerge.value && settings.speakerDiarization && !cancelRequested && !file.demo && file.path) {
           const owner = `diarize:${file.id}`
           ui.beginTask(owner, '分析讲话人')
-          const offProgress = window.xbaos?.engine.onDiarizeProgress?.(({ percent }) => {
-            ui.updateTask(owner, percent, '分析讲话人')
-          })
+          /*
+           * 分离也有真实百分比：引擎的聚类回调按「已处理音频块 / 总块数」
+           * 报进度，主进程原样转上来。把它折算进**同一条**进度条 —— 这一步
+           * 过去完全没有位置，用户只能看着 99% 干等。
+           */
+          progressStage.value = 'diarize'
+          progressLabel.value = `正在处理 ${file.name}`
+          progressStalled.value = true
+          logs.push('info', `分析讲话人：${file.name}`)
+          lastProgressAt = performance.now()
+          const offProgress = window.xbaos?.engine.onDiarizeProgress?.(
+            ({ taskId, percent }) => {
+              if (taskId && taskId !== owner) return
+              ui.updateTask(owner, percent, '分析讲话人')
+              markProgress()
+              setUnitProgress(currentUnitBase, passes, percent / 100)
+              // 回调报 100 只代表「音频块都过完了」，聚类与结果整理还在跑。
+              // 这时候再显示 100% 就是骗人，改回不确定态让短条继续滑。
+              if (percent >= 100) progressStalled.value = true
+            },
+          )
           try {
             const diar = await engine.diarize({
+              taskId: owner,
               audio: file.path,
               numSpeakers: settings.speakerCount > 0 ? settings.speakerCount : undefined,
               threads,
             })
             const assigned = assignSpeakers(baseline, diar.spans)
             baseline = assigned.segments
+            logs.push(
+              'info',
+              `分析讲话人完成：${file.name}，${assigned.speakers} 位讲话人，${assigned.tagged} 条已标注`,
+            )
             if (assigned.speakers > 1) {
               ui.notify(
                 'info',
@@ -1384,6 +1591,9 @@ const MIME_BY_EXT: Record<string, string> = {
           } finally {
             offProgress?.()
             ui.endTask(owner)
+            // 分离这一单元走完了，进度落到单元末尾（聚类耗时也算在里面）
+            setUnitProgress(currentUnitBase, passes, 1)
+            progressStalled.value = true
           }
         }
 
@@ -1461,12 +1671,98 @@ const MIME_BY_EXT: Record<string, string> = {
         elapsedSec.value = Math.round((performance.now() - startedAt) / 1000)
         const speed = doneCount > 0 ? elapsedSec.value / doneCount : 0
         remainingSec.value = Math.max(0, Math.round(speed * (queue.length - doneCount)))
-        progress.value = Math.round((doneCount / queue.length) * 100)
+        // 整体进度由「工作单元」累计（见 setUnitProgress），这里不再按文件数
+        // 另算一份 —— 两套算法混用会让进度条在某些文件组合下卡住不前
+      }
+
+      /*
+       * ---- 合并模式：讲话人分离放到最后，统一跑 ----
+       *
+       * 一条时间轴上只能有一套编号。逐文件各跑各的，A 的 0 号与 B 的 0 号
+       * 拼到一起就成了「同一个人」—— 两段不同人说话共用一个称呼，改名字
+       * 还会一起改。所以这里按队列顺序依次分离，每个文件的编号**接着往下排**
+       * （前一个文件占了 0..n-1，后一个从 n 起），不做任何按编号的强行绑定。
+       */
+      if (isMerge.value && settings.speakerDiarization && !cancelRequested) {
+        const targets = queue.filter((f) => canDiarize(f) && f.segments.length > 0)
+        /*
+         * 起点接着**已经分离过的**那几份往下排。
+         *
+         * 合并模式是增量的：后来才加进来的文件不会把旧文件的条目重算一遍，
+         * 旧文件那套编号还在时间轴上。这里若从 0 起，新文件的 0 号就会与
+         * 旧文件的 0 号重合 —— 又变回「不同人共用一个称呼」。
+         */
+        const targetIds = new Set(targets.map((f) => f.id))
+        let nextIndex = 0
+        for (const f of supportedFiles.value) {
+          if (targetIds.has(f.id)) continue
+          for (const seg of f.segments) {
+            if (typeof seg.speaker === 'number') nextIndex = Math.max(nextIndex, seg.speaker + 1)
+          }
+        }
+        for (const [i, file] of targets.entries()) {
+          const owner = `diarize:${file.id}`
+          logs.push('info', `分析讲话人（${i + 1}/${targets.length}）：${file.name}`)
+          ui.beginTask(owner, '分析讲话人')
+          progressStage.value = 'diarize'
+          progressLabel.value = `正在处理 ${file.name}`
+          const offProgress = window.xbaos?.engine.onDiarizeProgress?.(
+            ({ taskId, percent }) => {
+              if (taskId && taskId !== owner) return
+              ui.updateTask(owner, percent, '分析讲话人')
+              // 这一段是所有分离合成的，按「第几份 + 这一份的百分比」折算
+              const share =
+                (diarizeBase + ((i + percent / 100) / targets.length) * diarizeUnits) / totalUnits
+              progress.value = Math.max(progress.value, Math.min(99, Math.round(share * 100)))
+            },
+          )
+          try {
+            const diar = await engine.diarize({
+              taskId: owner,
+              audio: file.path,
+              numSpeakers: settings.speakerCount > 0 ? settings.speakerCount : undefined,
+              threads,
+            })
+            const assigned = assignSpeakers(file.segments, diar.spans)
+            file.segments = assigned.segments.map((seg) =>
+              typeof seg.speaker === 'number'
+                ? { ...seg, speaker: seg.speaker + nextIndex }
+                : seg,
+            )
+            nextIndex += assigned.speakers
+            logs.push(
+              'info',
+              `${file.name}：${assigned.speakers} 位讲话人，${assigned.tagged} 条已标注`,
+            )
+            if (assigned.speakers > 1) {
+              ui.notify(
+                'info',
+                '讲话人分析完成',
+                `${file.name}：${assigned.speakers} 位讲话人，${assigned.tagged} 条已标注`,
+              )
+            }
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err)
+            logs.push('error', `分析讲话人失败（${file.name}）：${reason}`)
+            ui.notify('warning', '讲话人分析未完成', `${file.name}：${reason}`)
+          } finally {
+            offProgress?.()
+            ui.endTask(owner)
+          }
+        }
+        progress.value = Math.max(
+          progress.value,
+          Math.min(99, Math.round(((diarizeBase + diarizeUnits) / totalUnits) * 100)),
+        )
       }
 
       // 每段音频都跑完了才拼合并产物：偏移量依赖各段的真实时长，而这些
       // 时长要等引擎回报。中途取消就不拼，避免把残缺结果当成成品
       if (!cancelRequested) {
+        logs.push(
+          'info',
+          `识别结束：${doneCount} 个文件，整体用时 ${Math.round((performance.now() - startedAt) / 1000)} 秒`,
+        )
         if (isMerge.value) {
           rebuildMerged()
         } else {
@@ -1493,8 +1789,11 @@ const MIME_BY_EXT: Record<string, string> = {
       ui.notify('error', '识别中断', err instanceof Error ? err.message : String(err))
     } finally {
       offStream()
+      window.clearInterval(stallTimer)
       recognizing.value = false
       progressLabel.value = ''
+      progressStage.value = 'idle'
+      progressStalled.value = false
       currentFileId.value = null
       progress.value = cancelRequested ? 0 : 100
       cancelRequested = false
@@ -1564,6 +1863,8 @@ const MIME_BY_EXT: Record<string, string> = {
     recognizing,
     progress,
     progressLabel,
+    progressStage,
+    progressStalled,
     elapsedSec,
     remainingSec,
     currentFileId,
@@ -1574,6 +1875,7 @@ const MIME_BY_EXT: Record<string, string> = {
     activeFile,
     isMerge,
     mergedParts,
+    speakerMappingFiles,
     viewFile,
     viewFileId,
     totalDuration,
@@ -1604,6 +1906,7 @@ const MIME_BY_EXT: Record<string, string> = {
     cancelRecognition,
     receiveDroppedFiles,
     ensureMedia,
+    mediaOf,
     peaksOf,
     mediaErrorOf,
     mediaVersion,
