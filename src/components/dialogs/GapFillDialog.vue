@@ -40,7 +40,7 @@ const previewRows = computed(() => changes.value.slice(0, 8))
  * 视图与导出里，所以不能拿 supportedFiles 去统计。
  */
 const allTargets = computed(() =>
-  project.isMerge && project.mergedFile ? [project.mergedFile] : project.supportedFiles,
+  project.isMerge && project.viewFile ? [project.viewFile] : project.supportedFiles,
 )
 
 const totalChanges = computed(() =>

@@ -512,6 +512,43 @@ export interface XbaosBridge {
     dirname: (p: string) => Promise<string>
   }
 
+  /**
+   * 项目文件（`.xbsgp`）的读写。
+   *
+   * 与 `fs.*` 分开的原因只有一个：**写盘要能拒绝覆盖别人的工程文件**。
+   * `fs.writeText` 是无条件的（导出字幕时就该无条件覆盖），而项目文件一旦
+   * 被静默覆盖，丢的是一整部片子的字幕。所以这里单开一个带 `allowOverwrite`
+   * 的入口，判定放在主进程，避免「渲染进程判完、写盘之间又被建了一个同名文件」
+   * 这种时隙。
+   */
+  project: {
+    /** 保存对话框。只选位置与文件名，`.xbsgp` 后缀由主进程补齐 */
+    pickSave: (options?: { defaultName?: string; defaultDir?: string }) => Promise<string | null>
+    /** 打开对话框，只列 `.xbsgp` */
+    pickOpen: () => Promise<string | null>
+    /**
+     * 写盘。
+     * `allowOverwrite` 为 false 时，目标已存在直接拒绝（`code: 'exists'`）——
+     * 这是「保存到自己的路径」与「另存为」的唯一区别。
+     */
+    write: (
+      p: string,
+      content: string,
+      allowOverwrite: boolean,
+    ) => Promise<{ ok: boolean; code?: 'exists' | 'io'; message?: string }>
+    /**
+     * 重命名磁盘上的项目文件。
+     *
+     * 项目名与磁盘文件名必须始终一致 —— 否则用户去文件夹里按侧栏显示的名字
+     * 找，什么都找不到。所以改名要走真正的 `rename`，而不是「另存一份再把
+     * 旧的删掉」（那中间有一段时间磁盘上有两份，删失败就留下两个废文件）。
+     */
+    rename: (
+      from: string,
+      to: string,
+    ) => Promise<{ ok: boolean; code?: 'exists' | 'io'; message?: string }>
+  }
+
   clipboard: {
     write: (text: string) => Promise<boolean>
     /** 读取剪贴板文本。AI 校对用它接回用户从网页版复制的结果 */

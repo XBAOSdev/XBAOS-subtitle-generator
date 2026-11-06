@@ -1,19 +1,19 @@
 import { defineStore } from 'pinia'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type {
   AudioFile,
   AudioPeaks,
   BatchMode,
   ExportLangBundle,
   FileStatus,
+  SegmentIssue,
   SubtitleSegment,
 } from '@/types'
 import { makeAudioFile, mockFiles } from '@/mock/mockData'
 import { extOf, isSupported, unsupportedReason, isSubtitleExt } from '@/utils/formats'
 import { parseSubtitle } from '@/utils/subtitleParse'
-import { dirOf, nameOf, extOfPath } from '@/utils/path'
+import { dirOf, nameOf, extOfPath, stemOf, joinPath } from '@/utils/path'
 import { applyPunctuation, hasContent } from '@/utils/punctuation'
-import { buildMergedTimeline } from '@/utils/mergeTimeline'
 import { buildPrompt, pickPresentTerms } from '@/utils/prompt'
 import { depthPreset } from '@/utils/reasoningDepth'
 import { mergeRuns, runText, type RecognitionRun } from '@/utils/transcriptMerge'
@@ -37,6 +37,17 @@ import { useLogStore } from '@/stores/logs'
 import { useSettingsStore } from '@/stores/settings'
 import { useModelStore } from '@/stores/model'
 import { useHistoryStore } from '@/stores/history'
+import { useSpeakerStore } from '@/stores/speakers'
+import { buildProjectDoc, fromProjectText, toProjectText } from '@/utils/xbsgp'
+import { appVersion } from '@/branding'
+import {
+  defaultProjectName,
+  isProjectPath,
+  projectFileName,
+  samePath,
+  sanitizeFileName,
+} from '@/utils/projectName'
+import type { ProjectDoc } from '@/types'
 
 /**
  * 浏览器预览模式下文件没有真实路径，统一给一个演示目录。
@@ -45,10 +56,18 @@ import { useHistoryStore } from '@/stores/history'
 const PREVIEW_DIR = 'D:\\Import'
 
 /**
- * 合并模式产物的虚拟条目 id。它不是文件，只是一个把多段音频的字幕
- * 拼到同一条时间轴上的容器；编辑器、校验、导出在合并模式下都以它为准。
+ * 项目视图的虚拟条目 id。
+ *
+ * 它不是文件，而是「一个项目的全部子项目按顺序拼接成的那一条时间轴」的标识。
+ * 编辑器、校验、导出、回退记录在项目视图下都以它为准。
+ *
+ * 值沿用历史上的 `__merged__`：media（波形）／exportRecords（导出落点）／
+ * speakers（讲话人表）都按这个键存过数据，改名只会换来一次没有收益的迁移。
  */
 export const MERGED_FILE_ID = '__merged__'
+
+/** 视图文件在拼接意义上的扩展名，用来区分「这不是一个真实音频」 */
+export const MERGED_EXT = 'merged'
 
 /**
  * 批量处理的默认模式：独立处理。
@@ -130,11 +149,30 @@ export const useProjectStore = defineStore('project', () => {
    * 时间轴错位），所以必须先清空队列才允许改。
    */
   const batchModeLocked = ref(false)
+
+  /* ------------------------------------------------------------ 项目元信息 */
+
   /**
-   * 合并模式的产物。识别完成后物化成一条虚拟条目，
-   * 编辑器与导出在合并模式下都以它为准；队列变动时作废。
+   * 项目名。
+   *
+   * 空串表示「还没算过」，此时显示名取 `defaultProjectName(子项目名)` ——
+   * 项目名只在建项目时算一次，之后删第一个子项目、改子项目名都不再跟着变，
+   * 所以这里不能做成跟随子项目的 computed，只能是一个可以由用户覆盖的值。
    */
-  const mergedFile = ref<AudioFile | null>(null)
+  const projectName = ref('')
+  /** 项目文件路径。null = 还没落过盘（侧栏要标「未保存」） */
+  const projectPath = ref<string | null>(null)
+  /**
+   * 有没有未保存到 `.xbsgp` 的改动。
+   *
+   * 与 `savedSignatures`（导出落点那套）是两回事：那个回答「导出的成品是不是
+   * 最新的」，这个回答「工程本身存过没有」。P0 先把两个都留着，等就地保存
+   * 挪进导出弹窗之后再合并成一条。
+   */
+  const projectDirty = ref(false)
+  /** 上一次保存项目时选的目录，下次对话框默认落到这里 */
+  const lastProjectDir = ref('')
+
   const activeFileId = ref<string | null>(null)
 
   const recognizing = ref(false)
@@ -225,6 +263,18 @@ export const useProjectStore = defineStore('project', () => {
 
   /** 写盘成功后登记一次。所有落盘路径都必须调它，否则关窗会误报 */
   function markSaved(fileId: string, segments: SubtitleSegment[]): void {
+    /*
+     * 项目视图的签名要**按子项目拆开记**：`unsavedSummary()` 是逐个条目
+     * 判断的，如果只在 `MERGED_FILE_ID` 上记一份拼接签名，各子项目永远
+     * 对不上，关窗时就会误报「全都没保存」。
+     */
+    if (fileId === MERGED_FILE_ID) {
+      for (const f of supportedFiles.value) {
+        savedSignatures.value.set(f.id, segmentsSignature(f.segments))
+      }
+      savedSignatures.value.set(MERGED_FILE_ID, segmentsSignature(segments))
+      return
+    }
     savedSignatures.value.set(fileId, segmentsSignature(segments))
   }
 
@@ -250,8 +300,6 @@ export const useProjectStore = defineStore('project', () => {
         names.push(f.name)
         continue
       }
-      // 合并产物按它的内容算，不按参与合并的源文件算
-      if (f.merged && f.segments.length === 0) continue
       const hasContent = f.segments.some(hasText) || f.segments.some((s) => s.translations)
       if (!hasContent) continue
       if (savedSignatures.value.get(f.id) !== segmentsSignature(f.segments)) names.push(f.name)
@@ -272,23 +320,28 @@ export const useProjectStore = defineStore('project', () => {
   const isMerge = computed(() => batchMode.value === 'merge')
 
   /**
-   * 编辑器 / 波形 / 播放器 / 工具栏统一看这个「当前视图条目」。
+   * 项目显示名。
    *
-   * 独立模式下就是被选中的那个文件；合并模式下是拼接产物 ——
-   * 这样一切换到合并模式，界面上呈现的就只有一条合并时间轴，
-   * 不会再因为点队列里的某个音频而整个换掉预览内容。
+   * 用户改过（`projectName` 非空）就用他的；没改过就现算一个默认名 ——
+   * 「第一个子项目名去扩展名，多个加『等』」。默认名**不写回** `projectName`：
+   * 写回去之后就再也分不清"这是用户起的"还是"我们替他起的"，删掉第一个
+   * 子项目时也没法再跟着变。
    */
-  const viewFile = computed<AudioFile | null>(() =>
-    isMerge.value ? mergedFile.value : activeFile.value,
-  )
+  const displayProjectName = computed(() => {
+    if (projectName.value.trim()) return projectName.value.trim()
+    return defaultProjectName(supportedFiles.value.map((f) => f.name))
+  })
 
-  const viewFileId = computed(() => viewFile.value?.id ?? null)
+  /* ------------------------------------------------------ 项目视图（拼接） */
 
   /**
-   * 参与合并的分段表。偏移量按各音频的时长累加 —— 时长是解码后
-   * 由引擎回报的，识别完成后才可靠，所以合并产物在识别结束时才物化。
+   * 各子项目在项目时间轴上的起点。
+   *
+   * **派生值，不存盘**：第 i 个的偏移 = 前面所有子项目时长之和。换顺序、
+   * 重识别后时长变了、换音频，都只是让这张表重算一次 —— 一条字幕数据都不用
+   * 搬动。这就是「子项目各自独立存、显示时首尾相接」的全部收益。
    */
-  const mergedParts = computed<MergedPart[]>(() => {
+  const itemOffsets = computed<MergedPart[]>(() => {
     const out: MergedPart[] = []
     let offset = 0
     for (const f of supportedFiles.value) {
@@ -299,6 +352,143 @@ export const useProjectStore = defineStore('project', () => {
     return out
   })
 
+  /** 某个子项目的起点秒数。找不到时按 0 处理（比抛错温和，界面不会因此白屏） */
+  function offsetOfItem(id: string): number {
+    return itemOffsets.value.find((p) => p.fileId === id)?.offsetSec ?? 0
+  }
+
+  /**
+   * 拼接后的全部字幕：本地时间码 + 偏移，并标上来源子项目。
+   *
+   * 返回的是**拷贝**：调用方写进去不会直接改到存储层，必须整份赋回来
+   * （`viewFile.segments = …` 由 setter 拆回各子项目）。这条约定是 3 处
+   * 「直接写下标」的编辑点必须改成 store 方法的根本原因。
+   *
+   * 不过滤空文本：识别结果在入库前已经滤过一遍（`startRecognition` 里），
+   * 这里再滤会让「用户把某条文字清空」变成「这一条凭空消失」。
+   */
+  function concatSegments(): SubtitleSegment[] {
+    const out: SubtitleSegment[] = []
+    for (const f of supportedFiles.value) {
+      const offset = offsetOfItem(f.id)
+      for (const seg of f.segments) {
+        out.push({
+          ...seg,
+          originFileId: f.id,
+          start: round3(seg.start + offset),
+          end: round3(seg.end + offset),
+        })
+      }
+    }
+    return out
+  }
+
+  /**
+   * 绝对时间码落在哪个子项目的区间里。
+   *
+   * 边界取左闭右开：正好落在交界处的条目归**后**一个，否则交叉点上的字幕会
+   * 被塞回上一段的末尾，看起来像"跑到别人的时间轴里了"。
+   */
+  function ownerAtTime(t: number): string {
+    const list = supportedFiles.value
+    for (let i = 0; i < list.length; i += 1) {
+      const offset = offsetOfItem(list[i].id)
+      const duration = list[i].durationSec ?? 0
+      if (t >= offset && t < offset + duration) return list[i].id
+    }
+    // 落在所有区间之外（拖到末尾之后、或项目里全是零时长条目）→ 归最后一个
+    return list.length > 0 ? list[list.length - 1].id : ''
+  }
+
+  /**
+   * 把拼接视图的整份内容拆回各子项目。
+   *
+   * 归属按 `originFileId`（视图拷贝上一定带着），没有标记的是用户新加的
+   * 条目，按绝对时间码归入区间。写回时减掉偏移、剥掉标记 —— 存储层永远
+   * 只放本地时间码，`originFileId` 只是视图层的东西，落盘也不写它。
+   */
+  function spreadSegments(next: SubtitleSegment[]): void {
+    const list = supportedFiles.value
+    const known = new Set(list.map((f) => f.id))
+    const groups = new Map<string, SubtitleSegment[]>()
+    const pushTo = (id: string, seg: SubtitleSegment): void => {
+      const arr = groups.get(id)
+      if (arr) arr.push(seg)
+      else groups.set(id, [seg])
+    }
+
+    for (const seg of next) {
+      const owner = seg.originFileId
+      if (owner && known.has(owner)) pushTo(owner, seg)
+      else pushTo(ownerAtTime(seg.start), seg)
+    }
+
+    for (const f of list) {
+      const offset = offsetOfItem(f.id)
+      const arr = (groups.get(f.id) ?? [])
+        .map((seg) => {
+          const { originFileId: _drop, ...rest } = seg
+          return {
+            ...rest,
+            start: round3(seg.start - offset),
+            end: round3(seg.end - offset),
+          }
+        })
+        // 排序是必须的：视图里可以乱序交回（合并、拆分都会重排），
+        // 存储层按时间码有序，后面的校验与折行都默认这件事成立
+        .sort((a, b) => a.start - b.start)
+      f.segments = arr
+    }
+  }
+
+  /**
+   * 构造项目视图条目。
+   *
+   * `segments` 用访问器而不是快照：写回时自动拆到各子项目，读时自动拼回来。
+   * 现有编辑链路的形态是 `file = viewFile; file.segments = …`，21 处赋值式
+   * 因此完全不用改。
+   */
+  function makeViewFile(): AudioFile | null {
+    const list = supportedFiles.value
+    if (list.length === 0) return null
+    const first = list[0]
+    const view: AudioFile = {
+      id: MERGED_FILE_ID,
+      name: displayProjectName.value,
+      path: first.path,
+      dir: first.dir,
+      ext: MERGED_EXT,
+      sizeBytes: 0,
+      durationSec: totalDuration.value,
+      status: 'pending',
+      segments: [],
+      // 演示数据（浏览器预览）没有真实音频，波形交给合成峰值
+      demo: list.every((f) => f.demo === true),
+    }
+    Object.defineProperty(view, 'segments', {
+      get: () => concatSegments(),
+      set: (next: SubtitleSegment[]) => spreadSegments(next),
+      enumerable: true,
+      configurable: true,
+    })
+    return view
+  }
+
+  /**
+   * 编辑器 / 波形 / 播放器 / 工具栏统一看这个「当前视图条目」。
+   *
+   * 独立模式下就是被选中的那个文件；合并模式下是项目视图 —— 整个项目呈现为
+   * 一条完整的时间轴，点队列里的某个音频不会换掉预览内容。
+   */
+  const viewFile = computed<AudioFile | null>(() =>
+    isMerge.value ? makeViewFile() : activeFile.value,
+  )
+
+  const viewFileId = computed(() => viewFile.value?.id ?? null)
+
+  /** 合并模式下参与拼接的分段表（波形按段解码后拼接，顺序加载避免顶爆内存） */
+  const mergedParts = computed<MergedPart[]>(() => itemOffsets.value)
+
   /** 合并模式下的总时长（用真实时长累加，不用最后一条字幕的时间码） */
   const totalDuration = computed(() =>
     supportedFiles.value.reduce((sum, f) => sum + (f.durationSec ?? 0), 0),
@@ -307,19 +497,21 @@ export const useProjectStore = defineStore('project', () => {
   /**
    * 参与跨文件讲话人对应关系的文件。
    *
-   * 合并模式下只有一条合并产物 —— 各文件的字幕已经拼进同一条时间轴，
-   * 再按文件分列没有意义。独立模式下一个文件一列。
+   * 合并模式下只有一条项目视图 —— 各子项目的字幕已经拼进同一条时间轴，
+   * 再按子项目分列就会让同一段文字出现两次。独立模式下一个文件一列。
+   *
+   * （P1 会改成「一个子项目一列」，那要等讲话人表改成项目级之后。）
    */
   const speakerMappingFiles = computed(() => {
     if (isMerge.value) {
-      const merged = mergedFile.value
-      return merged
+      const view = viewFile.value
+      return view
         ? [
             {
-              id: merged.id,
-              name: merged.name,
-              durationSec: merged.durationSec ?? 0,
-              segments: merged.segments,
+              id: view.id,
+              name: view.name,
+              durationSec: view.durationSec ?? 0,
+              segments: view.segments,
             },
           ]
         : []
@@ -333,8 +525,8 @@ export const useProjectStore = defineStore('project', () => {
   })
 
   const totalSegments = computed(() =>
-    isMerge.value && mergedFile.value
-      ? mergedFile.value.segments.length
+    isMerge.value
+      ? concatSegments().length
       : supportedFiles.value.reduce((sum, f) => sum + f.segments.length, 0),
   )
 
@@ -354,9 +546,6 @@ export const useProjectStore = defineStore('project', () => {
       if (f.status === 'unsupported') continue
       for (const s of f.segments) parts.push(`${s.start}|${s.end}|${s.text}`)
     }
-    if (mergedFile.value) {
-      for (const s of mergedFile.value.segments) parts.push(`${s.start}|${s.end}|${s.text}`)
-    }
     return parts.join('\u0001')
   }
 
@@ -366,6 +555,41 @@ export const useProjectStore = defineStore('project', () => {
       `${settings.maxCharsPerLine}|${settings.maxCharsPerLineEn}|` +
       `${settings.maxLinesPerSegment}|${settings.maxSegmentDuration}`,
   )
+
+  /** 校验规格。改设置时它变，校验结论跟着重算 */
+  function specOf() {
+    return {
+      maxCharsPerLine: settings.maxCharsPerLine,
+      maxCharsPerLineEn: settings.maxCharsPerLineEn,
+      maxLinesPerSegment: settings.maxLinesPerSegment,
+      maxSegmentDuration: settings.maxSegmentDuration,
+    }
+  }
+
+  /**
+   * 算出一整条时间轴上每条的校验结论（只算不写）。
+   *
+   * 抽出来是因为要算两遍：一次按各子项目**自己的**时间码，一次按**拼接后**的
+   * 时间码。后者才能发现「上一段末尾与下一段开头重叠」这种跨边界的毛病，
+   * 而前者是独立模式下唯一成立的算法。
+   */
+  function computeIssues(segments: SubtitleSegment[]): Map<string, SegmentIssue[]> {
+    const spec = specOf()
+    const overflow = overflowLaneIds(segments)
+    const out = new Map<string, SegmentIssue[]>()
+    for (let i = 0; i < segments.length; i += 1) {
+      const next = validateSegment(segments[i], segments[i - 1], spec)
+      if (overflow.has(segments[i].id)) {
+        next.push({
+          level: 'error',
+          code: 'LANE_OVERFLOW',
+          message: `同一时刻重叠的字幕超过 ${MAX_LANES} 条`,
+        })
+      }
+      out.set(segments[i].id, next)
+    }
+    return out
+  }
 
   /**
    * 只写结论真的变了的条目，少一些无谓的响应式触发。
@@ -377,27 +601,36 @@ export const useProjectStore = defineStore('project', () => {
    * 都不提，用户完全无从下手。
    */
   function applyIssues(segments: SubtitleSegment[]): void {
-    const spec = {
-      maxCharsPerLine: settings.maxCharsPerLine,
-      maxCharsPerLineEn: settings.maxCharsPerLineEn,
-      maxLinesPerSegment: settings.maxLinesPerSegment,
-      maxSegmentDuration: settings.maxSegmentDuration,
-    }
-    const overflow = overflowLaneIds(segments)
-    for (let i = 0; i < segments.length; i += 1) {
-      const next = validateSegment(segments[i], segments[i - 1], spec)
-      if (overflow.has(segments[i].id)) {
-        next.push({
-          level: 'error',
-          code: 'LANE_OVERFLOW',
-          message: `同一时刻重叠的字幕超过 ${MAX_LANES} 条`,
-        })
-      }
-      const cur = segments[i].issues
+    const issues = computeIssues(segments)
+    for (const seg of segments) {
+      const next = issues.get(seg.id) ?? []
+      const cur = seg.issues
       if (cur.length === next.length && cur.every((issue, k) => issue.code === next[k].code)) {
         continue
       }
-      segments[i].issues = next
+      seg.issues = next
+    }
+  }
+
+  /**
+   * 合并模式下按**拼接视图**重算，再把结论写回各子项目。
+   *
+   * 视图里的条目是拷贝（`concatSegments()`），算出来的 conclusions 挂在拷贝上
+   * 就丢了 —— 必须按 id 找回来写进存储层，否则界面上永远看不到校验结果。
+   */
+  function applyViewIssues(): void {
+    const issues = computeIssues(concatSegments())
+    for (const f of files.value) {
+      if (f.status === 'unsupported') continue
+      for (const seg of f.segments) {
+        const next = issues.get(seg.id)
+        if (!next) continue
+        const cur = seg.issues
+        if (cur.length === next.length && cur.every((issue, k) => issue.code === next[k].code)) {
+          continue
+        }
+        seg.issues = next
+      }
     }
   }
 
@@ -412,11 +645,28 @@ export const useProjectStore = defineStore('project', () => {
       if (f.status === 'unsupported') continue
       applyIssues(f.segments)
     }
-    if (mergedFile.value) applyIssues(mergedFile.value.segments)
+    // 合并模式再按拼接时间码算一遍，覆盖上面按子项目算出来的结论
+    if (isMerge.value) applyViewIssues()
   }
 
   // 字幕或规格一变就重算。flush: 'post' 让它排在渲染之后，不挡用户输入
   watch([validationSignature, specSignature], revalidate, { flush: 'post', immediate: true })
+
+  /**
+   * 内容一变就标「工程有未保存的改动」。
+   *
+   * 挂在签名上而不是散落到 30 个编辑点：那些点清一色是 `segments = …`，
+   * 逐个补 `projectDirty = true` 一定会漏一个，而漏掉的那个正好是用户
+   * 关窗时丢掉的那段工作。
+   *
+   * `suppressDirty` 是给「打开项目」用的：整套替换 files 会让签名变一次，
+   * 那不是用户的改动，不该把刚打开的项目标成脏的。
+   */
+  let suppressDirty = false
+  watch(validationSignature, () => {
+    if (suppressDirty) return
+    if (supportedFiles.value.length > 0) projectDirty.value = true
+  })
 
   /**
    * 全工程的告警条数（底部状态栏用）。
@@ -428,12 +678,12 @@ export const useProjectStore = defineStore('project', () => {
    * 已整条「忽略」的字幕不计入（`countIssues` 里判的）。
    */
   const errorCount = computed(() => {
-    if (isMerge.value && mergedFile.value) return countIssues(mergedFile.value.segments).errors
+    if (isMerge.value) return countIssues(concatSegments()).errors
     return supportedFiles.value.reduce((n, f) => n + countIssues(f.segments).errors, 0)
   })
 
   const warningCount = computed(() => {
-    if (isMerge.value && mergedFile.value) return countIssues(mergedFile.value.segments).warnings
+    if (isMerge.value) return countIssues(concatSegments()).warnings
     return supportedFiles.value.reduce((n, f) => n + countIssues(f.segments).warnings, 0)
   })
 
@@ -460,54 +710,6 @@ export const useProjectStore = defineStore('project', () => {
   })
 
   /* ------------------------------------------------- 合并模式（单条时间轴） */
-
-  /**
-   * 把所有参与合并的音频的字幕拼到一条时间轴上。
-   *
-   * 时间码按各音频时长依次累加；只保留有实际内容的条目 —— 模型在纯静音上
-   * 偶尔会吐出一个孤零零的句号，那种条目留着只会让人以为「什么都没识别到」。
-   *
-   * **增量规则（关键）**：合并时间轴同时是编辑器的唯一入口，用户会直接在上面
-   * 改内容（人工编辑、工具、AI 校对都是改它）。所以重新拼接**绝不能**无脑从
-   * 源文件重来 —— 源文件里存的还是识别原始结果，用户的修改只在产物上，
-   * 重来一次就等于把修改全丢了。
-   *
-   * 真踩过：合并模式下改完内容，只是往队列里追加一段音频（还没重新识别），
-   * 之前的修改就「原封不动地回去」了（`addFiles` → `onQueueChanged` →
-   * 全量重拼）。独立处理模式没这个问题，因为每个文件自己就是编辑对象。
-   *
-   * 规则：
-   *   - 上一轮已经参与过合并的文件 → 整组条目原样保留，只按偏移差整体平移；
-   *   - 这一轮新加入（或刚识别出内容）的文件 → 从源文件生成新条目；
-   *   - 产物上手动新增的条目（没有来源标记）→ 保留，按时间码插回原位。
-   */
-  function buildMergedFile(): AudioFile | null {
-    const list = supportedFiles.value
-    if (list.length === 0) return null
-
-    const previous = mergedFile.value
-    const built = buildMergedTimeline(
-      list.map((f) => ({ id: f.id, durationSec: f.durationSec, segments: f.segments })),
-      previous ? { segments: previous.segments, offsets: previous.mergedOffsets ?? {} } : null,
-    )
-
-    const first = list[0]
-    return {
-      id: MERGED_FILE_ID,
-      name: '合并时间轴',
-      path: first.path,
-      dir: first.dir,
-      ext: 'merged',
-      sizeBytes: 0,
-      durationSec: built.durationSec,
-      status: 'pending',
-      segments: built.segments,
-      merged: true,
-      mergedOffsets: built.offsets,
-      // 演示数据（浏览器预览）没有真实音频，波形交给合成峰值
-      demo: list.every((f) => f.demo === true),
-    }
-  }
 
   /** 媒体序号：队列变动后，还在跑的拼接任务要能自行作废 */
   let mergedMediaToken = 0
@@ -577,39 +779,51 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   /**
-   * 重新生成合并产物。识别完成后调用；队列结构变化时走 onQueueChanged。
+   * 重算合并视图的波形。
    *
-   * `buildMergedFile()` 是纯本地计算（遍历文件累加偏移再拼接），不需要重新
-   * 识别，所以队列一变就该「重算」而不是「作废」—— 以前的作废会把所有文件
-   * 退回待识别、清空合并产物，表现为「在导入页调一下顺序，编辑页就空了」。
+   * 名字保留成 `rebuildMerged` 是有意的：调用点（识别结束、队列变动）说的
+   * 都是「拼接关系变了，重新拼一遍」。但现在**没有产物需要重建** —— 视图是
+   * 派生的，偏移是现算的，唯一还需要动手的只有波形（它需要真的解码音频）。
    *
-   * 注意「重算」不等于「重来」：`buildMergedFile()` 会把上一轮已经参与过的
-   * 文件整组保留下来（见该函数的说明），所以用户的编辑不会被冲掉。
+   * 这一句就是「独立存 + 拼接显示」换来的简化：以前整段 `buildMergedTimeline`
+   * 的增量保留逻辑（哪些条目该留、哪些该重生）全部消失了，因为拼接不再产生
+   * 数据，也就不存在「重拼会把用户的修改冲掉」这个坑。
    */
   function rebuildMerged(): void {
     if (!isMerge.value) return
-    mergedFile.value = buildMergedFile()
     void syncMergedMedia()
   }
 
   /**
    * 队列结构变化（新增 / 移除 / 重排）后调用。
    *
-   * 判据是「队列里有没有已经产出内容的文件」，而不是「有没有合并产物」：
-   *   - 导入页刚添加音频（还没识别，个个都没内容）→ 什么都不做，
-   *     否则会凭空造出一条空的「合并时间轴」混进文件列表；
-   *   - 已经有产物，或者导入的本来就是字幕文件（解析完就有内容）→ 重算。
+   * 判据是「有没有已经产出内容的条目」：
+   *   - 刚导入音频（还没识别，个个都没内容）→ 不解码波形，省掉无用的重活；
+   *   - 已有内容，或导入的本来就是字幕文件（解析完就有内容）→ 重算波形。
    *
-   * 后一种情况是真踩到的坑：合并模式下清空队列、再直接导入一个 SRT，
-   * 那时 `mergedFile` 已被清空，旧写法直接 return，编辑器就永远停在
-   * 「合并模式下需要先完成识别」的空状态 —— 文件读进来了却什么都看不见。
+   * 视图本身不需要"重算"：偏移是 `itemOffsets` 现算的，改顺序、加文件、
+   * 删文件都会让它自动变对。这里只处理需要真解码的那一件事。
    *
-   * 这里刻意不再弹「合并结果已作废」的警告：队列调整本来就不该影响已经
-   * 识别出来的内容，弹警告反而会让用户以为自己的成果没了。
+   * 也刻意不弹「合并结果已作废」的警告：队列调整本来就不该影响已经识别出来
+   * 的内容，弹警告反而会让用户以为自己的成果没了。
    */
   function onQueueChanged(): void {
-    if (!mergedFile.value && !supportedFiles.value.some((f) => f.segments.length > 0)) return
+    if (!isMerge.value) return
+    if (!supportedFiles.value.some((f) => f.segments.length > 0)) return
     rebuildMerged()
+  }
+
+  /**
+   * 按 id 取一个「可写回的编辑目标」。
+   *
+   * 项目视图的 id（`MERGED_FILE_ID`）返回带访问器的那条视图 —— 往里写
+   * `segments` 会自动按 `originFileId` 拆回各子项目、并减掉偏移；其余 id
+   * 直接走存储层。AI 校对、翻译、回退恢复都经这里，不必各自判断模式。
+   */
+  function targetOf(fileId: string | null): AudioFile | null {
+    if (!fileId) return null
+    if (fileId === MERGED_FILE_ID) return isMerge.value ? viewFile.value : null
+    return files.value.find((f) => f.id === fileId) ?? null
   }
 
   /**
@@ -624,9 +838,7 @@ export const useProjectStore = defineStore('project', () => {
   function applyAiReview(fileId: string, cues: ParsedCue[], ids?: string[]): boolean {
     if (cues.length === 0) return false
 
-    const file =
-      files.value.find((f) => f.id === fileId) ??
-      (mergedFile.value && mergedFile.value.id === fileId ? mergedFile.value : null)
+    const file = targetOf(fileId)
     if (!file) return false
 
     /*
@@ -681,9 +893,7 @@ export const useProjectStore = defineStore('project', () => {
   function applyTranslation(fileId: string, lang: string, lines: string[], ids?: string[]): boolean {
     if (!lang || lines.length === 0) return false
 
-    const file =
-      files.value.find((f) => f.id === fileId) ??
-      (mergedFile.value && mergedFile.value.id === fileId ? mergedFile.value : null)
+    const file = targetOf(fileId)
     if (!file) return false
 
     // 分段翻译：`ids` 是这次交给 AI 的那一段，条数必须与译文完全一致，
@@ -758,6 +968,8 @@ export const useProjectStore = defineStore('project', () => {
       const firstSupported = files.value.find((f) => f.status !== 'unsupported')
       activeFileId.value = firstSupported?.id ?? files.value[0]?.id ?? null
     }
+    // 加减文件不改字幕签名（新文件还没有字幕），所以这里单独标一次
+    if (!suppressDirty) projectDirty.value = true
     onQueueChanged()
   }
 
@@ -864,6 +1076,7 @@ export const useProjectStore = defineStore('project', () => {
     if (activeFileId.value === id) {
       activeFileId.value = files.value[0]?.id ?? null
     }
+    if (!suppressDirty) projectDirty.value = true
     onQueueChanged()
   }
 
@@ -873,7 +1086,82 @@ export const useProjectStore = defineStore('project', () => {
     if (from >= list.length || to >= list.length) return
     const [moved] = list.splice(from, 1)
     list.splice(to, 0, moved)
+    if (!suppressDirty) projectDirty.value = true
     onQueueChanged()
+  }
+
+  /* ------------------------------------------- 编辑：三处「直接写下标」的出口 */
+
+  /**
+   * 在存储层里按 id 找一条字幕。
+   *
+   * 三处编辑点（忽略告警、替换单条、插入单条）以前都是 `file.segments[at] = …`
+   * 直接写下标。项目视图的 `segments` 是 getter 返回的拷贝，写下标改的是那份
+   * 临时数组，**不会生效也不报错** —— 这类"看起来改成功了、其实什么都没发生"
+   * 的 bug 最难查，所以统一收口到下面三个方法。
+   */
+  function locateSegment(segId: string): { item: AudioFile; seg: SubtitleSegment } | null {
+    for (const f of files.value) {
+      if (f.status === 'unsupported') continue
+      const seg = f.segments.find((s) => s.id === segId)
+      if (seg) return { item: f, seg }
+    }
+    return null
+  }
+
+  /** 绝对时间码 → 目标子项目的本地条目（剥掉视图标记） */
+  function toLocal(itemId: string, seg: SubtitleSegment): SubtitleSegment {
+    const offset = offsetOfItem(itemId)
+    const { originFileId: _drop, ...rest } = seg
+    return {
+      ...rest,
+      start: round3(seg.start - offset),
+      end: round3(seg.end - offset),
+    }
+  }
+
+  /** 把某条标记为「告警我已看过」/ 取消标记 */
+  function setAcked(segId: string, acked: boolean): void {
+    const target = locateSegment(segId)
+    if (!target) return
+    const at = target.item.segments.findIndex((s) => s.id === segId)
+    if (at < 0) return
+    const next = { ...target.item.segments[at] }
+    if (acked) next.acked = true
+    else delete next.acked
+    const arr = [...target.item.segments]
+    arr[at] = next
+    target.item.segments = arr
+  }
+
+  /** 用一条新的替换旧条（id 不变） */
+  function replaceSegment(next: SubtitleSegment): void {
+    const target = locateSegment(next.id)
+    if (!target) return
+    const at = target.item.segments.findIndex((s) => s.id === next.id)
+    if (at < 0) return
+    const arr = [...target.item.segments]
+    arr[at] = toLocal(target.item.id, next)
+    target.item.segments = arr
+  }
+
+  /**
+   * 在视图第 `index` 条之后插入一条。
+   *
+   * 归属跟着**前一条**走（用户在它下面点「插入」就是想在同一个子项目里加），
+   * 落点也按前一条在存储层里的位置算 —— 直接按时间码插会让"两段之间正好
+   * 落在边界上"时跑到后一个子项目去。
+   */
+  function insertSegmentAfter(index: number, seg: SubtitleSegment): void {
+    const list = concatSegments()
+    const anchor = list[Math.min(Math.max(index, 0), list.length - 1)]
+    const ownerId = anchor?.originFileId ?? ownerAtTime(seg.start)
+    const item = files.value.find((f) => f.id === ownerId)
+    if (!item) return
+    const at = anchor ? item.segments.findIndex((s) => s.id === anchor.id) : -1
+    const arr = [...item.segments]
+    arr.splice(at >= 0 ? at + 1 : arr.length, 0, toLocal(item.id, seg))
+    item.segments = arr
   }
 
   function clearAll(): void {
@@ -887,8 +1175,11 @@ export const useProjectStore = defineStore('project', () => {
     progress.value = 0
     // 清空是唯一能解除模式锁定的入口，所以这里必须一起复位
     mergedMediaToken += 1
-    mergedFile.value = null
     batchModeLocked.value = false
+    // 项目元信息一并回到「空白、未保存」：清空之后这已经不是一个项目了
+    projectName.value = ''
+    projectPath.value = null
+    projectDirty.value = false
     // 模式也一并复位：锁解了却留着「合并时间轴」，下一次导入字幕文件就会掉进
     // 一个没有产物的合并视图里 —— 文件读进来了却什么都看不见。
     // 真踩到过：合并模式 → 清空队列 → 直接拖入 SRT，界面上空空如也。
@@ -1854,11 +2145,316 @@ const MIME_BY_EXT: Record<string, string> = {
     if (rejected.length > 0) ui.openDialog('unsupported-format', { items: rejected })
   }
 
+  /* ------------------------------------------------------------ 项目文件 */
+
+  /** 保存对话框的默认目录：上次选的 → 首个子项目所在目录 → 空（交给系统） */
+  function defaultProjectDir(): string {
+    if (lastProjectDir.value) return lastProjectDir.value
+    return supportedFiles.value[0]?.dir ?? ''
+  }
+
+  /** 保存对话框的默认文件名（带 `.xbsgp`） */
+  function defaultProjectFile(): string {
+    return projectFileName(displayProjectName.value)
+  }
+
+  /**
+   * 组装要写盘的文档。
+   *
+   * `mtimeMs` 要现问主进程：识别与导入阶段只记了字节数，没有修改时间。
+   * 拿不到不影响存盘（写 0），它的用途只是将来判断「音频有没有被换过」。
+   */
+  async function buildDoc(): Promise<ProjectDoc> {
+    const bridge = window.xbaos
+    const speakers = useSpeakerStore()
+    const mtimes = new Map<string, number>()
+    if (bridge) {
+      await Promise.all(
+        supportedFiles.value.map(async (f) => {
+          if (!f.path) return
+          try {
+            const st = await bridge.fs.stat(f.path)
+            if (st.ok && typeof st.mtimeMs === 'number') mtimes.set(f.path, st.mtimeMs)
+          } catch {
+            /* 拿不到就不记，不影响内容 */
+          }
+        }),
+      )
+    }
+    return buildProjectDoc({
+      name: displayProjectName.value,
+      activeItemId: activeFileId.value,
+      shared: settings.speakerNamesShared,
+      mtimeOf: (p) => mtimes.get(p) ?? 0,
+      items: supportedFiles.value,
+      appVersion,
+      speakers: {
+        byFile: speakers.byFile,
+        globals: speakers.globals,
+        mapping: speakers.mapping,
+        declared: speakers.declared,
+        confirmed: speakers.mappingConfirmed,
+      },
+    })
+  }
+
+  /**
+   * 写到指定路径。
+   *
+   * `allowOverwrite` 只在自己这个路径上为 true —— 其余情况一律由主进程拒绝，
+   * 连"提醒一下然后允许覆盖"都不给：`.xbsgp` 里可能是一整部片子的字幕。
+   *
+   * 项目名会跟着文件名走（`S03E12 等.xbsgp` → `S03E12 等`），保证「侧栏看到的
+   * 名字」与「磁盘上的文件名」永远一致；写失败则整次回滚。
+   */
+  async function saveProjectTo(target: string): Promise<boolean> {
+    const ui = useUiStore()
+    const bridge = window.xbaos
+    if (!bridge || !target) return false
+    if (supportedFiles.value.length === 0) {
+      ui.notify('warning', '没有可保存的内容', '先导入音频或字幕')
+      return false
+    }
+
+    const previousName = projectName.value
+    const finalName = sanitizeFileName(stemOf(nameOf(target))).value
+    projectName.value = finalName
+
+    const doc = await buildDoc()
+    const isSelf = !!projectPath.value && samePath(target, projectPath.value)
+    const result = await bridge.project.write(target, toProjectText(doc), isSelf)
+    if (!result.ok) {
+      projectName.value = previousName
+      ui.notify(
+        'error',
+        result.code === 'exists' ? '该目录已有同名项目' : '保存失败',
+        result.code === 'exists'
+          ? `${nameOf(target)} 已存在，请换个名字`
+          : (result.message ?? '写入时出错，原文件未改动'),
+      )
+      return false
+    }
+
+    projectPath.value = target
+    projectDirty.value = false
+    lastProjectDir.value = dirOf(target)
+    const view = viewFile.value
+    if (view) markSaved(MERGED_FILE_ID, view.segments)
+    ui.notify('success', '项目已保存', target)
+    return true
+  }
+
+  /**
+   * 「保存项目」按钮的落点。
+   *
+   * 有路径就直接写（同一路径 = 覆盖自己，不校验重名）；没有路径时调系统
+   * 保存对话框兜底 —— 正常路径是界面先弹自己的保存框（能实时校验重名），
+   * 这里只是万一被直接调用也不至于什么都不做。
+   */
+  async function saveProject(): Promise<boolean> {
+    if (projectPath.value) return saveProjectTo(projectPath.value)
+    const bridge = window.xbaos
+    if (!bridge) {
+      useUiStore().notify('warning', '浏览器预览无法保存项目', '请在桌面应用里使用')
+      return false
+    }
+    const picked = await bridge.project.pickSave({
+      defaultName: defaultProjectFile(),
+      defaultDir: defaultProjectDir(),
+    })
+    if (!picked) return false
+    return saveProjectTo(picked)
+  }
+
+  /** 把文档里的子项目转成运行期条目 */
+  function itemsFromDoc(doc: ProjectDoc): AudioFile[] {
+    return doc.project.items.map((it) => {
+      // 打开时不可能有"正在识别"：那些状态在进程里才有意义，一律回到 pending
+      const status: FileStatus =
+        it.status === 'queued' || it.status === 'processing' || it.status === 'unsupported'
+          ? 'pending'
+          : it.status
+      return {
+        id: it.id,
+        name: it.name,
+        path: it.media?.path ?? '',
+        dir: it.media ? dirOf(it.media.path) : '',
+        ext: extOfPath(it.name),
+        sizeBytes: it.media?.sizeBytes ?? 0,
+        durationSec: it.durationSec,
+        status,
+        segments: it.segments,
+        subtitleFormat: it.subtitleFormat,
+        sourceEncoding: it.sourceEncoding,
+      }
+    })
+  }
+
+  /**
+   * 打开项目。
+   *
+   * 有未保存改动时先问（原生三按钮），用户取消就什么都不做 —— 这里必须
+   * 在**读文件之前**问，否则读完才发现用户不想开，前面做的都白费。
+   */
+  async function openProject(target?: string): Promise<boolean> {
+    const ui = useUiStore()
+    const bridge = window.xbaos
+    if (!bridge) {
+      ui.notify('warning', '浏览器预览无法打开项目', '请在桌面应用里使用')
+      return false
+    }
+
+    if (projectDirty.value && supportedFiles.value.length > 0) {
+      const choice = await bridge.dialog.confirm({
+        type: 'question',
+        title: '打开其他项目',
+        message: `「${displayProjectName.value}」有未保存的改动`,
+        detail: '不保存就打开，这些改动会丢失。',
+        buttons: ['取消', '不保存，直接打开', '先保存再打开'],
+        defaultId: 2,
+        cancelId: 0,
+      })
+      if (choice === 0) return false
+      if (choice === 2) {
+        const saved = await saveProject()
+        if (!saved) return false
+      }
+    }
+
+    const picked = target ?? (await bridge.project.pickOpen())
+    if (!picked) return false
+    if (!isProjectPath(picked)) {
+      ui.notify('error', '不是项目文件', '请选择 .xbsgp 文件')
+      return false
+    }
+
+    let text = ''
+    try {
+      text = (await bridge.fs.readTextAuto(picked)).text
+    } catch (err) {
+      ui.notify('error', '读取项目失败', err instanceof Error ? err.message : String(err))
+      return false
+    }
+    const parsed = fromProjectText(text)
+    if (!parsed.ok) {
+      ui.notify('error', '打开项目失败', parsed.error)
+      return false
+    }
+
+    const doc = parsed.doc
+    const items = itemsFromDoc(doc)
+
+    // ---- 替换整个工程：先把上一份的媒体地址释放掉，否则内存只增不减
+    for (const m of media.value.values()) {
+      if (m.blobUrl) URL.revokeObjectURL(m.blobUrl)
+    }
+    media.value.clear()
+    mergedMediaToken += 1
+    touchMedia()
+
+    suppressDirty = true
+    files.value = items
+    activeFileId.value =
+      doc.project.activeItemId && items.some((f) => f.id === doc.project.activeItemId)
+        ? doc.project.activeItemId
+        : (items[0]?.id ?? null)
+    projectName.value = doc.project.name
+    projectPath.value = picked
+    projectDirty.value = false
+    lastProjectDir.value = dirOf(picked)
+
+    /*
+     * 打开的项目一律按「一个项目 N 项」呈现 —— 合并模式正是这个视图。
+     * 批量处理方式本身是会话状态、不进项目文件（4.3），这里只是选一个
+     * 与"项目"语义相符的显示方式。
+     */
+    batchMode.value = 'merge'
+    batchModeLocked.value = false
+
+    // 讲话人表：打开的项目自带的称呼必须恢复，否则整份工程读回来就少了信息
+    const speakers = useSpeakerStore()
+    const sp = doc.speakers
+    speakers.byFile = sp?.byFile ?? {}
+    speakers.globals = sp?.globals ?? []
+    speakers.mapping = sp?.mapping ?? {}
+    speakers.declared = sp?.declared ?? {}
+    speakers.mappingConfirmed = sp?.confirmed === true
+    settings.speakerNamesShared = doc.project.shared
+
+    exportRecords.value.clear()
+    savedSignatures.value.clear()
+    markSaved(MERGED_FILE_ID, concatSegments())
+
+    // 波形与校验都要跟着新内容重来
+    onQueueChanged()
+    revalidate()
+
+    // 等这一轮响应式触发跑完，再解除抑制并确认「刚打开 = 没改过」
+    await nextTick()
+    suppressDirty = false
+    projectDirty.value = false
+
+    ui.notify('success', '项目已打开', `${doc.project.name}：${items.length} 个子项目`)
+    return true
+  }
+
+  /** 改项目名。已有文件的要同步改磁盘文件名，失败则整次回滚 */
+  async function renameProject(raw: string): Promise<boolean> {
+    const ui = useUiStore()
+    const bridge = window.xbaos
+    const clean = sanitizeFileName(raw.trim()).value
+    if (!clean) {
+      ui.notify('warning', '名字不能为空', '项目名会变成文件名，不能只有空格')
+      return false
+    }
+    if (clean === displayProjectName.value) return true
+
+    if (!projectPath.value || !bridge) {
+      projectName.value = clean
+      projectDirty.value = true
+      return true
+    }
+
+    const nextPath = joinPath(dirOf(projectPath.value), projectFileName(clean))
+    if (samePath(nextPath, projectPath.value)) {
+      projectName.value = clean
+      return true
+    }
+    if (await bridge.fs.exists(nextPath)) {
+      ui.notify('error', '该目录已有同名项目', `${nameOf(nextPath)} 已存在，请换个名字`)
+      return false
+    }
+
+    const res = await bridge.project.rename(projectPath.value, nextPath)
+    if (!res.ok) {
+      ui.notify(
+        'error',
+        res.code === 'exists' ? '该目录已有同名项目' : '改名失败',
+        res.message ?? '磁盘文件名没有改动，请稍后再试',
+      )
+      return false
+    }
+    // 名字与磁盘同时改：任何一步失败都不允许出现「侧栏叫 B、磁盘还是 A」
+    projectName.value = clean
+    projectPath.value = nextPath
+    lastProjectDir.value = dirOf(nextPath)
+    return true
+  }
+
+  /** 有没有选中任何子项目（侧栏 / 空态用） */
+  function hasProjectContent(): boolean {
+    return supportedFiles.value.length > 0
+  }
+
   return {
     files,
     batchMode,
     batchModeLocked,
-    mergedFile,
+    projectName,
+    displayProjectName,
+    projectPath,
+    projectDirty,
+    lastProjectDir,
     activeFileId,
     recognizing,
     progress,
@@ -1890,6 +2486,9 @@ const MIME_BY_EXT: Record<string, string> = {
     addSubtitleFromPath,
     removeFile,
     reorder,
+    setAcked,
+    replaceSegment,
+    insertSegmentAfter,
     clearAll,
     setActiveFile,
     exportRecords,
@@ -1910,5 +2509,12 @@ const MIME_BY_EXT: Record<string, string> = {
     peaksOf,
     mediaErrorOf,
     mediaVersion,
+    defaultProjectDir,
+    defaultProjectFile,
+    saveProject,
+    saveProjectTo,
+    openProject,
+    renameProject,
+    hasProjectContent,
   }
 })

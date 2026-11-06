@@ -142,6 +142,17 @@ contextBridge.exposeInMainWorld('xbaos', {
     dirname: (p) => ipcRenderer.invoke('fs:dirname', p),
   },
 
+  // ---- 项目文件（.xbsgp）
+  // 写盘单开一个入口：导出字幕该无条件覆盖，项目文件不该 —— 静默覆盖丢的
+  // 是一整部片子的工程。判定放在主进程，避免渲染进程判完、写盘之间被插一刀。
+  project: {
+    pickSave: (options) => ipcRenderer.invoke('project:pickSave', options),
+    pickOpen: () => ipcRenderer.invoke('project:pickOpen'),
+    write: (p, content, allowOverwrite) =>
+      ipcRenderer.invoke('project:write', p, content, allowOverwrite),
+    rename: (from, to) => ipcRenderer.invoke('project:rename', from, to),
+  },
+
   clipboard: {
     write: (text) => ipcRenderer.invoke('clipboard:write', text),
     /** 读取剪贴板文本：AI 校对把用户从网页版复制的结果接回来 */

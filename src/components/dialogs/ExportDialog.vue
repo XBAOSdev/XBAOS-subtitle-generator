@@ -90,13 +90,14 @@ async function pickDir(target: 'unified' | string, current: string): Promise<voi
   perFileDirs.value = { ...perFileDirs.value, [target]: dir }
 }
 
-/** 合并模式下导出的是那条拼接产物，不是随便某个音频 */
+/** 合并模式下导出的是那条拼接视图，不是随便某个音频 */
 function mergedSegments(): SubtitleSegment[] {
-  // 识别完成后 store 里已经物化了拼接产物（编辑器看到的、改过的就是它），
-  // 导出必须以它为准，否则用户在合并视图里的编辑会白做。
+  // 项目视图就是编辑器里看到、改过的那条时间轴（`segments` 是访问器，
+  // 读出来已经按子项目顺序拼好并加过偏移），导出必须与它完全一致，
+  // 否则用户在合并视图里的编辑会白做。
   // 这里刻意**不**剔除空文本的条目 —— 那是序列化层的活（只导译文时，
   // 原文为空但译文有内容的条目必须留下）。
-  return project.mergedFile?.segments ?? []
+  return project.viewFile?.segments ?? []
 }
 
 /** 未筛选的全部来源。筛选只影响真正写出去的内容，选项本身要一直看得见 */

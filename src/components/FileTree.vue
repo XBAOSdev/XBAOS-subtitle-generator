@@ -25,7 +25,7 @@ const isMerge = computed(() => project.isMerge)
 /** 合并模式：每段音频在合并时间轴上的起点 */
 const parts = computed(() => project.mergedParts)
 
-const mergedSegments = computed(() => project.mergedFile?.segments.length ?? 0)
+const mergedSegments = computed(() => project.viewFile?.segments.length ?? 0)
 
 /*
  * ---- 拖拽排序 ----
@@ -133,7 +133,7 @@ function select(file: AudioFile): void {
                 <Icon name="layers" :size="13" />
               </span>
               <span class="filetree__main">
-                <span class="filetree__name">合并时间轴</span>
+                <span class="filetree__name">{{ project.displayProjectName }}</span>
                 <span class="filetree__meta">
                   {{ mergedSegments }} 条 | 总时长 {{ formatDuration(project.totalDuration) }}
                 </span>
@@ -143,7 +143,7 @@ function select(file: AudioFile): void {
         </ul>
 
         <div class="filetree__group-label">
-          参与合并的 {{ parts.length }} 段音频
+          项目里的 {{ parts.length }} 个子项目
         </div>
         <ul class="filetree__list">
           <li

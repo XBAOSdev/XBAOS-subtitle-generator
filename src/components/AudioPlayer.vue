@@ -15,7 +15,7 @@ const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2]
 const viewFile = computed(() => project.viewFile)
 
 /** 合并视图：没有单一音频流，<audio> 的 src 按当前所在段切换 */
-const isMerged = computed(() => project.isMerge && !!project.mergedFile)
+const isMerged = computed(() => project.isMerge && !!project.viewFile)
 
 const hasAudio = computed(() => (viewFile.value?.durationSec ?? 0) > 0)
 

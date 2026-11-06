@@ -51,6 +51,14 @@ import {
   speakerName,
 } from '../src/utils/speaker'
 import { buildWrapWords } from '../src/utils/wrapWords'
+import {
+  defaultProjectName,
+  isProjectPath,
+  projectFileName,
+  samePath,
+  sanitizeFileName,
+} from '../src/utils/projectName'
+import { buildProjectDoc, fromProjectText, toProjectText } from '../src/utils/xbsgp'
 import { COMMON_WORDS, COMMON_WORD_GROUPS } from '../src/data/commonWords'
 import {
   SETTINGS_ENTRIES,
@@ -102,7 +110,6 @@ import {
   normalizeStrength,
   strengthOption,
 } from '../src/data/scriptStrength'
-import { buildMergedTimeline, type MergeSourceFile } from '../src/utils/mergeTimeline'
 import { parseReplaceDict, applyReplaceRules } from '../src/utils/dictReplace'
 import {
   allowedExternalUrl,
@@ -113,6 +120,16 @@ import {
   pickReleaseNotes,
 } from '../electron/update.js'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import {
+  mkdtemp,
+  readFile as readFileAsync,
+  readdir as readdirAsync,
+  rm as rmAsync,
+  writeFile as writeFileAsync,
+} from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { renameProjectFile, writeProjectFile } from '../electron/project-file.js'
 import { fileURLToPath } from 'node:url'
 import { parse as parseSfc } from 'vue/compiler-sfc'
 import type { PunctuationOptions, SubtitleSegment } from '../src/types'
@@ -3368,133 +3385,15 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   check('检查更新：本机版本号不合法时明确报错', badLocal.state === 'error', JSON.stringify(badLocal))
 }
 
-/* ------------------------------------------------- 合并时间轴的增量拼接 */
-
-{
-  const mk = (id: string, dur: number, texts: string[]): MergeSourceFile => ({
-    id,
-    durationSec: dur,
-    segments: texts.map((t, i) => ({
-      id: `${id}-${i}`,
-      start: i * 2,
-      end: i * 2 + 1.5,
-      text: t,
-      origin: t,
-      issues: [],
-    })),
-  })
-
-  const A = mk('A', 100, ['甲一', '甲二'])
-  const B = mk('B', 100, ['乙一'])
-
-  const first = buildMergedTimeline([A, B], null)
-  check('合并拼接：首次把各文件的条目按顺序拼成一条', first.segments.length === 3)
-  check(
-    '合并拼接：第二段音频的条目按第一段的时长顺延',
-    first.segments[2].start === 100 && first.offsets.B === 100,
-    JSON.stringify(first.segments.map((s) => s.start)),
-  )
-  check(
-    '合并拼接：产物上的条目带来源标记（重新拼接时靠它归位）',
-    first.segments.every((s) => s.originFileId === 'A' || s.originFileId === 'B'),
-  )
-
-  // ★ 用户报的严重问题：改过内容后往队列追加音频，修改必须还在
-  const edited = first.segments.map((s) =>
-    s.originFileId === 'A' ? { ...s, text: `改过-${s.text}` } : s,
-  )
-  const C = mk('C', 50, ['丙一'])
-  const carried = buildMergedTimeline([A, B, C], {
-    segments: edited,
-    offsets: first.offsets,
-  })
-  check(
-    '追加文件：上一轮的编辑原样保留（不再被源文件覆盖）',
-    carried.segments.filter((s) => s.text.startsWith('改过-')).length === 2,
-    JSON.stringify(carried.segments.map((s) => s.text)),
-  )
-  check(
-    '追加文件：新文件的条目补进时间轴末尾',
-    carried.segments.some((s) => s.text === '丙一') && carried.offsets.C === 200,
-    JSON.stringify(carried.offsets),
-  )
-
-  // 在前面插入一个文件：后面的条目要按新的偏移整体平移
-  const D = mk('D', 30, ['丁一'])
-  const inserted = buildMergedTimeline([D, A, B], {
-    segments: carried.segments,
-    offsets: carried.offsets,
-  })
-  const aFirst = inserted.segments.find((s) => s.originFileId === 'A')
-  check(
-    '插入文件：后面的条目按新偏移整体平移',
-    aFirst?.start === 30 && inserted.offsets.A === 30,
-    `A 首条 start=${aFirst?.start}`,
-  )
-  check(
-    '插入文件：平移不影响已保留的编辑',
-    inserted.segments.filter((s) => s.text.startsWith('改过-')).length === 2,
-  )
-  check(
-    '插入文件：不在队列里的文件（C）的条目随之消失',
-    inserted.segments.every((s) => s.originFileId !== 'C'),
-    JSON.stringify(inserted.segments.map((s) => s.originFileId)),
-  )
-
-  const removed = buildMergedTimeline([A, B], {
-    segments: inserted.segments,
-    offsets: inserted.offsets,
-  })
-  check(
-    '移除文件：该文件的条目随之消失',
-    removed.segments.every((s) => s.originFileId !== 'D'),
-    JSON.stringify(removed.segments.map((s) => s.originFileId)),
-  )
-  check(
-    '移除文件：后面的条目前移到新的偏移',
-    removed.segments.find((s) => s.originFileId === 'A')?.start === 0,
-    `A 首条 start=${removed.segments.find((s) => s.originFileId === 'A')?.start}`,
-  )
-
-  // 还没识别出内容的文件不能登记偏移，否则它识别完成后会被当成「已参与」而保留成空白
-  const blank = mk('E', 20, [])
-  const withBlank = buildMergedTimeline([A, blank], { segments: [], offsets: {} })
-  check(
-    '未识别（无内容）的文件不登记偏移',
-    withBlank.offsets.E === undefined,
-    JSON.stringify(withBlank.offsets),
-  )
-
-  // 用户在合并视图里手动新增的条目（无来源标记）
-  const manual = {
-    id: 'manual-1',
-    start: 105,
-    end: 106,
-    text: '手动加的',
-    origin: '手动加的',
-    issues: [],
-  }
-  const withManual = buildMergedTimeline([A, B], {
-    segments: [...first.segments, manual],
-    offsets: first.offsets,
-  })
-  check(
-    '手动新增的条目（无来源标记）在重拼后仍然保留',
-    withManual.segments.some((s) => s.id === 'manual-1'),
-    JSON.stringify(withManual.segments.map((s) => s.text)),
-  )
-
-  // 在合并视图里把某个文件的条目删光 → 不能被重新生成回来
-  const cleared = buildMergedTimeline([A, B], {
-    segments: first.segments.filter((s) => s.originFileId !== 'B'),
-    offsets: first.offsets,
-  })
-  check(
-    '在合并视图里删光某文件的条目后，重拼不再把它生成回来',
-    cleared.segments.every((s) => s.originFileId !== 'B'),
-    JSON.stringify(cleared.segments.map((s) => s.originFileId)),
-  )
-}
+/*
+ * 「合并时间轴的增量拼接」那一组断言（8 条）随 `mergeTimeline.ts` 一起删除了。
+ *
+ * 它们测的是「重新拼接时哪些条目该保留、哪些该重建」—— 那套逻辑存在的唯一理由
+ * 是合并视图**物化**了一份数据，而用户的编辑只存在于那份产物上。P0 把视图改成了
+ * 派生的拼接（`concatSegments()`），拼接不再产生数据，也就不存在「重拼把修改冲掉」。
+ * 顺带，原用户报过的那个问题（往队列追加音频后，之前的修改原封不动地回来了）
+ * 从根上不会发生了：源文件里的字幕就是用户改过的那一份。
+ */
 
 /* ---------------------------------------------- 翻译：提示词与 1:1 校验 */
 {
@@ -5401,6 +5300,189 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
       !projectSrc.includes('正在分析讲话人'),
     '阶段细节写日志就够了，底栏只说人话',
   )
+}
+
+/* --------------------------------------------------- 项目文件（P0） */
+
+{
+  /* ---- 命名规则：每一条都会变成磁盘上的文件名 ---- */
+  check('项目默认名：单个子项目去扩展名', defaultProjectName(['S03E12.mp3']) === 'S03E12')
+  check(
+    '项目默认名：多个加「等」',
+    defaultProjectName(['S03E12.mp3', 'S03E13.mp3']) === 'S03E12 等',
+  )
+  check('项目默认名：空列表给个兜底', defaultProjectName([]) === '未命名项目')
+
+  const bad = sanitizeFileName('a:b*c?')
+  check('文件名非法字符替换成下划线', bad.value === 'a_b_c_' && bad.replaced, bad.value)
+  check('结尾的点与空格会被 Windows 吞掉，先去掉', sanitizeFileName('名字. ').value === '名字')
+  check('超长项目名被截断到 120', sanitizeFileName('x'.repeat(200)).value.length === 120)
+  check('合法名字原样通过', sanitizeFileName('第 7 期闲聊').value === '第 7 期闲聊')
+
+  check('文件名自动补 .xbsgp', projectFileName('第 7 期') === '第 7 期.xbsgp')
+  check('已带后缀不重复补', projectFileName('a.xbsgp') === 'a.xbsgp')
+  check('扩展名判断不看大小写', isProjectPath('D:\\a\\B.XBSGP'))
+  check('同一个路径：大小写与分隔符都不敏感', samePath('D:\\A\\B.xbsgp', 'd:/a/b.XBSGP'))
+  check('不同路径不算同名', !samePath('D:\\A\\x.xbsgp', 'D:\\A\\y.xbsgp'))
+  check('空路径不参与比较', !samePath('', 'D:\\A\\x.xbsgp'))
+}
+
+{
+  /* ---- .xbsgp 往返：存什么、不存什么 ---- */
+  const items = [
+    {
+      id: 'item_a',
+      name: 'S03E12.mp3',
+      path: 'D:\\Audio\\S03E12.mp3',
+      ext: 'mp3',
+      sizeBytes: 29384756,
+      durationSec: 1832.4,
+      status: 'pending' as const,
+      segments: [
+        {
+          id: 'seg1',
+          start: 0.4,
+          end: 3.2,
+          text: '大家好',
+          origin: '大家好',
+          issues: [{ level: 'error' as const, code: 'X', message: 'm' }],
+          translations: { en: 'hi' },
+          acked: true,
+          speaker: 0,
+          originFileId: 'item_a',
+        },
+      ],
+    },
+  ]
+  const doc = buildProjectDoc({
+    name: 'S03E12',
+    activeItemId: 'item_a',
+    shared: true,
+    mtimeOf: () => 123,
+    items,
+    appVersion: '9.9.9',
+  })
+  const text = toProjectText(doc)
+  check('落盘是明文 JSON（能手工救、能 diff）', text.startsWith('{\n  "magic": "xbsgp"'))
+  check('校验结论不落盘（每次现算）', !text.includes('"issues"'))
+  check('视图标记 originFileId 不落盘（本地只认自己的时间码）', !text.includes('originFileId'))
+  check('用户「忽略告警」的批注要跟着项目走', text.includes('"acked": true'))
+
+  const back = fromProjectText(text)
+  check('读回来成功', back.ok, back.ok ? '' : back.error)
+  if (back.ok) {
+    const seg0 = back.doc.project.items[0].segments[0]
+    check('时间码原样读回（本地，从 0 起）', seg0.start === 0.4 && seg0.end === 3.2)
+    check('译文读回', seg0.translations?.en === 'hi')
+    check('讲话人与忽略标记读回', seg0.speaker === 0 && seg0.acked === true)
+    check('校验结论重新算，读回来是空的', seg0.issues.length === 0)
+    check('项目名与 shared 读回', back.doc.project.name === 'S03E12' && back.doc.project.shared)
+    check('音频媒体信息读回', back.doc.project.items[0].media?.path === 'D:\\Audio\\S03E12.mp3')
+  }
+
+  check('不是本软件的文件要拒绝', !fromProjectText('{"hello":1}').ok)
+  check('坏 JSON 要拒绝', !fromProjectText('{').ok)
+
+  const future = JSON.parse(text) as Record<string, unknown>
+  future.version = 99
+  const r2 = fromProjectText(JSON.stringify(future))
+  check('更高版本的格式要拒绝，不猜着读', !r2.ok && r2.error.includes('v99'))
+
+  const empty = JSON.parse(text) as Record<string, unknown>
+  ;(empty.project as Record<string, unknown>).items = []
+  check('没有任何子项目也拒绝', !fromProjectText(JSON.stringify(empty)).ok)
+}
+
+{
+  /* ---- 源码守门：P0 的结构性约定 ---- */
+  const read = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const proj = read('src/stores/project.ts')
+  const table = read('src/components/SubtitleTable.vue')
+  const saveDlg = read('src/components/dialogs/SaveProjectDialog.vue')
+  const mainSrc = read('electron/main.js')
+  const fileSrc = read('electron/project-file.js')
+
+  check('合并产物物化那一套已经拆掉', !/\bmergedFile\b/.test(proj))
+  check(
+    '合并时间轴的拼接函数已删除',
+    !existsSync(new URL('../src/utils/mergeTimeline.ts', import.meta.url)),
+  )
+  check('项目视图的 segments 是访问器', /Object\.defineProperty\(view, 'segments'/.test(proj))
+  check('偏移是派生值，不落盘', /const itemOffsets = computed/.test(proj) && !proj.includes('mergedOffsets:'))
+  check('编辑目标统一经 targetOf', /function targetOf\(/.test(proj))
+  check(
+    '三处直接写下标改成 store 方法',
+    proj.includes('function setAcked(') &&
+      proj.includes('function replaceSegment(') &&
+      proj.includes('function insertSegmentAfter(') &&
+      table.includes('project.setAcked(') &&
+      table.includes('project.replaceSegment(') &&
+      table.includes('project.insertSegmentAfter(') &&
+      !table.includes('file.segments[at] = ') &&
+      !table.includes('file.segments.splice('),
+  )
+  check(
+    '打开项目不会把刚打开的项目标成脏的',
+    /suppressDirty = true/.test(proj) && /suppressDirty = false/.test(proj),
+  )
+  check(
+    '保存对话框实时校验同目录重名',
+    saveDlg.includes('bridge.fs.exists(path)') && saveDlg.includes('该目录已有同名项目'),
+  )
+  check(
+    '写项目是原子写（临时文件 + 改名）',
+    fileSrc.includes('.tmp-${process.pid}') && fileSrc.includes('await fs.rename(tmp, target)'),
+  )
+  check('覆盖前把旧工程备份成 .bak', fileSrc.includes('${target}.bak'))
+  check(
+    '另存为一律拒绝覆盖已有工程',
+    /allowOverwrite[\s\S]{0,400}existsSync\(target\)/.test(fileSrc),
+  )
+  check('改名走真正的 rename，不是另存再删', mainSrc.includes("ipcMain.handle('project:rename'"))
+}
+
+/* ---- 项目文件落盘：真的写进临时目录，验异常路径 ---- */
+{
+  const dir = await mkdtemp(join(tmpdir(), 'xbsgp-test-'))
+  const target = join(dir, 'sub', 'A.xbsgp')
+
+  const w1 = await writeProjectFile(target, '{"a":1}', false)
+  check('写新项目：目录不存在会自动建', w1.ok && (await readFileAsync(target, 'utf8')) === '{"a":1}')
+
+  const w2 = await writeProjectFile(target, '{"a":2}', false)
+  check(
+    '另存到已存在的文件：拒绝，且原文件一个字节都没动',
+    !w2.ok && w2.code === 'exists' && (await readFileAsync(target, 'utf8')) === '{"a":1}',
+    JSON.stringify(w2),
+  )
+
+  const w3 = await writeProjectFile(target, '{"a":2}', true)
+  check('保存到自己的路径：覆盖成功', w3.ok && (await readFileAsync(target, 'utf8')) === '{"a":2}')
+  check(
+    '覆盖前把旧内容备份成 .bak',
+    (await readFileAsync(`${target}.bak`, 'utf8')) === '{"a":1}',
+  )
+
+  const after = await readdirAsync(join(dir, 'sub'))
+  check('写盘没留下临时文件', after.every((f) => !f.includes('.tmp-')), after.join(', '))
+
+  const moved = await renameProjectFile(target, join(dir, 'sub', 'B.xbsgp'))
+  check(
+    '改名：磁盘文件名跟着改，内容不变',
+    moved.ok && (await readFileAsync(join(dir, 'sub', 'B.xbsgp'), 'utf8')) === '{"a":2}',
+  )
+
+  await writeFileAsync(join(dir, 'sub', 'C.xbsgp'), 'other')
+  const blocked = await renameProjectFile(join(dir, 'sub', 'B.xbsgp'), join(dir, 'sub', 'C.xbsgp'))
+  check(
+    '改名撞上已有文件：拒绝，且两边都还在',
+    !blocked.ok &&
+      blocked.code === 'exists' &&
+      existsSync(join(dir, 'sub', 'B.xbsgp')) &&
+      existsSync(join(dir, 'sub', 'C.xbsgp')),
+  )
+
+  await rmAsync(dir, { recursive: true, force: true })
 }
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)

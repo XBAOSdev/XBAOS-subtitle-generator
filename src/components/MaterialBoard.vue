@@ -186,6 +186,11 @@ async function askRemove(file: AudioFile): Promise<void> {
   ui.notify('info', '已从队列移除', file.name)
 }
 
+/** 打开一个已经保存过的项目（.xbsgp）。有未保存改动时由 store 先问 */
+async function openProject(): Promise<void> {
+  await project.openProject()
+}
+
 /** 清空队列。会把已经识别出来的内容一起删掉，所以必须把风险讲清楚 */
 async function clearAll(): Promise<void> {
   const total = project.files.length
@@ -257,6 +262,15 @@ const SUBTITLE_LABELS = SUBTITLE_EXTS.map((ext) => ext.toUpperCase())
       </span>
       <span class="spacer" />
 
+      <button
+        class="btn btn--sm btn--ghost"
+        type="button"
+        title="打开已保存的项目（.xbsgp）"
+        @click="openProject"
+      >
+        <Icon name="folder-open" :size="13" />
+        <span>打开项目</span>
+      </button>
       <button class="btn btn--sm btn--ghost" type="button" title="录制音频" @click="openRecorder">
         <Icon name="mic" :size="13" />
         <span>录制音频</span>

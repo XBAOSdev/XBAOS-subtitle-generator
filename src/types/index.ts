@@ -278,3 +278,65 @@ export interface PunctuationOptions {
  * 数值从紧到松单调递增，滑块直接用它当下标，不要另建一套映射。
  */
 export type ScriptStrength = 0 | 1 | 2 | 3
+
+/* ------------------------------------------------------- 项目文件（.xbsgp） */
+
+/**
+ * 项目里一个子项目的落盘形态。
+ *
+ * 与运行期的 `AudioFile` 刻意分开：运行期还带着 `dir` / `ext` / `demo` /
+ * `merged` 这些**只在当前这台机器上成立**的字段，项目文件里不该出现它们 ——
+ * 换台电脑打开时目录可能完全不同，但内容必须一模一样。
+ */
+export interface ProjectItemDoc {
+  id: string
+  /** 显示名，含后缀；用户可改 */
+  name: string
+  /** 有音频轨的是 audio；纯字幕导入、没挂音频的是 subtitle */
+  kind: 'audio' | 'subtitle'
+  /** 音频来源。纯字幕子项目为 null（P3 才支持给它挂音频） */
+  media: { path: string; sizeBytes: number; mtimeMs: number } | null
+  /** 时长，秒。偏移由它累加派生，不落盘 */
+  durationSec: number
+  status: FileStatus
+  /** ★ 时间码**从 0 起**，与它在项目里的位置无关 */
+  segments: SubtitleSegment[]
+  subtitleFormat?: SubtitleFormat
+  sourceEncoding?: TextEncoding
+  /** 识别用的模型标识，只写不读，排错用 */
+  recognizedBy?: string
+}
+
+/** 讲话人表。键是子项目 id；编号是子项目本地的 */
+export interface ProjectSpeakersDoc {
+  byFile: Record<string, Record<string, string>>
+  globals: { name: string; fallback: string }[]
+  mapping: Record<string, Record<string, number>>
+  declared: Record<string, number[]>
+  /** 对应关系是否已被用户确认过 */
+  confirmed: boolean
+}
+
+/** 导出落点。纯参考信息，丢了不影响内容正确性 */
+export interface ProjectOutputsDoc {
+  records: { itemId: string; path: string; bundle: ExportLangBundle; lang: string }[]
+}
+
+/** 一份 `.xbsgp` 的全部内容 */
+export interface ProjectDoc {
+  magic: 'xbsgp'
+  version: number
+  /** 写这个文件的软件版本，只写不读 */
+  app: string
+  savedAt: string
+  project: {
+    name: string
+    activeItemId: string | null
+    /** 本项目内是否共用一套讲话人称呼 */
+    shared: boolean
+    /** 顺序 = 时间轴顺序 = 侧栏自上而下 = 拼接顺序 */
+    items: ProjectItemDoc[]
+  }
+  speakers?: ProjectSpeakersDoc
+  outputs?: ProjectOutputsDoc
+}

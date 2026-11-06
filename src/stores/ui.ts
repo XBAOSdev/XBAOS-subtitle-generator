@@ -24,6 +24,8 @@ export type DialogKey =
   | 'update'
   /** 跨文件讲话人对应关系表 */
   | 'speaker-map'
+  /** 保存项目（.xbsgp）：自己实现是为了能实时校验同目录重名 */
+  | 'save-project'
   /** 用户协议 / 隐私政策。看哪一份由 `dialogPayload.doc` 决定（`'terms' | 'privacy'`） */
   | 'legal'
   | null

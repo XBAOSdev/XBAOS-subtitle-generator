@@ -137,10 +137,9 @@ function toggleAck(seg: SubtitleSegment, event: MouseEvent): void {
     file.segments,
     next ? '忽略告警' : '恢复告警',
     () => {
-      const at = file.segments.findIndex((s) => s.id === seg.id)
-      if (at < 0) return
-      if (next) file.segments[at].acked = true
-      else delete file.segments[at].acked
+      // 必须走 store：项目视图的 `segments` 是 getter 返回的拷贝，
+      // 直接写下标改的是那份临时数组，不会生效也不报错
+      project.setAcked(seg.id, next)
     },
   )
   if (!applied || !next) return
@@ -461,14 +460,11 @@ function endEdit(id: string, slot: string): void {
     const before = editSnapshot.find((s) => s.id === id)
     const now = file.segments.find((s) => s.id === id)
     if (before && now && slotText(before, slot) !== slotText(now, slot)) {
-      const at = file.segments.findIndex((s) => s.id === id)
-      if (at >= 0) {
-        // 原文一改，这条上各语言的译文就不再与它对应了，一律转回待确认。
-        // 反向不成立（改译文不动原文），理由见 markTranslationsStale。
-        let next = clearStale(file.segments[at], slot)
-        if (slot === SOURCE_SLOT) next = markTranslationsStale(next)
-        file.segments[at] = next
-      }
+      // 走 store：视图的 `segments` 是 getter 返回的拷贝，
+      // 直接对其下标赋值改的是那份临时数组，不会有任何效果
+      let next = clearStale(now, slot)
+      if (slot === SOURCE_SLOT) next = markTranslationsStale(next)
+      project.replaceSegment(next)
     }
     history.pushSnapshot(file.id, segments.value, editSnapshot, '编辑文本')
   }
@@ -530,9 +526,12 @@ function addSegment(): void {
 
   const created = makeEmptySegment(range)
   history.commit(file.id, file.segments, '添加字幕', () => {
-    file.segments = [...file.segments]
-    file.segments.splice(Math.max(0, index) + 1, 0, created)
-    editor.select(created.id, 'replace', file.segments.map((s) => s.id))
+    // 走 store：它会把这条按前一条的归属落进对应的子项目，并把绝对时间码
+    // 换算成那个子项目本地的坐标。直接 splice 视图数组不会有任何效果
+    project.insertSegmentAfter(Math.max(0, index), created)
+    // 全选用**现场**的视图（getter 每次现拼），不能用 `segments` 这个 computed ——
+    // 它的缓存还没被这次插入失效，取到的是少一条的旧数组
+    editor.select(created.id, 'replace', (project.viewFile?.segments ?? []).map((s) => s.id))
   })
 
   // 编辑启动必须等 DOM 更新完：在 mutate 里同步编排会与 Vue 的渲染
@@ -963,7 +962,7 @@ function onKeydown(event: KeyboardEvent): void {
 
       <p v-if="segments.length === 0" class="subtable__empty">
         <template v-if="project.isMerge">
-          合并时间轴还是空的 —— 完成识别后，这里会显示按导入顺序拼接好的全部字幕
+          这个项目还没有字幕 —— 完成识别后，这里会显示按顺序拼接好的全部字幕
         </template>
         <template v-else>这个文件还没有字幕内容</template>
       </p>

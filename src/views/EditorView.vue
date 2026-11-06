@@ -37,8 +37,10 @@ const speakerStore = useSpeakerStore()
  */
 const activeFile = computed(() => project.viewFile)
 
-/** 合并模式但还没识别：给出明确指引，而不是一片空白 */
-const mergePending = computed(() => project.isMerge && !project.mergedFile)
+/** 合并模式但还没有任何字幕：给出明确指引，而不是一片空白 */
+const mergePending = computed(
+  () => project.isMerge && (project.viewFile?.segments.length ?? 0) === 0,
+)
 
 /* -------------------------------------------------------- 全局快捷键 */
 /* 挂在 window 上而不是表格根节点：焦点落在工具栏、波形、侧栏上时
@@ -230,8 +232,8 @@ function gotoSegment(id: string, start: number): void {
  */
 const reviewTargets = computed(() => {
   if (project.isMerge) {
-    const merged = project.mergedFile
-    return merged && merged.segments.length > 0 ? [merged] : []
+    const view = project.viewFile
+    return view && view.segments.length > 0 ? [view] : []
   }
   return project.supportedFiles.filter((f) => f.segments.length > 0)
 })
@@ -414,14 +416,27 @@ async function openAiTranslate(): Promise<void> {
   ui.setAssistActive(true)
 }
 
+/** 保存项目：已有路径就直接写，没有路径才弹自己的保存框（能实时校验重名） */
+function saveProjectFile(): void {
+  if (project.projectPath) void project.saveProject()
+  else ui.openDialog('save-project')
+}
+
+/** 悬停提示：没保存过的项目要说明「这一下会问你存哪」 */
+const saveProjectHint = computed(() =>
+  project.projectPath
+    ? `保存到 ${project.projectPath}`
+    : '保存为项目文件（.xbsgp），下次可以直接打开继续编辑',
+)
+
 function openExport(): void {
   if (project.supportedFiles.length === 0) {
     ui.notify('info', '还没有可导出的字幕')
     return
   }
-  // 合并模式的产物要等识别跑完才存在，提前导出会得到空文件
-  if (project.isMerge && !project.mergedFile) {
-    ui.notify('warning', '还没有可导出的字幕', '合并模式下需要先完成识别，才会生成拼接好的时间轴')
+  // 项目视图要等有字幕内容才值得打开导出（空时间轴导出去只会是空文件）
+  if (project.isMerge && (project.viewFile?.segments.length ?? 0) === 0) {
+    ui.notify('warning', '还没有可导出的字幕', '合并模式下需要先完成识别，才会有拼接好的时间轴')
     return
   }
   ui.openDialog('export')
@@ -652,6 +667,17 @@ async function saveInPlace(): Promise<void> {
         <span>AI 翻译</span>
       </button>
       <button
+        class="btn editor__iconbtn"
+        type="button"
+        aria-label="保存项目"
+        :title="saveProjectHint"
+        :disabled="project.supportedFiles.length === 0"
+        @click="saveProjectFile"
+      >
+        <Icon name="layers" :size="15" />
+        <span v-if="project.projectDirty" class="editor__dot" aria-hidden="true" />
+      </button>
+      <button
         v-if="canSaveInPlace"
         class="btn"
         type="button"
@@ -675,6 +701,28 @@ async function saveInPlace(): Promise<void> {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* 「有未保存改动」的小圆点，挂在保存按钮的图标后面 */
+.editor__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-left: 1px;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+/*
+ * 图标版按钮。
+ *
+ * 底栏这一排已经满了：「保存项目」用整块文字按钮会把右边的「AI 翻译」
+ * 挤出可视区（真机上表现为按钮凭空消失，且没有滚动条）。图标 + 提示
+ * 是这里唯一不牺牲可点性的做法；等 P4 侧栏接上项目之后，项目菜单会成为
+ * 主入口，那时再把它换成文字按钮。
+ */
+.editor__iconbtn {
+  padding: 0 var(--space-2);
 }
 
 .editor__body {
@@ -732,6 +780,20 @@ async function saveInPlace(): Promise<void> {
   background: var(--color-bg-surface);
   font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
+  /*
+   * 按钮多了之后必须允许换行：底栏不换行时，窗口一窄就把右边的按钮整个
+   * 挤出可视区（不是被压窄，是直接看不到，也没有滚动条）。同时禁止按钮被
+   * 压 —— 中文按钮被压窄会变成一列竖排的字。
+   */
+  flex-wrap: wrap;
+  row-gap: var(--space-2);
+  /* 换行之后底栏会变高，不许它把上面的编辑区挤掉 */
+  max-height: 40%;
+  overflow-y: auto;
+}
+
+.editor__foot > .btn {
+  flex: none;
 }
 
 .editor__stat strong {

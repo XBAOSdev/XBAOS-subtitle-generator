@@ -3652,9 +3652,19 @@ const scenarios = {
         return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
       })()`)
 
-    const clickByText = async (selector, text) => {
+    /**
+     * 按文字点按钮。
+     *
+     * `exact` 是必须的：底栏同时有「保存项目」和「保存」，模糊匹配会先命中
+     * 前者 —— 那样测的就不是「就地覆盖」了，而且会弹出一个保存对话框把
+     * 后面几步全带偏。
+     */
+    const clickByText = async (selector, text, exact = false) => {
       const pos = await centerOf(
-        `[...document.querySelectorAll('${selector}')].find((b) => b.textContent.includes('${text}'))`,
+        `[...document.querySelectorAll('${selector}')].find((b) => {
+          const t = b.textContent.replace(/\\s+/g, '')
+          return ${exact} ? t === '${text}' : t.includes('${text}')
+        })`,
       )
       if (!pos) throw new Error(`找不到「${text}」（${selector}）`)
       await cdp.click(pos.x, pos.y)
@@ -3933,11 +3943,19 @@ const scenarios = {
     check('落点与真正写出的文件一致', remembered.ofActive === writes[0]?.p, `${remembered.ofActive} vs ${writes[0]?.p}`)
 
     const labels = await footLabels()
+    // 「保存项目」是图标按钮（底栏放不下整块文字），靠 title 认它
+    const hasProjectSave = await cdp.evaluate(
+      `[...document.querySelectorAll('.editor__foot button')].some(
+        (b) => (b.getAttribute('title') || '').includes('保存为项目文件'),
+      )`,
+    )
+    check('底栏有保存项目的入口', hasProjectSave === true, String(hasProjectSave))
     check('导出后底部出现「保存」按钮', labels.includes('保存'), labels.join(' / '))
     check('「保存」排在「导出字幕」左侧', labels.indexOf('保存') < labels.indexOf('导出字幕'), labels.join(' / '))
 
-    // 保存必须写回上次导出的那个位置，而不是随手挑一个
-    await clickByText('.editor__foot button', '保存')
+    // 保存必须写回上次导出的那个位置，而不是随手挑一个。
+    // 精确匹配「保存」：底栏还有「保存项目」，模糊匹配会点到它。
+    await clickByText('.editor__foot button', '保存', true)
     await sleep(400)
     const writes2 = await cdp.evaluate(`window.__writes`)
     check(

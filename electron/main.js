@@ -20,6 +20,12 @@ import { promisify } from 'node:util'
 
 import { EngineClient, EngineCanceledError, EngineCrashError } from './engine-client.js'
 import { decodeTextAuto, encodeSubtitle } from './encoding.js'
+import {
+  PROJECT_EXT,
+  renameProjectFile,
+  withProjectExt,
+  writeProjectFile,
+} from './project-file.js'
 import { ModelDownloader } from './model-download.js'
 import {
   ARCH_INFO,
@@ -1455,6 +1461,46 @@ function registerIpc() {
   ipcMain.handle('fs:openPath', async (_event, target) => {
     return shell.openPath(target)
   })
+
+  /* ------------------------------------------------------ 项目文件 .xbsgp */
+
+  ipcMain.handle('project:pickSave', async (_event, options = {}) => {
+    if (!mainWindow) return null
+    const name = options.defaultName || '未命名项目'
+    const defaultPath = options.defaultDir
+      ? path.join(options.defaultDir, withProjectExt(name))
+      : withProjectExt(name)
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '保存项目',
+      defaultPath,
+      filters: [{ name: '字幕项目', extensions: [PROJECT_EXT] }],
+    })
+    if (result.canceled || !result.filePath) return null
+    return withProjectExt(result.filePath)
+  })
+
+  ipcMain.handle('project:pickOpen', async () => {
+    if (!mainWindow) return null
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '打开项目',
+      properties: ['openFile'],
+      filters: [{ name: '字幕项目', extensions: [PROJECT_EXT] }],
+    })
+    return result.canceled ? null : result.filePaths[0] ?? null
+  })
+
+  /*
+   * 写项目文件 / 改项目文件名。
+   *
+   * 实现在 `electron/project-file.js` —— 那三条性质（不覆盖别人的工程、
+   * 不留半截文件、改名后名字与磁盘一致）全在异常路径上，只有能测才敢说
+   * 「不会丢东西」。这里只做转发。
+   */
+  ipcMain.handle('project:write', async (_event, target, content, allowOverwrite) =>
+    writeProjectFile(target, content, allowOverwrite),
+  )
+
+  ipcMain.handle('project:rename', async (_event, from, to) => renameProjectFile(from, to))
 
   ipcMain.handle('fs:basename', (_event, target) => path.basename(target))
   ipcMain.handle('fs:dirname', (_event, target) => path.dirname(target))
