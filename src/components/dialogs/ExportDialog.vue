@@ -105,6 +105,25 @@ const baseSources = computed<PlanSource[]>(() => {
   const files = project.supportedFiles
   if (files.length === 0) return []
 
+  /*
+   * 「导出这一条…」（侧栏右键）：只导选中的子项目，而且各导各的 ——
+   * 从合并时间轴里抠一段出来当单个文件，时间码会带着前面的偏移，没人要。
+   */
+  const raw = ui.dialogPayload.onlyIds
+  const only = Array.isArray(raw) && raw.length > 0 ? new Set(raw as string[]) : null
+  if (only) {
+    return files
+      .filter((file) => only.has(file.id))
+      .map((file) => ({
+        id: file.id,
+        name: file.name,
+        dir: file.dir,
+        baseName: file.name.replace(/\.[^.]+$/, ''),
+        outputDir: resolveDir(file),
+        segments: file.segments,
+      }))
+  }
+
   if (isMerge.value) {
     const first = files[0]
     // 合并产物是按导入顺序拼出来的，用第一个音频的名字命名会让人以为

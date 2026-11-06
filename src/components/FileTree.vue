@@ -9,13 +9,15 @@
  * 落点可以是别的项目的某一行（插到那一行）、别的项目的条（追加到末尾），
  * 或者底部的「新建项目」（建一个空项目装它）。
  */
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
 import type { AudioFile, FileStatus } from '@/types'
 import { formatDuration, toShortTimecode } from '@/utils/format'
 import { defaultProjectName } from '@/utils/projectName'
+import { useSidebarMenu } from '@/composables/useSidebarMenu'
 import Icon from '@/components/Icon.vue'
+import UiMenu from '@/components/UiMenu.vue'
 
 const project = useProjectStore()
 const ui = useUiStore()
@@ -30,9 +32,6 @@ const STATUS_ICON: Record<FileStatus, string> = {
   failed: 'alert',
   unsupported: 'ban',
 }
-
-/** 每段音频在拼接时间轴上的起点 */
-const parts = computed(() => project.mergedParts)
 
 /**
  * 侧栏要画的东西：每个项目一条 + 它的子项目。
@@ -85,6 +84,161 @@ function toggleFold(row: Row, event: MouseEvent): void {
   project.toggleDraft(row.id)
 }
 
+/* ------------------------------------------------------------------ 搜索 */
+
+/** 侧栏搜索：项目名命中出整个项目，只有子项目名命中就只留那一行 */
+const query = ref('')
+
+interface ViewEntry {
+  file: AudioFile
+  /** 在所属项目里的真实下标（过滤后 meta 与拖拽换算都不能丢） */
+  index: number
+  meta: string
+}
+
+interface ViewRow extends Row {
+  view: ViewEntry[]
+}
+
+const viewRows = computed<ViewRow[]>(() => {
+  const q = query.value.trim().toLowerCase()
+  return rows.value
+    .map((row) => {
+      const view = row.items.map((file, index) => ({ file, index, meta: metaOf(row, file, index) }))
+      if (!q || row.name.toLowerCase().includes(q)) return { ...row, view }
+      const kept = view.filter((e) => e.file.name.toLowerCase().includes(q))
+      return kept.length > 0 ? { ...row, view: kept } : null
+    })
+    .filter((r): r is ViewRow => r !== null)
+})
+
+const matchedItems = computed(() =>
+  query.value.trim() ? viewRows.value.reduce((n, r) => n + r.view.length, 0) : totalItems.value,
+)
+
+/* ------------------------------------------------------------------ 多选 */
+
+/**
+ * 多选只在同一种对象内部做（项目条选一批 / 子项目行选一批，不混选）。
+ * Ctrl 点 = 增删；Shift 点 = 同一列里连片；普通点 = 只剩它自己并跳过去。
+ */
+const selDrafts = ref<string[]>([])
+const selItems = ref<string[]>([])
+const lastPick = ref<{ kind: 'draft' | 'item'; id: string; rowId: string; index: number } | null>(
+  null,
+)
+
+function toggleIn(list: string[], id: string): string[] {
+  return list.includes(id) ? list.filter((x) => x !== id) : [...list, id]
+}
+
+function clickDraft(row: Row, event: MouseEvent): void {
+  const at = rows.value.findIndex((r) => r.id === row.id)
+  if (event.ctrlKey || event.metaKey) {
+    selDrafts.value = toggleIn(selDrafts.value, row.id)
+    selItems.value = []
+    lastPick.value = { kind: 'draft', id: row.id, rowId: row.id, index: at }
+    return
+  }
+  if (event.shiftKey && lastPick.value?.kind === 'draft') {
+    const a = Math.min(lastPick.value.index, at)
+    const b = Math.max(lastPick.value.index, at)
+    selDrafts.value = rows.value.slice(a, b + 1).map((r) => r.id)
+    selItems.value = []
+    return
+  }
+  selDrafts.value = [row.id]
+  selItems.value = []
+  lastPick.value = { kind: 'draft', id: row.id, rowId: row.id, index: at }
+  switchTo(row)
+}
+
+function clickItem(row: Row, entry: ViewEntry, event: MouseEvent): void {
+  if (entry.file.status === 'unsupported') return
+  if (event.ctrlKey || event.metaKey) {
+    selItems.value = toggleIn(selItems.value, entry.file.id)
+    selDrafts.value = []
+    lastPick.value = { kind: 'item', id: entry.file.id, rowId: row.id, index: entry.index }
+    return
+  }
+  if (event.shiftKey && lastPick.value?.kind === 'item' && lastPick.value.rowId === row.id) {
+    const a = Math.min(lastPick.value.index, entry.index)
+    const b = Math.max(lastPick.value.index, entry.index)
+    selItems.value = row.items.slice(a, b + 1).map((f) => f.id)
+    selDrafts.value = []
+    return
+  }
+  selItems.value = [entry.file.id]
+  selDrafts.value = []
+  lastPick.value = { kind: 'item', id: entry.file.id, rowId: row.id, index: entry.index }
+  select(row, entry.file)
+}
+
+/* ------------------------------------------------------------------ 改名 */
+
+const renaming = ref<{ kind: 'draft' | 'item'; id: string } | null>(null)
+const renameText = ref('')
+const renameInput = ref<HTMLInputElement | null>(null)
+
+function beginRename(kind: 'draft' | 'item', id: string): void {
+  renaming.value = { kind, id }
+  renameText.value =
+    kind === 'draft'
+      ? (rows.value.find((r) => r.id === id)?.name ?? '')
+      : (rows.value.flatMap((r) => r.items).find((f) => f.id === id)?.name ?? '')
+  void nextTick().then(() => renameInput.value?.select())
+}
+
+function commitRename(): void {
+  const at = renaming.value
+  if (!at) return
+  const text = renameText.value.trim()
+  renaming.value = null
+  if (!text) return
+  if (at.kind === 'draft') void project.renameProject(text)
+  else project.renameItem(at.id, text)
+}
+
+/** 双击名称也能改（方案 5.2 的第二个入口） */
+function startRenameDraft(row: Row): void {
+  void (async () => {
+    if (!row.active) await project.switchDraft(row.id)
+    beginRename('draft', row.id)
+  })()
+}
+
+/* ------------------------------------------------------------------ 菜单 */
+
+const { menu, openDraftAt, openItemAt, pick } = useSidebarMenu({ beginRename })
+
+function onBarContext(row: Row, event: MouseEvent): void {
+  event.preventDefault()
+  if (!selDrafts.value.includes(row.id)) {
+    selDrafts.value = [row.id]
+    selItems.value = []
+  }
+  openDraftAt(event.clientX, event.clientY, row.id, selDrafts.value)
+}
+
+function onRowContext(row: Row, entry: ViewEntry, event: MouseEvent): void {
+  event.preventDefault()
+  if (!selItems.value.includes(entry.file.id)) {
+    selItems.value = [entry.file.id]
+    selDrafts.value = []
+    lastPick.value = { kind: 'item', id: entry.file.id, rowId: row.id, index: entry.index }
+  }
+  openItemAt(event.clientX, event.clientY, entry.file.id, selItems.value)
+}
+
+function onMenuPick(key: string): void {
+  const ids = menu.value?.ids ?? []
+  void pick(key, ids)
+}
+
+function closeMenu(): void {
+  menu.value = null
+}
+
 /* ------------------------------------------------------------- 子项目动作 */
 
 /**
@@ -121,15 +275,19 @@ function recognize(file: AudioFile): void {
   void project.recognizeItem(file.id)
 }
 
-function metaOf(file: AudioFile, index: number): string {
-  // 项目视图永远是一条拼接时间轴，所以每条都标出「从哪一秒开始」——
-  // 它与编辑区里的绝对时间码一一对应，找位置全靠它。
-  // 侧栏只有 232px，三样信息挤一行会折成三行，只留最要紧的那些
-  // 起点用紧凑时间码：整段才 3 分钟的工程没必要写 `00:00:00.000`，
-  // 省下的位宽留给时长与条数，别让它们被省略号吃掉
-  const offset = toShortTimecode(parts.value[index]?.offsetSec ?? 0)
+/**
+ * 一行的 meta：`从哪一秒起 + 时长 + 条数`。
+ *
+ * 偏移是**这个项目内部**的累计时长（不是活动项目的拼接时间轴）——
+ * 非活动项目也在侧栏上摆着，拿活动项目的偏移去标它，秒数是错的。
+ * 侧栏只有 232px，起点用紧凑时间码，别让时长与条数被省略号吃掉。
+ */
+function metaOf(row: Row, file: AudioFile, index: number): string {
+  let offset = 0
+  for (let i = 0; i < index; i += 1) offset += row.items[i]?.durationSec ?? 0
+  const off = toShortTimecode(offset)
   const dur = file.durationSec ? ` ${formatDuration(file.durationSec)}` : ''
-  return `${offset} 起${dur} ${file.segments.length} 条`
+  return `${off} 起${dur} ${file.segments.length} 条`
 }
 
 /* ------------------------------------------------------------------ 拖拽 */
@@ -262,17 +420,25 @@ function close(row: Row): void {
   <aside class="filetree">
     <div class="filetree__head">
       <span class="filetree__title">项目</span>
-      <span class="filetree__count">{{ rows.length }}</span>
+      <input
+        v-model="query"
+        class="filetree__search"
+        type="search"
+        placeholder="搜索"
+        aria-label="搜索项目或子项目"
+      />
+      <span class="filetree__count">{{ viewRows.length }}</span>
     </div>
 
     <div class="filetree__body scroll-y" @dragend="cleanupDrag">
-      <section v-for="row in rows" :key="row.id" class="filetree__group">
+      <section v-for="row in viewRows" :key="row.id" class="filetree__group">
         <!-- 项目条：箭头只管折叠，条本身是「切到这个项目」 -->
         <div
           class="filetree__proj"
-          :class="[{ 'is-active': row.active }, barClass(row)]"
+          :class="[{ 'is-active': row.active, 'is-selected': selDrafts.includes(row.id) }, barClass(row)]"
           :title="row.name"
-          @click="switchTo(row)"
+          @click="clickDraft(row, $event)"
+          @contextmenu="onBarContext(row, $event)"
           @dragover="onBarDragOver($event, row)"
           @drop="onDrop"
         >
@@ -284,7 +450,21 @@ function close(row: Row): void {
           >
             <Icon name="chevron-right" :size="12" :class="{ 'is-open': !row.collapsed }" />
           </button>
-          <span class="filetree__proj-name">{{ row.name }}</span>
+          <input
+            v-if="renaming?.kind === 'draft' && renaming.id === row.id"
+            ref="renameInput"
+            v-model="renameText"
+            class="filetree__rename"
+            type="text"
+            @click.stop
+            @dblclick.stop
+            @keydown.enter="commitRename"
+            @keydown.esc="renaming = null"
+            @blur="commitRename"
+          />
+          <span v-else class="filetree__proj-name" @dblclick.stop="startRenameDraft(row)">
+            {{ row.name }}
+          </span>
           <span v-if="row.dirty" class="filetree__dot" aria-hidden="true" />
           <span v-if="row.bad > 0" class="filetree__proj-bad" :title="`${row.bad} 个音频对不上`">
             <Icon name="alert" :size="11" />
@@ -304,31 +484,50 @@ function close(row: Row): void {
 
         <ul v-show="!row.collapsed" class="filetree__list">
           <li
-            v-for="(file, index) in row.items"
-            :key="file.id"
+            v-for="entry in row.view"
+            :key="entry.file.id"
             class="filetree__sub"
-            :class="rowClass(row, index)"
-            :draggable="!project.recognizing"
+            :class="rowClass(row, entry.index)"
+            :draggable="!project.recognizing && !query.trim()"
             :title="project.recognizing ? '识别过程中不能调整顺序' : '拖动可调整顺序或移到别的项目'"
-            @dragstart="onDragStart($event, row.id, file.id)"
-            @dragover="onRowDragOver($event, row, index)"
+            @contextmenu="onRowContext(row, entry, $event)"
+            @dragstart="onDragStart($event, row.id, entry.file.id)"
+            @dragover="onRowDragOver($event, row, entry.index)"
             @drop="onDrop"
           >
             <button
               class="filetree__item"
-              :class="{ 'is-active': project.activeFileId === file.id }"
+              :class="{
+                'is-active': project.activeFileId === entry.file.id,
+                'is-selected': selItems.includes(entry.file.id),
+              }"
               type="button"
-              @click="select(row, file)"
+              @click="clickItem(row, entry, $event)"
             >
-              <span class="filetree__status" :class="`filetree__status--${file.status}`">
-                <Icon :name="iconOf(file.status)" :size="12" />
+              <span class="filetree__status" :class="`filetree__status--${entry.file.status}`">
+                <Icon :name="iconOf(entry.file.status)" :size="12" />
               </span>
               <span class="filetree__main">
-                <span class="filetree__name">{{ file.name }}</span>
+                <input
+                  v-if="renaming?.kind === 'item' && renaming.id === entry.file.id"
+                  ref="renameInput"
+                  v-model="renameText"
+                  class="filetree__rename"
+                  type="text"
+                  @click.stop
+                  @dblclick.stop
+                  @keydown.enter="commitRename"
+                  @keydown.esc="renaming = null"
+                  @blur="commitRename"
+                />
+                <span v-else class="filetree__name">{{ entry.file.name }}</span>
                 <span class="filetree__meta">
-                  {{ metaOf(file, index) }}
-                  <span v-if="project.mediaStateOf(file.id)" class="filetree__bad">
-                    {{ project.mediaStateOf(file.id) === 'missing' ? '音频找不到' : '音频被换过' }}
+                  {{ entry.meta }}
+                  <span
+                    v-if="project.mediaStateOf(entry.file.id)"
+                    class="filetree__bad"
+                  >
+                    {{ project.mediaStateOf(entry.file.id) === 'missing' ? '音频找不到' : '音频被换过' }}
                   </span>
                 </span>
               </span>
@@ -337,29 +536,29 @@ function close(row: Row): void {
             <!-- 行内动作：只在悬停时出现，避免每一行都挂一串常显按钮 -->
             <span class="filetree__acts">
               <button
-                v-if="canRecognize(file)"
+                v-if="canRecognize(entry.file)"
                 class="filetree__act"
                 type="button"
                 title="重新识别这一条"
-                @click.stop="recognize(file)"
+                @click.stop="recognize(entry.file)"
               >
                 <Icon name="wand" :size="12" />
               </button>
               <button
-                v-if="canReload(file)"
+                v-if="canReload(entry.file)"
                 class="filetree__act"
                 type="button"
                 title="重新读取源文件"
-                @click.stop="reload(file)"
+                @click.stop="reload(entry.file)"
               >
                 <Icon name="refresh" :size="12" />
               </button>
               <button
-                v-if="project.mediaStateOf(file.id) || !file.path"
+                v-if="project.mediaStateOf(entry.file.id) || !entry.file.path"
                 class="filetree__act"
                 type="button"
                 title="音频映射"
-                @click.stop="openMap(file)"
+                @click.stop="openMap(entry.file)"
               >
                 <Icon name="file-audio" :size="12" />
               </button>
@@ -386,9 +585,19 @@ function close(row: Row): void {
       </button>
 
       <p v-if="totalItems > 0" class="filetree__hint">
-        共 {{ totalItems }} 个子项目，按顺序首尾相接
+        <template v-if="query.trim()">匹配 {{ matchedItems }} / {{ totalItems }} 个子项目</template>
+        <template v-else>共 {{ totalItems }} 个子项目，按顺序首尾相接</template>
       </p>
     </div>
+
+    <UiMenu
+      v-if="menu"
+      :x="menu.x"
+      :y="menu.y"
+      :items="menu.items"
+      @close="closeMenu"
+      @pick="onMenuPick"
+    />
   </aside>
 </template>
 
@@ -420,6 +629,37 @@ function close(row: Row): void {
 .filetree__count {
   font-size: 11px;
   color: var(--color-text-tertiary);
+}
+
+/* 搜索框：让标题与计数分居两侧，输入框吃掉中间的宽度 */
+.filetree__search {
+  flex: 1;
+  min-width: 0;
+  margin: 0 var(--space-2);
+  padding: 2px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-base);
+  font-size: 11px;
+  color: var(--color-text-primary);
+  outline: none;
+}
+
+.filetree__search:focus {
+  border-color: var(--color-accent-border);
+}
+
+/* 行内改名：直接在原来的名字位置变成输入框 */
+.filetree__rename {
+  flex: 1;
+  min-width: 0;
+  padding: 0 2px;
+  border: 1px solid var(--color-accent-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-base);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-primary);
+  outline: none;
 }
 
 .filetree__body {
@@ -455,6 +695,11 @@ function close(row: Row): void {
   box-shadow:
     var(--shadow-sm),
     inset 0 0 0 1px var(--color-accent-border);
+}
+
+.filetree__proj.is-selected:not(.is-active) {
+  background: var(--color-bg-hover);
+  box-shadow: inset 0 0 0 1px var(--color-border);
 }
 
 /* 拖到某条上 = 追加到这个项目末尾，落点提示就是整条描边 */
@@ -612,6 +857,16 @@ function close(row: Row): void {
 .filetree__item.is-active {
   background: var(--color-accent-subtle);
   border-color: var(--color-accent-border);
+}
+
+/* 多选选中：与「当前活动」区分开 —— 活动是看哪一条，选中是对哪几条动手 */
+.filetree__item.is-selected:not(.is-active) {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border);
+}
+
+.filetree__item.is-active.is-selected {
+  box-shadow: inset 0 0 0 1px var(--color-accent);
 }
 
 .filetree__status {

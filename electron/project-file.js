@@ -85,3 +85,24 @@ export async function renameProjectFile(from, to) {
     return { ok: false, code: 'io', message: err.message }
   }
 }
+
+/**
+ * 删除项目文件（连同 `.bak`）。
+ *
+ * 只删这两个名字，别的同目录文件一概不碰。删除失败照样回报错误，
+ * 但 `.bak` 删不掉不拦主文件 —— 备份残留只是难看，主文件没删掉才是事故。
+ */
+export async function deleteProjectFile(target) {
+  if (!target) return { ok: false, code: 'io', message: '没有指定要删除的项目' }
+  try {
+    await fs.unlink(target)
+    try {
+      await fs.unlink(`${target}.bak`)
+    } catch {
+      /* 没有备份是常态 */
+    }
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, code: 'io', message: err.message }
+  }
+}

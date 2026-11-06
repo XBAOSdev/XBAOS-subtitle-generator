@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useProjectStore, type ExportRecord } from '@/stores/project'
 import { useEditorStore } from '@/stores/editor'
 import { useUiStore } from '@/stores/ui'
@@ -22,6 +22,7 @@ import AudioPlayer from '@/components/AudioPlayer.vue'
 import ToolPanel from '@/components/ToolPanel.vue'
 import SpeakerPanel from '@/components/SpeakerPanel.vue'
 import Icon from '@/components/Icon.vue'
+import UiMenu from '@/components/UiMenu.vue'
 
 const project = useProjectStore()
 const ui = useUiStore()
@@ -435,28 +436,40 @@ const dirtyDrafts = computed(() =>
 )
 
 /**
- * 保存项目。
- *
- * 只有一个项目要存时就是「保存这一个」；同时开着多个、且不止一个脏的时候
- * 直接存全部 —— 用户按这个按钮的意思是「别让我丢东西」，一个个切过去存
- * 不是他想干的事。
+ * 保存项目（方案 5.3）：主按钮只存**当前**这一个。
+ * 同时开着多个、不止一个脏的时候，按钮右侧出小三角，展开「保存全部项目」——
+ * 按一下主按钮就把别人也写了，属于意料之外的副作用。
  */
 function saveProjectFile(): void {
-  if (dirtyDrafts.value.length > 1) {
-    void project.saveAllProjects()
-    return
-  }
   if (project.projectPath) void project.saveProject()
   else ui.openDialog('save-project')
 }
 
+const saveMenu = ref<{ x: number; y: number } | null>(null)
+
+function openSaveMenu(event: MouseEvent): void {
+  saveMenu.value = { x: event.clientX, y: event.clientY }
+}
+
+function onSaveMenuPick(key: string): void {
+  saveMenu.value = null
+  if (key === 'save-all') void project.saveAllProjects()
+}
+
+const saveAllItems = computed(() => [
+  {
+    key: 'save-all',
+    label: '保存全部项目',
+    hint: `${dirtyDrafts.value.length} 个`,
+  },
+])
+
 /** 悬停提示：没保存过的项目要说明「这一下会问你存哪」 */
-const saveProjectHint = computed(() => {
-  if (dirtyDrafts.value.length > 1) return `保存 ${dirtyDrafts.value.length} 个有改动的项目`
-  return project.projectPath
+const saveProjectHint = computed(() =>
+  project.projectPath
     ? `保存到 ${project.projectPath}`
-    : '保存为项目文件（.xbsgp），下次可以直接打开继续编辑'
-})
+    : '保存为项目文件（.xbsgp），下次可以直接打开继续编辑',
+)
 
 function openExport(): void {
   if (project.supportedFiles.length === 0) {
@@ -717,6 +730,16 @@ async function saveInPlace(): Promise<void> {
         <span>保存项目</span>
         <span v-if="project.projectDirty" class="editor__dot" aria-hidden="true" />
       </button>
+      <!-- 多个项目都有改动时才有这个小三角：展开「保存全部项目」 -->
+      <button
+        v-if="dirtyDrafts.length > 1"
+        class="btn editor__caret"
+        type="button"
+        title="更多保存方式"
+        @click="openSaveMenu"
+      >
+        <Icon name="chevron-down" :size="12" />
+      </button>
       <button
         v-if="canSaveInPlace"
         class="btn"
@@ -732,6 +755,15 @@ async function saveInPlace(): Promise<void> {
         <span>导出字幕</span>
       </button>
     </footer>
+
+    <UiMenu
+      v-if="saveMenu"
+      :x="saveMenu.x"
+      :y="saveMenu.y"
+      :items="saveAllItems"
+      @close="saveMenu = null"
+      @pick="onSaveMenuPick"
+    />
   </div>
 </template>
 
@@ -757,6 +789,12 @@ async function saveInPlace(): Promise<void> {
   margin-left: 1px;
   border-radius: 50%;
   background: var(--color-accent);
+}
+
+/* 「保存项目」右侧的小三角：只在多项目都有改动时出现 */
+.editor__caret {
+  padding: 0 var(--space-1);
+  margin-left: -1px;
 }
 
 .editor__body {

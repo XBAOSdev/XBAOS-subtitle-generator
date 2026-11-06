@@ -5274,13 +5274,61 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
   check(
     '侧栏子项目列表可拖拽排序（两种模式共用同一套行）',
-    treeSrc.includes(':draggable="!project.recognizing"') &&
+    // 前缀匹配：识别中禁拖是底线；后面可以再叠别的条件（比如搜索时不拖）
+    treeSrc.includes(':draggable="!project.recognizing') &&
       treeSrc.includes('project.reorder(from, to)') &&
       // 合并模式下顺序就是时间轴先后，必须走 store 的 reorder 去重建产物
       /function onDrop[\s\S]{0,900}project\.reorder/.test(treeSrc) &&
       // 两种模式不再各写一份模板：一套行渲染，顺序语义天然一致
       !/v-if="isMerge"[\s\S]{0,2000}v-else/.test(treeSrc),
     '拖来拖去只能改列表样子、不改合并时间码，就等于什么都没改',
+  )
+
+  /* ---------------------------------------------------- P7：右键菜单 / 多选 / 搜索 */
+  const sideMenuSrc = readSrc('src/composables/useSidebarMenu.ts')
+  const editorSrc = readSrc('src/views/EditorView.vue')
+
+  check(
+    '侧栏右键菜单收在一个 composable 里，FileTree 只挂一份 UiMenu',
+    treeSrc.includes('useSidebarMenu') &&
+      (treeSrc.match(/<UiMenu/g) ?? []).length === 1 &&
+      /'重新识别'/.test(sideMenuSrc) &&
+      /'从项目中移除'/.test(sideMenuSrc) &&
+      /'删除项目…'/.test(sideMenuSrc),
+    '菜单项散在组件里，迟早出现「右键能用、行内按钮不能用」的分叉',
+  )
+  {
+    // 反例自检：不带过滤的 finalize 必须匹配不上（否则这条断言等于没写）
+    const finalizeRe =
+      /function finalize\(items: MenuItem\[\], one: boolean\)[\s\S]{0,300}one \? items : items\.filter\(\(it\) => !it\.disabled/
+    check(
+      '多选时菜单不显示灰项，单选留灰项说明原因',
+      finalizeRe.test(sideMenuSrc) &&
+        !finalizeRe.test('function finalize(items: MenuItem[], one: boolean) {\n  return tidyMenu(items)\n}'),
+      '多选菜单里一排点不动的灰项，用户会以为是卡了',
+    )
+  }
+  check(
+    '删除项目先二次确认，确认里写着会删磁盘文件',
+    /confirmDestructive\(\{[\s\S]{0,400}项目文件会从磁盘上删除[\s\S]{0,200}\}\)[\s\S]{0,200}deleteDrafts/.test(
+      sideMenuSrc,
+    ) && /async function deleteDrafts[\s\S]{0,600}bridge\.project\.delete/.test(projectSrc),
+    '「删除项目」和「关闭项目」长得太像，不拦一下就有人把工程文件删了',
+  )
+  check(
+    '侧栏搜索：项目名命中出整组，只有子项目命中就只留那一行',
+    /row\.name\.toLowerCase\(\)\.includes\(q\)[\s\S]{0,120}return \{ \.\.\.row, view \}[\s\S]{0,200}kept\.length > 0/.test(
+      treeSrc,
+    ) && treeSrc.includes(':draggable="!project.recognizing && !query.trim()"'),
+    '搜索时还能拖拽，一拖就把看不见的顺序也改了',
+  )
+  check(
+    '「保存项目」只存当前项目，「保存全部项目」走小三角',
+    /function saveProjectFile\(\): void \{[\s\S]{0,200}?\}/.test(editorSrc) &&
+      !/function saveProjectFile[\s\S]{0,200}saveAllProjects/.test(editorSrc) &&
+      /editor__caret/.test(editorSrc) &&
+      /key: 'save-all'/.test(editorSrc),
+    '主按钮一下存了别的项目，属于意料之外的副作用',
   )
   check(
     '底栏进度区宽度定死，进度条不随文案平移',

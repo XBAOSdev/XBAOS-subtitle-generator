@@ -151,6 +151,7 @@ contextBridge.exposeInMainWorld('xbaos', {
     write: (p, content, allowOverwrite) =>
       ipcRenderer.invoke('project:write', p, content, allowOverwrite),
     rename: (from, to) => ipcRenderer.invoke('project:rename', from, to),
+    delete: (p) => ipcRenderer.invoke('project:delete', p),
   },
 
   clipboard: {

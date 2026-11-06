@@ -1614,6 +1614,134 @@ export const useProjectStore = defineStore('project', () => {
     return true
   }
 
+  /* ------------------------------------------------------------ P7 批量动作 */
+
+  /**
+   * 侧栏「从项目中移除」：一次可以移除多条（跨项目多选也认）。
+   *
+   * 与 `removeItem` 的区别是能动**非活动项目**：那一份不在 `files` 活引用上，
+   * 说话人三张表、导出落点存在草稿自己身上，得各清各的。两边都清完才标脏。
+   */
+  function removeItems(ids: string[]): number {
+    if (ids.length === 0 || recognizing.value) return 0
+    const want = new Set(ids)
+    let n = 0
+    for (const d of [...drafts.value]) {
+      const list = draftItems(d)
+      const hit = list.filter((f) => want.has(f.id))
+      if (hit.length === 0) continue
+      const active = d.id === activeDraftId.value
+      for (const f of hit) {
+        const m = media.value.get(f.id)
+        if (m?.blobUrl) URL.revokeObjectURL(m.blobUrl)
+        media.value.delete(f.id)
+        if (active) {
+          exportRecords.value.delete(f.id)
+          savedSignatures.value.delete(f.id)
+          useSpeakerStore().forgetFile(f.id)
+        } else {
+          delete d.speakers.byFile[f.id]
+          delete d.speakers.mapping[f.id]
+          delete d.speakers.declared[f.id]
+          d.records = d.records.filter(([k]) => k !== f.id)
+          d.saved = d.saved.filter(([k]) => k !== f.id)
+        }
+        n += 1
+      }
+      const gone = new Set(hit.map((f) => f.id))
+      const rest = list.filter((f) => !gone.has(f.id))
+      if (active) {
+        files.value = rest
+        if (activeFileId.value && gone.has(activeFileId.value)) {
+          activeFileId.value = rest[0]?.id ?? null
+        }
+        projectDirty.value = true
+      } else {
+        d.files = rest
+        d.dirty = true
+        if (d.activeFileId && gone.has(d.activeFileId)) d.activeFileId = rest[0]?.id ?? null
+      }
+    }
+    if (n > 0) {
+      touchMedia()
+      useHistoryStore().resetAll()
+      rebuildMerged()
+      onQueueChanged()
+    }
+    return n
+  }
+
+  /** 改子项目的显示名（只改 `name`，不动音频路径与字幕源） */
+  function renameItem(id: string, raw: string): boolean {
+    const clean = raw.trim()
+    if (!clean) return false
+    for (const d of drafts.value) {
+      const item = draftItems(d).find((f) => f.id === id)
+      if (!item) continue
+      if (item.name === clean) return true
+      item.name = clean
+      if (d.id === activeDraftId.value) projectDirty.value = true
+      else d.dirty = true
+      return true
+    }
+    return false
+  }
+
+  /** 批量跨项目搬家：按 ids 原顺序追加到目标项目末尾（「移到…」多选） */
+  function moveItemsToDraft(ids: string[], toDraftId: string): number {
+    let n = 0
+    for (const id of ids) {
+      let fromId = ''
+      for (const d of drafts.value) {
+        if (d.id === toDraftId) continue
+        if (draftItems(d).some((f) => f.id === id)) {
+          fromId = d.id
+          break
+        }
+      }
+      if (!fromId) continue
+      const to = draftOf(toDraftId)
+      if (!to) continue
+      if (moveItemTo(id, fromId, toDraftId, draftItems(to).length)) n += 1
+    }
+    return n
+  }
+
+  /** 全部折叠 / 全部展开（侧栏级，不落盘） */
+  function collapseAll(): void {
+    for (const d of drafts.value) d.collapsed = true
+  }
+
+  function expandAll(): void {
+    for (const d of drafts.value) d.collapsed = false
+  }
+
+  /**
+   * 删除项目：从列表移出 **并删磁盘上的 `.xbsgp`**。
+   *
+   * 与 `closeDraft` 严格分开：关闭是「眼不见」，删除是「不要了」。二次确认
+   * 由调用方弹（要写出具体项目名），这里只管执行。没保存过的项目没有磁盘
+   * 文件，只移出列表。
+   */
+  async function deleteDrafts(ids: string[]): Promise<number> {
+    const bridge = window.xbaos
+    let n = 0
+    for (const id of [...ids]) {
+      const d = draftOf(id)
+      if (!d) continue
+      const target = d.id === activeDraftId.value ? projectPath.value : d.path
+      if (!closeDraft(id)) continue
+      if (target && bridge) {
+        const res = await bridge.project.delete(target)
+        if (!res.ok) {
+          useUiStore().notify('error', '项目文件没能删掉', res.message ?? target)
+        }
+      }
+      n += 1
+    }
+    return n
+  }
+
   /**
    * 一批识别完成的条目落地（2.4.2）。
    *
@@ -1700,12 +1828,20 @@ export const useProjectStore = defineStore('project', () => {
    * 与其复制一套"按草稿组文档"的逻辑，不如切一下（这一步对用户不可见）。
    * 没有路径的跳过并在最后汇总，不弹一串对话框。
    */
-  async function saveAllProjects(): Promise<{ saved: number; skipped: string[] }> {
+  /**
+   * 保存多个项目。不传 ids = 全部；传了就只存这几个（多选「保存」）。
+   * 逐个切过去再写 —— 只有活动项目是活引用，其余要先激活才能建文档。
+   */
+  async function saveAllProjects(
+    ids?: string[],
+  ): Promise<{ saved: number; skipped: string[] }> {
     const ui = useUiStore()
     const origin = activeDraftId.value
+    const want = ids ? new Set(ids) : null
+    const list = drafts.value.filter((d) => !want || want.has(d.id))
     let saved = 0
     const skipped: string[] = []
-    for (const d of [...drafts.value]) {
+    for (const d of [...list]) {
       const name = d.name || defaultProjectName(draftItems(d).map((f) => f.name))
       if ((await switchDraft(d.id)) === false && d.id !== activeDraftId.value) continue
       if (!projectDirty.value) continue
@@ -3358,6 +3494,12 @@ const MIME_BY_EXT: Record<string, string> = {
     moveItemTo,
     saveAllProjects,
     draftItems,
+    removeItems,
+    renameItem,
+    moveItemsToDraft,
+    collapseAll,
+    expandAll,
+    deleteDrafts,
     setAcked,
     replaceSegment,
     insertSegmentAfter,

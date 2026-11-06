@@ -22,6 +22,7 @@ import { EngineClient, EngineCanceledError, EngineCrashError } from './engine-cl
 import { decodeTextAuto, encodeSubtitle } from './encoding.js'
 import {
   PROJECT_EXT,
+  deleteProjectFile,
   renameProjectFile,
   withProjectExt,
   writeProjectFile,
@@ -1501,6 +1502,8 @@ function registerIpc() {
   )
 
   ipcMain.handle('project:rename', async (_event, from, to) => renameProjectFile(from, to))
+
+  ipcMain.handle('project:delete', async (_event, target) => deleteProjectFile(target))
 
   ipcMain.handle('fs:basename', (_event, target) => path.basename(target))
   ipcMain.handle('fs:dirname', (_event, target) => path.dirname(target))

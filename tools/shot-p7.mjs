@@ -149,7 +149,7 @@ check('「保存项目」有文字', foot.btns.some((b) => b.text.includes('保�
 check('底栏没有横向溢出', foot.scrollW <= foot.clientW + 1, `${foot.scrollW}/${foot.clientW}`)
 check('最右按钮没超出底栏', foot.btns.every((b) => b.right <= foot.barRight))
 
-// ---- 4. 点侧栏第三个子项目：表格跳到它第一行
+// ---- 4. 点侧栏第三个子项目：表格跳到它那一行
 const click = await cdp.evaluate(`(() => {
   const s = ${store('project')}
   const at = s.itemLayout[2]
@@ -169,21 +169,30 @@ const revealed = await cdp.evaluate(`(() => {
 })()`)
 console.log('click', JSON.stringify(click), '→', JSON.stringify(revealed))
 check('点侧栏子项目 → 选中它', revealed.activeFile === click.want)
-check('点侧栏子项目 → 表格滚到它第一行', Math.abs(revealed.topRow - click.firstIndex) <= 1,
-  `top=${revealed.topRow} want=${click.firstIndex}`)
+// 最后一个子项目往往只有几条，滚不到顶端（容器到底就停），只要求那一行进了视口
+const rowVisible = await cdp.evaluate(`(() => {
+  const s = ${store('project')}
+  const body = document.querySelector('.subtable__body')
+  const rows = [...body.querySelectorAll('.row')]
+  const at = s.itemLayout[2]
+  const r = rows[at.firstIndex].getBoundingClientRect()
+  const b = body.getBoundingClientRect()
+  return { inView: r.bottom > b.top + 1 && r.top < b.bottom - 1, offset: Math.round(r.top - b.top) }
+})()`)
+console.log('rowVisible', JSON.stringify(rowVisible))
+check('点侧栏子项目 → 那一行进入视口', rowVisible.inView === true, `offset=${rowVisible.offset}`)
 await shot('reveal-click')
 
 // ---- 5. 跨项目：记住各自停下的位置
 const cross = await cdp.evaluate(`(() => {
   const s = ${store('project')}
   const body = document.querySelector('.subtable__body')
-  const before = Math.round(body.scrollTop)
-  const id = s.createDraft({ activate: false })
-  s.moveItemTo(s.supportedFiles[2].id, s.activeDraftId, id, 0)
-  return { keep: before, from: s.activeDraftId, to: id }
+  body.scrollTop = 900
+  const keep = Math.round(body.scrollTop)
+  const from = s.activeDraftId
+  const to = s.createDraft({ activate: true })
+  return { keep, from, to }
 })()`)
-await sleep(500)
-await cdp.evaluate(`${store('project')}.switchDraft('${cross.to}')`)
 await sleep(600)
 const moved = await cdp.evaluate(`(() => {
   const s = ${store('project')}

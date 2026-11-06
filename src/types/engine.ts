@@ -547,6 +547,8 @@ export interface XbaosBridge {
       from: string,
       to: string,
     ) => Promise<{ ok: boolean; code?: 'exists' | 'io'; message?: string }>
+    /** 删除磁盘上的项目文件（连同 `.bak`）。侧栏「删除项目…」用 */
+    delete: (target: string) => Promise<{ ok: boolean; code?: 'io'; message?: string }>
   }
 
   clipboard: {
