@@ -30,6 +30,7 @@ import GapFillDialog from '@/components/dialogs/GapFillDialog.vue'
 import ExportDialog from '@/components/dialogs/ExportDialog.vue'
 import SpeakerMapDialog from '@/components/dialogs/SpeakerMapDialog.vue'
 import SaveProjectDialog from '@/components/dialogs/SaveProjectDialog.vue'
+import AudioMapDialog from '@/components/dialogs/AudioMapDialog.vue'
 import UpdateDialog from '@/components/dialogs/UpdateDialog.vue'
 import LegalDialog from '@/components/dialogs/LegalDialog.vue'
 import RecordView from '@/views/RecordView.vue'
@@ -624,6 +625,7 @@ onBeforeUnmount(() => {
     <ExportDialog v-if="ui.dialog === 'export'" />
     <SpeakerMapDialog v-if="ui.dialog === 'speaker-map'" />
     <SaveProjectDialog v-if="ui.dialog === 'save-project'" />
+    <AudioMapDialog v-if="ui.dialog === 'audio-map'" />
     <UpdateDialog v-if="ui.dialog === 'update'" />
     <LegalDialog v-if="ui.dialog === 'legal'" />
 

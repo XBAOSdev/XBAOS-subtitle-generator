@@ -5121,7 +5121,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
   check(
     '共用模式下改称呼改的是全局那一位',
-    /speakerNamesShared[\s\S]{0,400}setGlobalName\(g, name\)/.test(speakerSrc),
+    /shared\.value[\s\S]{0,400}setGlobalName\(g, name\)/.test(speakerSrc),
     '否则改一个文件的名字、界面上显示的却是统一的称呼，两边对不上',
   )
   check(
@@ -5182,8 +5182,8 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
 
   check(
     '共用称呼默认关，只有合并成一条时间轴时默认开',
-    projectSrc.includes('settings.speakerNamesShared = mode === \'merge\'') &&
-      /speakerNamesShared: false,/.test(settingsSrc),
+    projectSrc.includes("useSpeakerStore().shared = mode === 'merge'") &&
+      speakerSrc.includes('const shared = ref(false)'),
     '独立处理时各文件各拍各的，默认绑在一起就是老毛病；合并成一条时间线才是一套人',
   )
   check(
@@ -5202,7 +5202,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
   check(
     '从「调整对应关系」进表，确认后不会顺手打开共用开关',
-    mapSrc.includes('if (speakers.pendingShareConfirm) settings.speakerNamesShared = true') &&
+    mapSrc.includes('if (speakers.pendingShareConfirm) speakers.shared = true') &&
       /function openMap[\s\S]{0,200}pendingShareConfirm = false/.test(panelSrc) &&
       /el\.checked = false[\s\S]{0,300}pendingShareConfirm = true/.test(panelSrc),
     '只有勾选引来的那一次确认才该打开共用，否则用户点一次确认就被强行共用',
@@ -5210,14 +5210,14 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   check(
     '合并模式：分离放到最后统一跑',
     projectSrc.includes('if (!isMerge.value && settings.speakerDiarization') &&
-      /isMerge\.value && settings\.speakerDiarization[\s\S]{0,600}nextIndex/.test(projectSrc),
-    '一边识别一边分离，A 的 0 号与 B 的 0 号拼到同一条时间轴上就成了同一个人',
+      /isMerge\.value && settings\.speakerDiarization[\s\S]{0,2400}assignSpeakers/.test(projectSrc),
+    '一边识别一边分离，所有片段各自跑一遍，模型要重复加载好几次',
   )
   check(
-    '合并模式下各文件的讲话人编号接着往下排',
-    /speaker: seg\.speaker \+ nextIndex/.test(projectSrc) &&
-      /nextIndex \+= assigned\.speakers/.test(projectSrc),
-    '不接着排就会撞号 —— 两段不同人说话共用一个称呼，改名字一起改',
+    '合并模式下各文件的讲话人编号都从 0 起，不加 nextIndex 偏移',
+    !/nextIndex \+= assigned\.speakers/.test(projectSrc) &&
+      !/seg\.speaker \+ nextIndex/.test(projectSrc),
+    '编号是子项目本地的；偏移与「编号本地」自相矛盾，且推断只看名字不看编号',
   )
   check(
     '取消共用回到各文件原来的称呼',
@@ -5274,12 +5274,13 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '旧映射没人收拾，删除看着像没生效',
   )
   check(
-    '侧栏文件列表可拖拽排序（两种模式都是）',
+    '侧栏子项目列表可拖拽排序（两种模式共用同一套行）',
     treeSrc.includes(':draggable="!project.recognizing"') &&
       treeSrc.includes('project.reorder(from, to)') &&
       // 合并模式下顺序就是时间轴先后，必须走 store 的 reorder 去重建产物
       /function onDrop[\s\S]{0,900}project\.reorder/.test(treeSrc) &&
-      (treeSrc.match(/:draggable="!project\.recognizing"/g) ?? []).length >= 2,
+      // 两种模式不再各写一份模板：一套行渲染，顺序语义天然一致
+      !/v-if="isMerge"[\s\S]{0,2000}v-else/.test(treeSrc),
     '拖来拖去只能改列表样子、不改合并时间码，就等于什么都没改',
   )
   check(
@@ -5483,6 +5484,183 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
 
   await rmAsync(dir, { recursive: true, force: true })
+}
+
+/* ------------------------------------------------- P1–P3：项目级讲话人 / 映射 / 纯字幕 */
+
+{
+  const readSrc = (rel: string): string =>
+    readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const projectSrc = readSrc('src/stores/project.ts')
+  const speakerSrc = readSrc('src/stores/speakers.ts')
+  const settingsSrc = readSrc('src/stores/settings.ts')
+  const historySrc = readSrc('src/stores/history.ts')
+  const xbsgpSrc = readSrc('src/utils/xbsgp.ts')
+
+  /* ---- P1-1：共用称呼是项目级属性 ---- */
+  check(
+    '「共用一套称呼」是项目级：存在 speakers 里，settings 只剩废弃占位',
+    speakerSrc.includes('const shared = ref(false)') &&
+      /shared\.value/.test(speakerSrc) &&
+      !/settings\.speakerNamesShared/.test(speakerSrc) &&
+      /@deprecated[\s\S]{0,240}speakerNamesShared: boolean/.test(settingsSrc),
+    '放在设置里，打开 A 勾着共用、切到 B 也勾着 —— 两份工程互相污染',
+  )
+  check(
+    '建项目 / 清空 / 打开项目三处都跟着换 shared',
+    /useSpeakerStore\(\)\.shared = mode === 'merge'/.test(projectSrc) &&
+      /useSpeakerStore\(\)\.resetAll\(\)/.test(projectSrc) &&
+      /speakers\.shared = doc\.project\.shared/.test(projectSrc),
+    '少一处就会「换了工程但开关还停在上一份」',
+  )
+
+  /* ---- P1-1b：对应关系表一个子项目一列 ---- */
+  check(
+    '对应关系表按子项目分列，不再给一条「合并时间轴」',
+    /const speakerMappingFiles = computed\(\(\) =>[\s\S]{0,400}supportedFiles\.value\.map/.test(
+      projectSrc,
+    ) && !/const speakerMappingFiles[\s\S]{0,600}viewFile\.value/.test(projectSrc),
+    '只有一列时两段的「讲话人 1」挤在同一格里，分不出谁是谁',
+  )
+  check(
+    '合并模式下讲话人面板作用在活动子项目上，不落到虚拟视图 id',
+    /project\.isMerge \? project\.activeFile : project\.viewFile/.test(
+      readSrc('src/components/SpeakerPanel.vue'),
+    ),
+    '改到 `__merged__` 上等于改了空气：界面显示成功，字幕上的称呼一点没变',
+  )
+
+  /* ---- P1-2：回退记录是项目级一份 ---- */  check(
+    '回退记录按项目分桶，不按子项目',
+    historySrc.includes('分桶') &&
+      // 所有编辑点的 `file` 都是项目拼接视图，键恒为那一个常量 id
+      /const file = project\.viewFile/.test(readSrc('src/components/SubtitleTable.vue')),
+    '按子项目分桶时，光标换一段就撤不回刚才那一步',
+  )
+
+  /* ---- P2-1：音频缺失检查 ---- */
+  check(
+    '打开项目就核对音频，纯字幕子项目不参与',
+    /async function checkMedia/.test(projectSrc) &&
+      /const bad = await checkMedia\(\)/.test(projectSrc) &&
+      /if \(!f\.path \|\| f\.demo \|\| !isSupported\(f\.ext\)\) return/.test(projectSrc),
+    '不查就会出现「打开项目一片空波形」，而用户以为文件丢了；把纯字幕算成缺失则满屏警告',
+  )
+  check(
+    '大小或修改时间对不上算「被换过」',
+    /f\.sizeBytes > 0 && typeof st\.size === 'number' && st\.size !== f\.sizeBytes/.test(
+      projectSrc,
+    ) && /Math\.abs\(st\.mtimeMs - f\.mediaMtimeMs\) > 1500/.test(projectSrc),
+    '只看文件在不在，同长不同内容会被当成没事，波形与时间码悄悄错位',
+  )
+
+  /* ---- P2-2：音频映射 ---- */
+  check(
+    '映射音频不动字幕、不触发重新识别',
+    /async function remapMedia/.test(projectSrc) &&
+      !/async function remapMedia[\s\S]{0,2000}startRecognition/.test(projectSrc) &&
+      !/async function remapMedia[\s\S]{0,2000}\.segments = /.test(projectSrc),
+    '替用户缩放时间码、或者顺手重识别一遍，都是在他没要求的时候改内容',
+  )
+  check(
+    '映射后重建波形与拼接播放，并清掉缺失标记',
+    /media\.value\.delete\(fileId\)/.test(projectSrc) &&
+      /void syncMergedMedia\(\)/.test(projectSrc) &&
+      /delete mediaState\.value\[fileId\]/.test(projectSrc),
+    '换了音频还沿用旧波形与旧时长，界面上就一直在按老文件画',
+  )
+
+  /* ---- P3：纯字幕子项目 ---- */
+  check(
+    '重新读取源文件走历史，可以撤销',
+    /async function reloadSubtitle[\s\S]{0,1200}history\.commit\(file\.id, file\.segments, '重新读取源文件'/.test(
+      projectSrc,
+    ),
+    '读回旧内容会抹掉用户的修改，不能撤销就等于不可逆',
+  )
+
+  const docPure = buildProjectDoc({
+    name: 'P',
+    activeItemId: 'a',
+    shared: false,
+    mtimeOf: () => 111,
+    appVersion: 'test',
+    items: [
+      {
+        id: 'a',
+        name: 'ep01.srt',
+        path: 'D:\\src\\ep01.srt',
+        sizeBytes: 0,
+        durationSec: 12,
+        status: 'pending',
+        segments: [],
+        subtitleFormat: 'srt',
+        subtitlePath: 'D:\\src\\ep01.srt',
+        ext: 'srt',
+      },
+      {
+        id: 'b',
+        name: 'ep02.mp3',
+        path: 'D:\\src\\ep02.mp3',
+        sizeBytes: 999,
+        durationSec: 30,
+        status: 'pending',
+        segments: [],
+        ext: 'mp3',
+      },
+    ],
+  })
+  check(
+    '纯字幕子项目：srt 记在 sourcePath，不当成音频',
+    docPure.project.items[0].media === null &&
+      docPure.project.items[0].sourcePath === 'D:\\src\\ep01.srt' &&
+      docPure.project.items[1].media?.path === 'D:\\src\\ep02.mp3' &&
+      docPure.project.items[1].sourcePath === undefined,
+    JSON.stringify(docPure.project.items.map((i) => [i.kind, i.media, i.sourcePath])),
+  )
+  const round = fromProjectText(toProjectText(docPure))
+  check(
+    '纯字幕往返：读回来仍认得出源文件、且没有音频',
+    round.ok &&
+      round.doc.project.items[0].media === null &&
+      round.doc.project.items[0].sourcePath === 'D:\\src\\ep01.srt',
+    round.ok ? '' : round.error,
+  )
+  const docMapped = buildProjectDoc({
+    name: 'P',
+    activeItemId: 'm',
+    shared: false,
+    mtimeOf: () => 5,
+    appVersion: 'test',
+    items: [
+      {
+        id: 'm',
+        name: 'ep01.srt',
+        path: 'D:\\src\\ep01.mp3',
+        sizeBytes: 12,
+        durationSec: 30,
+        status: 'pending',
+        segments: [],
+        subtitleFormat: 'srt',
+        subtitlePath: 'D:\\src\\ep01.srt',
+        ext: 'mp3',
+      },
+    ],
+  })
+  check(
+    '映射过音频的纯字幕子项目：音频与字幕源各归各',
+    docMapped.project.items[0].kind === 'audio' &&
+      docMapped.project.items[0].media?.path === 'D:\\src\\ep01.mp3' &&
+      docMapped.project.items[0].sourcePath === 'D:\\src\\ep01.srt',
+    JSON.stringify(docMapped.project.items[0]),
+  )
+
+  check(
+    '落盘不写派生字段（issues / mediaState）',
+    !/function segmentToDoc[\s\S]{0,900}issues/.test(xbsgpSrc) &&
+      !/mediaState/.test(xbsgpSrc),
+    '存下来的校验结论会变成「打开就看到去年的报错」',
+  )
 }
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)

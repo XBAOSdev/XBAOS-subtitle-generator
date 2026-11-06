@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useProjectStore } from '@/stores/project'
+import { useUiStore } from '@/stores/ui'
 import { useI18n } from '@/composables/useI18n'
 import type { AudioFile, FileStatus } from '@/types'
 import { formatDuration, toTimecode } from '@/utils/format'
 import Icon from '@/components/Icon.vue'
 
 const project = useProjectStore()
+const ui = useUiStore()
 const { t } = useI18n()
 
 const STATUS_ICON: Record<FileStatus, string> = {
@@ -22,10 +24,22 @@ const STATUS_ICON: Record<FileStatus, string> = {
 
 const isMerge = computed(() => project.isMerge)
 
-/** 合并模式：每段音频在合并时间轴上的起点 */
+/** 合并模式：每段音频在拼接时间轴上的起点 */
 const parts = computed(() => project.mergedParts)
 
 const mergedSegments = computed(() => project.viewFile?.segments.length ?? 0)
+
+/**
+ * 项目条是否展开。
+ *
+ * 现在只有一个项目容器，所以这只是一层本地会话状态；等 P4 接上多项目时，
+ * 这里换成 `expanded: Record<projectId, boolean>` 即可 —— 箭头按钮与
+ * 条本身的分工（折叠 / 切换）已经按那个形状摆好了。
+ */
+const open = ref(true)
+
+/** 音频有问题（缺失或被换过）的子项目数 */
+const badCount = computed(() => project.audioProblemFiles.length)
 
 /*
  * ---- 拖拽排序 ----
@@ -111,71 +125,64 @@ function select(file: AudioFile): void {
   if (file.status === 'unsupported') return
   project.setActiveFile(file.id)
 }
+
+/** 音频映射：缺失 / 被换过 / 纯字幕（想给它挂一份音频）都用同一个入口 */
+function openMap(file: AudioFile): void {
+  ui.openDialog('audio-map', { fileId: file.id })
+}
+
+function canReload(file: AudioFile): boolean {
+  // 字幕源文件单独记着：映射过音频之后 `path` 已经指向音频了
+  return !!file.subtitleFormat && !!(file.subtitlePath ?? file.path)
+}
+
+function reload(file: AudioFile): void {
+  void project.reloadSubtitle(file.id)
+}
+
+function metaOf(file: AudioFile, index: number): string {
+  if (isMerge.value) {
+    const offset = toTimecode(parts.value[index]?.offsetSec ?? 0)
+    return `${offset} 起 | ${formatDuration(file.durationSec)} | ${file.segments.length} 条`
+  }
+  return `${file.segments.length} 条 ${labelOf(file.status)}`
+}
 </script>
 
 <template>
   <aside class="filetree">
     <div class="filetree__head">
-      <span class="filetree__title">文件</span>
+      <span class="filetree__title">项目</span>
       <span class="filetree__count">{{ project.supportedFiles.length }}</span>
     </div>
 
     <div class="filetree__body scroll-y">
-      <!-- 合并模式：编辑器里只有一条拼接产物，所以左边也只列出这一条，
-           下面按导入顺序列出各段的起点，方便核对拼接是否对得上。
-           这些条目刻意不可点 —— 合并模式下点队列就换掉预览内容，
-           恰恰是上一版最让人困惑的地方。 -->
-      <template v-if="isMerge">
-        <ul class="filetree__list">
-          <li>
-            <div class="filetree__item is-active">
-              <span class="filetree__status filetree__status--reviewed">
-                <Icon name="layers" :size="13" />
-              </span>
-              <span class="filetree__main">
-                <span class="filetree__name">{{ project.displayProjectName }}</span>
-                <span class="filetree__meta">
-                  {{ mergedSegments }} 条 | 总时长 {{ formatDuration(project.totalDuration) }}
-                </span>
-              </span>
-            </div>
-          </li>
-        </ul>
+      <!-- 项目条：细长条，不是卡片。箭头只管折叠，条本身留给「切换项目」
+           （现在只有一个项目，点击暂无动作；P4 接多项目时才真正用起来）。 -->
+      <div class="filetree__proj" :class="{ 'is-active': true }">
+        <button
+          class="filetree__fold"
+          type="button"
+          :title="open ? '收起子项目' : '展开子项目'"
+          @click.stop="open = !open"
+        >
+          <Icon name="chevron-right" :size="12" :class="{ 'is-open': open }" />
+        </button>
+        <span class="filetree__proj-name" :title="project.displayProjectName">
+          {{ project.displayProjectName }}
+        </span>
+        <span v-if="project.projectDirty" class="filetree__dot" aria-hidden="true" />
+        <span v-if="badCount > 0" class="filetree__proj-bad" :title="`${badCount} 个音频对不上`">
+          <Icon name="alert" :size="11" />
+        </span>
+        <span class="filetree__proj-count">{{ project.supportedFiles.length }}</span>
+      </div>
 
-        <div class="filetree__group-label">
-          项目里的 {{ parts.length }} 个子项目
-        </div>
-        <ul class="filetree__list">
-          <li
-            v-for="(file, index) in project.supportedFiles"
-            :key="file.id"
-            class="filetree__segment"
-            :class="[{ 'is-dragging': dragId === file.id }, dropClass(index)]"
-            :draggable="!project.recognizing"
-            :title="project.recognizing ? '识别过程中不能调整顺序' : '拖动可调整顺序（合并模式下就是时间轴上的先后）'"
-            @dragstart="onDragStart($event, file.id)"
-            @dragover="onDragOver($event, index)"
-            @drop="onDrop"
-            @dragend="onDragEnd"
-          >
-            <span class="filetree__seg-index mono">{{ index + 1 }}</span>
-            <span class="filetree__seg-main">
-              <span class="filetree__name">{{ file.name }}</span>
-              <span class="filetree__meta">
-                {{ toTimecode(parts[index]?.offsetSec ?? 0) }} 起 |
-                {{ formatDuration(file.durationSec) }} | {{ file.segments.length }} 条
-              </span>
-            </span>
-          </li>
-        </ul>
-      </template>
-
-      <!-- 独立模式：文件树。不支持的文件单独归到下方分区，这里不重复列出。
-           顺序同样可以拖 —— 两种模式下这一列都是「工程里的先后」 -->
-      <ul v-else class="filetree__list">
+      <ul v-show="open" class="filetree__list">
         <li
           v-for="(file, index) in project.supportedFiles"
           :key="file.id"
+          class="filetree__sub"
           :class="[{ 'is-dragging': dragId === file.id }, dropClass(index)]"
           :draggable="!project.recognizing"
           :title="project.recognizing ? '识别过程中不能调整顺序' : '拖动可调整顺序'"
@@ -186,20 +193,45 @@ function select(file: AudioFile): void {
         >
           <button
             class="filetree__item"
-            :class="{ 'is-active': project.activeFileId === file.id }"
+            :class="{ 'is-active': !isMerge && project.activeFileId === file.id }"
             type="button"
             @click="select(file)"
           >
             <span class="filetree__status" :class="`filetree__status--${file.status}`">
-              <Icon :name="iconOf(file.status)" :size="13" />
+              <Icon :name="iconOf(file.status)" :size="12" />
             </span>
             <span class="filetree__main">
               <span class="filetree__name">{{ file.name }}</span>
               <span class="filetree__meta">
-                {{ file.segments.length }} 条 {{ labelOf(file.status) }}
+                {{ metaOf(file, index) }}
+                <span v-if="project.mediaStateOf(file.id)" class="filetree__bad">
+                  {{ project.mediaStateOf(file.id) === 'missing' ? '音频找不到' : '音频被换过' }}
+                </span>
               </span>
             </span>
           </button>
+
+          <!-- 行内动作：只在悬停时出现，避免每一行都挂两个常显按钮 -->
+          <span class="filetree__acts">
+            <button
+              v-if="project.mediaStateOf(file.id) || !file.path"
+              class="filetree__act"
+              type="button"
+              title="音频映射"
+              @click.stop="openMap(file)"
+            >
+              <Icon name="file-audio" :size="12" />
+            </button>
+            <button
+              v-if="canReload(file)"
+              class="filetree__act"
+              type="button"
+              title="重新读取源文件"
+              @click.stop="reload(file)"
+            >
+              <Icon name="refresh" :size="12" />
+            </button>
+          </span>
         </li>
       </ul>
 
@@ -210,7 +242,7 @@ function select(file: AudioFile): void {
           class="filetree__item filetree__item--muted"
         >
           <span class="filetree__status filetree__status--unsupported">
-            <Icon name="ban" :size="13" />
+            <Icon name="ban" :size="12" />
           </span>
           <span class="filetree__main">
             <span class="filetree__name">{{ file.name }}</span>
@@ -218,6 +250,10 @@ function select(file: AudioFile): void {
           </span>
         </li>
       </ul>
+
+      <p v-if="isMerge && project.supportedFiles.length > 0" class="filetree__hint">
+        {{ mergedSegments }} 条字幕按上面的顺序首尾相接
+      </p>
     </div>
   </aside>
 </template>
@@ -258,8 +294,73 @@ function select(file: AudioFile): void {
   padding: 0 var(--space-2) var(--space-3);
 }
 
-.filetree__group-label {
-  padding: var(--space-2) var(--space-2) var(--space-1);
+/* ---------- 项目条（26px，细长条，不是卡片） ---------- */
+
+.filetree__proj {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 6px;
+  margin-bottom: 4px;
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px transparent;
+}
+
+.filetree__proj.is-active {
+  background: var(--color-bg-raised);
+  box-shadow:
+    var(--shadow-sm),
+    inset 0 0 0 1px var(--color-accent-border);
+}
+
+.filetree__proj-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filetree__fold {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-tertiary);
+}
+
+.filetree__fold:hover {
+  background: var(--color-bg-hover);
+}
+
+/* 展开时箭头转 90°：chevron-right → 朝下 */
+.filetree__fold .is-open {
+  transform: rotate(90deg);
+}
+
+.filetree__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.filetree__proj-bad {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--color-warning);
+}
+
+.filetree__proj-count {
+  flex: none;
   font-size: 11px;
   color: var(--color-text-tertiary);
 }
@@ -274,15 +375,22 @@ function select(file: AudioFile): void {
   position: relative;
 }
 
-/* ---------- 拖拽排序 ---------- */
+/* ---------- 子项目行 ---------- */
 
-.filetree__list > li[draggable='true'] {
+/* 缩进 20px：与项目名的文字左对齐 */
+.filetree__sub {
+  display: flex;
+  align-items: stretch;
+  margin-left: 20px;
+}
+
+.filetree__sub[draggable='true'] {
   cursor: grab;
   /* 条目里是按钮，先按住再拖容易变成「拖一段文字」；这里强制按元素拖 */
   -webkit-user-drag: element;
 }
 
-.filetree__list > li.is-dragging {
+.filetree__sub.is-dragging {
   opacity: 0.4;
 }
 
@@ -311,11 +419,12 @@ function select(file: AudioFile): void {
 }
 
 .filetree__item {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  padding: var(--space-2);
+  padding: 5px var(--space-2);
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   text-align: left;
@@ -331,7 +440,6 @@ function select(file: AudioFile): void {
   border-color: var(--color-accent-border);
 }
 
-.filetree__item.is-unsupported,
 .filetree__item--muted {
   opacity: 0.6;
   cursor: default;
@@ -339,7 +447,7 @@ function select(file: AudioFile): void {
 
 .filetree__status {
   flex: none;
-  margin-top: 1px;
+  margin-top: 2px;
   color: var(--color-text-tertiary);
 }
 
@@ -377,34 +485,43 @@ function select(file: AudioFile): void {
 .filetree__meta {
   font-size: 11px;
   color: var(--color-text-tertiary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.filetree__segment {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border-left: 2px solid var(--color-border);
-  margin-left: var(--space-2);
+.filetree__bad {
+  color: var(--color-warning);
 }
 
-.filetree__seg-index {
+/* ---------- 行内动作 ---------- */
+
+.filetree__acts {
   flex: none;
-  width: 18px;
-  height: 18px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 4px;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.filetree__sub:hover .filetree__acts {
+  opacity: 1;
+}
+
+.filetree__act {
+  width: 20px;
+  height: 20px;
   display: grid;
   place-items: center;
   border-radius: var(--radius-sm);
-  background: var(--color-bg-subtle);
-  font-size: 11px;
   color: var(--color-text-tertiary);
 }
 
-.filetree__seg-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
+.filetree__act:hover {
+  background: var(--color-bg-raised);
+  color: var(--color-text-primary);
 }
 
 .filetree__extra {
@@ -414,5 +531,12 @@ function select(file: AudioFile): void {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.filetree__hint {
+  margin: var(--space-3) 0 0;
+  padding: 0 var(--space-2);
+  font-size: 11px;
+  color: var(--color-text-tertiary);
 }
 </style>

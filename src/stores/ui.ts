@@ -26,6 +26,8 @@ export type DialogKey =
   | 'speaker-map'
   /** 保存项目（.xbsgp）：自己实现是为了能实时校验同目录重名 */
   | 'save-project'
+  /** 音频映射：给一个子项目重新指定音频文件 */
+  | 'audio-map'
   /** 用户协议 / 隐私政策。看哪一份由 `dialogPayload.doc` 决定（`'terms' | 'privacy'`） */
   | 'legal'
   | null

@@ -18,7 +18,6 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { useSpeakerStore } from '@/stores/speakers'
-import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
 import { defaultSpeakerName, pickSampleRange } from '@/utils/speaker'
 import ModalDialog from '@/components/dialogs/ModalDialog.vue'
@@ -26,7 +25,6 @@ import Icon from '@/components/Icon.vue'
 
 const project = useProjectStore()
 const speakers = useSpeakerStore()
-const settings = useSettingsStore()
 const ui = useUiStore()
 
 /** 表里的列：一个文件一列。没有讲话人的文件不占列（空列只是噪声） */
@@ -216,7 +214,7 @@ function confirm(): void {
    * 从侧栏「调整对应关系」按钮进来时开关保持原样 —— 用户只是来整理关系，
    * 不该因为点了确认就被强行共用。
    */
-  if (speakers.pendingShareConfirm) settings.speakerNamesShared = true
+  if (speakers.pendingShareConfirm) speakers.shared = true
   speakers.pendingShareConfirm = false
   ui.closeDialog()
 }

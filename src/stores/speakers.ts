@@ -1,6 +1,5 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import { useSettingsStore } from '@/stores/settings'
 import {
   defaultSpeakerName,
   isUserSpeakerName,
@@ -35,11 +34,19 @@ export interface SpeakerMappingFile {
  * （`globals`）。勾上共用时按需现推，推完让人确认；取消共用时什么都不动，
  * 原来改好的名字还在原地。
  *
- * 不落盘：称呼只活在这一次工程里，和字幕数据同理（项目本身也不持久化）。
+ * 不随设置落盘（那是软件偏好）；随**项目**落盘 —— 称呼与对应关系是这份
+ * 工程的一部分，换台电脑打开必须一模一样。
  */
 export const useSpeakerStore = defineStore('speakers', () => {
-  const settings = useSettingsStore()
-
+  /**
+   * 本项目内是否共用一套称呼。
+   *
+   * **项目级属性**（不是全局设置）：每个项目各记各的，切换项目时开关跟着变。
+   * 放在这里而不是 `settings` 里，是因为它描述的是"这一份工程怎么看待称呼"，
+   * 而设置描述的才是"这个软件怎么工作"。初值由建项目时的批量模式决定
+   * （合并 → 共用，分开 → 各自称呼），之后与模式无关。
+   */
+  const shared = ref(false)
   /** fileId → 编号 → 称呼（**每个文件各自一套**，永远保留） */
   const byFile = ref<Record<string, Record<string, string>>>({})
   /**
@@ -262,7 +269,7 @@ export const useSpeakerStore = defineStore('speakers', () => {
 
   function namesOf(fileId: string): Record<string, string> {
     const own = byFile.value[fileId] ?? {}
-    if (!settings.speakerNamesShared) return own
+    if (!shared.value) return own
     /*
      * 共用模式下以统一称呼为准，但**没进对应关系的人仍用他自己的称呼**。
      *
@@ -295,7 +302,7 @@ export const useSpeakerStore = defineStore('speakers', () => {
    * 文件生效，界面上显示的却是统一的称呼，两边对不上。
    */
   function rename(fileId: string, index: number, name: string): void {
-    if (settings.speakerNamesShared) {
+    if (shared.value) {
       const g = globalOf(fileId, index)
       if (g !== undefined) {
         setGlobalName(g, name)
@@ -315,7 +322,7 @@ export const useSpeakerStore = defineStore('speakers', () => {
     const index = nextSpeakerIndex(segments, declared.value[fileId] ?? [])
     const list = (declared.value[fileId] ??= [])
     if (!list.includes(index)) list.push(index)
-    if (settings.speakerNamesShared) {
+    if (shared.value) {
       // 共用模式下新增的是**新的一位**，不能去改别人的称呼
       const g = createGlobal('', defaultSpeakerName(index))
       setGlobalOf(fileId, index, g)
@@ -355,7 +362,20 @@ export const useSpeakerStore = defineStore('speakers', () => {
     delete mapping.value[fileId]
   }
 
+  /** 整份工程换掉（打开项目）时复位所有的表与开关 */
+  function resetAll(): void {
+    shared.value = false
+    byFile.value = {}
+    globals.value = []
+    mapping.value = {}
+    declared.value = {}
+    mappingBuilt.value = false
+    mappingConfirmed.value = false
+    pendingShareConfirm.value = false
+  }
+
   return {
+    shared,
     byFile,
     globals,
     mapping,
@@ -381,5 +401,6 @@ export const useSpeakerStore = defineStore('speakers', () => {
     addSpeaker,
     forget,
     forgetFile,
+    resetAll,
   }
 })

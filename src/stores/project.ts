@@ -495,34 +495,23 @@ export const useProjectStore = defineStore('project', () => {
   )
 
   /**
-   * 参与跨文件讲话人对应关系的文件。
+   * 参与跨项目讲话人对应关系的条目：**一个子项目一列**。
    *
-   * 合并模式下只有一条项目视图 —— 各子项目的字幕已经拼进同一条时间轴，
-   * 再按子项目分列就会让同一段文字出现两次。独立模式下一个文件一列。
+   * 早先合并模式下只给一列「合并时间轴」，于是各段的讲话人全挤在同一格里 ——
+   * 两段各有一位「讲话人 1」，表上分不出谁是第一段那个、谁是第二段那个，
+   * 想让它们「其实是同一个人」都无从下手。
    *
-   * （P1 会改成「一个子项目一列」，那要等讲话人表改成项目级之后。）
+   * 编号是子项目本地的（两个子项目都有 0 号很正常），所以列必须按子项目分；
+   * 「是不是同一个人」由 `mapping` 显式指定，推断只认用户起的名字。
    */
-  const speakerMappingFiles = computed(() => {
-    if (isMerge.value) {
-      const view = viewFile.value
-      return view
-        ? [
-            {
-              id: view.id,
-              name: view.name,
-              durationSec: view.durationSec ?? 0,
-              segments: view.segments,
-            },
-          ]
-        : []
-    }
-    return supportedFiles.value.map((f) => ({
+  const speakerMappingFiles = computed(() =>
+    supportedFiles.value.map((f) => ({
       id: f.id,
       name: f.name,
       durationSec: f.durationSec ?? 0,
       segments: f.segments,
-    }))
-  })
+    })),
+  )
 
   const totalSegments = computed(() =>
     isMerge.value
@@ -951,7 +940,7 @@ export const useProjectStore = defineStore('project', () => {
      * 根本互不相干，却共享一套称呼，正是这个开关不该有的状态。
      * 所以切模式时一律重置，用户想留着自己再点一下。
      */
-    settings.speakerNamesShared = mode === 'merge'
+    useSpeakerStore().shared = mode === 'merge'
     return true
   }
 
@@ -1050,6 +1039,8 @@ export const useProjectStore = defineStore('project', () => {
         segments: parsed.segments,
         subtitleFormat: parsed.format,
         sourceEncoding: encoding,
+        // 记一份「字幕从哪来」：`path` 之后可能被映射成音频
+        subtitlePath: p,
       }
       addFiles([file])
       ui.notify(
@@ -1184,8 +1175,14 @@ export const useProjectStore = defineStore('project', () => {
     // 一个没有产物的合并视图里 —— 文件读进来了却什么都看不见。
     // 真踩到过：合并模式 → 清空队列 → 直接拖入 SRT，界面上空空如也。
     batchMode.value = DEFAULT_BATCH_MODE
-    // 回到独立处理，「共用一套称呼」一定回到关：新工程里几个文件互不相干
-    settings.speakerNamesShared = false
+    /*
+     * 讲话人整套复位，不只是「共用」开关。
+     *
+     * 清空队列之后这就是一个新项目，旧子项目的称呼与对应关系留着没有任何
+     * 用处；更要紧的是 `mapping` 里挂着已经不存在的人，下次打开对应关系表
+     * 会看到一串无主的行。
+     */
+    useSpeakerStore().resetAll()
     // 导出记录指向的是已经不在队列里的文件，一起释放
     exportRecords.value.clear()
     savedSignatures.value.clear()
@@ -1232,6 +1229,166 @@ export const useProjectStore = defineStore('project', () => {
       touchMedia()
     }
     return m
+  }
+
+  /**
+   * 音频缺失 / 被换过的判定结果（键是子项目 id）。
+   *
+   * 判断要问一次磁盘，所以不放进 `computed`：几百个子项目的话，每次渲染
+   * 都会发一轮 `stat`。只在「打开项目」「映射过音频」「用户点重新检查」
+   * 这三种时机算一次。
+   */
+  const mediaState = ref<Record<string, 'missing' | 'changed'>>({})
+
+  function mediaStateOf(fileId: string): 'missing' | 'changed' | null {
+    return mediaState.value[fileId] ?? null
+  }
+
+  /** 音频有问题（缺失或被换过）的子项目，供编辑器顶部提示条用 */
+  const audioProblemFiles = computed(() =>
+    supportedFiles.value.filter((f) => mediaState.value[f.id] !== undefined),
+  )
+
+  /**
+   * 逐个核对音频还在不在、还是不是原来那一个。
+   *
+   * - **纯字幕子项目不参与**：它本来就没有音频，把它标成「缺失」会让
+   *   每一个导入 SRT 的项目一打开就满屏警告；
+   * - 大小或修改时间对不上 → `changed`：字幕还在，但波形与时间码可能
+   *   已经与实际声音错位，这件事必须让用户知道，不能悄悄放着；
+   * - 文件读不到 → `missing`。
+   *
+   * @returns 有问题的子项目数量
+   */
+  async function checkMedia(): Promise<number> {
+    const bridge = window.xbaos
+    if (!bridge) return 0
+    const next: Record<string, 'missing' | 'changed'> = {}
+
+    await Promise.all(
+      supportedFiles.value.map(async (f) => {
+        if (!f.path || f.demo || !isSupported(f.ext)) return
+        try {
+          const st = await bridge.fs.stat(f.path)
+          if (!st.ok || !st.isFile) {
+            next[f.id] = 'missing'
+            return
+          }
+          if (f.sizeBytes > 0 && typeof st.size === 'number' && st.size !== f.sizeBytes) {
+            next[f.id] = 'changed'
+            return
+          }
+          // 1.5 秒的容差：某些文件系统的 mtime 精度只到秒
+          if (
+            f.mediaMtimeMs &&
+            typeof st.mtimeMs === 'number' &&
+            Math.abs(st.mtimeMs - f.mediaMtimeMs) > 1500
+          ) {
+            next[f.id] = 'changed'
+          }
+        } catch {
+          next[f.id] = 'missing'
+        }
+      }),
+    )
+
+    mediaState.value = next
+    return Object.keys(next).length
+  }
+
+  /**
+   * 把某个子项目映射到另一份音频。
+   *
+   * **不动字幕、也不提示时长变化**（方案的 #25）：慢速版 / 加速版字幕会
+   * 因此对不上，但那是用户自己的判断 —— 软件替他缩放时间码，等于替他
+   * 改内容。时长置空，交给解码重新回填。
+   *
+   * 也**不触发重新识别**（#26）：映射只是「告诉软件音频在哪」，
+   * 什么时候重识别由用户决定。
+   */
+  async function remapMedia(fileId: string, nextPath: string): Promise<boolean> {
+    const ui = useUiStore()
+    const bridge = window.xbaos
+    const file = files.value.find((f) => f.id === fileId)
+    if (!file || !bridge) return false
+
+    const ext = extOfPath(nextPath)
+    if (!isSupported(ext)) {
+      ui.notify('error', '不能用作音频', '请选择 wav / mp3 / flac / ogg 这类音频文件')
+      return false
+    }
+    const st = await bridge.fs.stat(nextPath)
+    if (!st.ok || !st.isFile) {
+      ui.notify('error', '读不到这个文件', nextPath)
+      return false
+    }
+
+    // 旧媒体的 blob 地址要释放，否则内存只增不减
+    const old = media.value.get(fileId)
+    if (old?.blobUrl) URL.revokeObjectURL(old.blobUrl)
+    media.value.delete(fileId)
+    mediaJobs.delete(fileId)
+
+    file.path = nextPath
+    file.dir = dirOf(nextPath)
+    file.ext = ext
+    file.sizeBytes = st.size ?? 0
+    file.mediaMtimeMs = st.mtimeMs
+    // 时长未知：`loadMedia()` 只在 null 时回填，正好
+    file.durationSec = null
+    delete mediaState.value[fileId]
+
+    touchMedia()
+    if (!suppressDirty) projectDirty.value = true
+    void ensureMedia(fileId)
+    // 拼接播放流也换了，重建一次
+    void syncMergedMedia()
+    return true
+  }
+
+  /**
+   * 重新读取字幕源文件（子项目本身就是字幕、没有音频时尤其有用）。
+   *
+   * 走 `history.commit`：读回旧内容等于把用户在编辑器里的修改全抹掉，
+   * 所以必须能 Ctrl+Z 撤回一次。
+   */
+  async function reloadSubtitle(fileId: string): Promise<boolean> {
+    const ui = useUiStore()
+    const bridge = window.xbaos
+    const history = useHistoryStore()
+    const file = files.value.find((f) => f.id === fileId)
+    if (!file || !bridge) return false
+    if (!file.subtitleFormat) {
+      ui.notify('warning', '这个子项目没有字幕源文件', '它是由音频识别出来的')
+      return false
+    }
+    /*
+     * 读的是 `subtitlePath`，不是 `path`。
+     *
+     * 纯字幕条目被映射过音频之后，`path` 已经指向音频了；照着它去解析字幕，
+     * 得到的是「不是有效的字幕文件」。源文件位置只有 `subtitlePath` 记着。
+     */
+    const source = file.subtitlePath ?? file.path
+    if (!source) return false
+
+    try {
+      const { text } = await bridge.fs.readTextAuto(source)
+      const parsed = parseSubtitle(text, file.subtitleFormat)
+      if (parsed.segments.length === 0) {
+        ui.notify('warning', '没有解析到字幕', '源文件里没有可用的字幕条目')
+        return false
+      }
+      history.commit(file.id, file.segments, '重新读取源文件', () => {
+        file.segments = parsed.segments
+        file.durationSec = Number(Math.max(...parsed.segments.map((s) => s.end)).toFixed(2))
+        file.status = 'pending'
+      })
+      ui.notify('success', '已重新读取', `${nameOf(source)}：${parsed.segments.length} 条`)
+      return true
+    } catch (err) {
+      ui.notify('error', '读取失败', err instanceof Error ? err.message : String(err))
+      return false
+    }
   }
 
   function peaksOf(fileId: string | null): AudioPeaks | null {
@@ -1977,20 +2134,14 @@ const MIME_BY_EXT: Record<string, string> = {
       if (isMerge.value && settings.speakerDiarization && !cancelRequested) {
         const targets = queue.filter((f) => canDiarize(f) && f.segments.length > 0)
         /*
-         * 起点接着**已经分离过的**那几份往下排。
+         * 每份的讲话人编号**都从 0 起**，不接着上一份往下排。
          *
-         * 合并模式是增量的：后来才加进来的文件不会把旧文件的条目重算一遍，
-         * 旧文件那套编号还在时间轴上。这里若从 0 起，新文件的 0 号就会与
-         * 旧文件的 0 号重合 —— 又变回「不同人共用一个称呼」。
+         * 编号是子项目本地的（`.xbsgp` 里两个子项目都有 0 号是正常的）。
+         * 曾经为了「合并成一条时间轴时不撞号」加过一个 `nextIndex` 偏移，
+         * 那与「编号本地」自相矛盾，也和白送的猜错绑在一起；跨子项目
+         * 「谁是谁」交给对应关系表 —— 它只按**用户起的名字**推断，
+         * 不按编号推断，所以两段都有「讲话人 1」不会误绑。
          */
-        const targetIds = new Set(targets.map((f) => f.id))
-        let nextIndex = 0
-        for (const f of supportedFiles.value) {
-          if (targetIds.has(f.id)) continue
-          for (const seg of f.segments) {
-            if (typeof seg.speaker === 'number') nextIndex = Math.max(nextIndex, seg.speaker + 1)
-          }
-        }
         for (const [i, file] of targets.entries()) {
           const owner = `diarize:${file.id}`
           logs.push('info', `分析讲话人（${i + 1}/${targets.length}）：${file.name}`)
@@ -2015,12 +2166,7 @@ const MIME_BY_EXT: Record<string, string> = {
               threads,
             })
             const assigned = assignSpeakers(file.segments, diar.spans)
-            file.segments = assigned.segments.map((seg) =>
-              typeof seg.speaker === 'number'
-                ? { ...seg, speaker: seg.speaker + nextIndex }
-                : seg,
-            )
-            nextIndex += assigned.speakers
+            file.segments = assigned.segments
             logs.push(
               'info',
               `${file.name}：${assigned.speakers} 位讲话人，${assigned.tagged} 条已标注`,
@@ -2184,7 +2330,7 @@ const MIME_BY_EXT: Record<string, string> = {
     return buildProjectDoc({
       name: displayProjectName.value,
       activeItemId: activeFileId.value,
-      shared: settings.speakerNamesShared,
+      shared: speakers.shared,
       mtimeOf: (p) => mtimes.get(p) ?? 0,
       items: supportedFiles.value,
       appVersion,
@@ -2277,15 +2423,20 @@ const MIME_BY_EXT: Record<string, string> = {
       return {
         id: it.id,
         name: it.name,
-        path: it.media?.path ?? '',
-        dir: it.media ? dirOf(it.media.path) : '',
-        ext: extOfPath(it.name),
+        // 音频条目取 media；纯字幕条目取 sourcePath（原来的 srt 在哪）
+        path: it.media?.path ?? it.sourcePath ?? '',
+        dir: dirOf(it.media?.path ?? it.sourcePath ?? ''),
+        // 扩展名跟着**音频**走：子项目名用户可以随意改（改成「第 1 期」就
+        // 没有扩展名了），而能不能解码只看音频文件本身
+        ext: extOfPath(it.media?.path ?? it.name),
         sizeBytes: it.media?.sizeBytes ?? 0,
+        mediaMtimeMs: it.media?.mtimeMs,
         durationSec: it.durationSec,
         status,
         segments: it.segments,
         subtitleFormat: it.subtitleFormat,
         sourceEncoding: it.sourceEncoding,
+        subtitlePath: it.sourcePath,
       }
     })
   }
@@ -2374,12 +2525,14 @@ const MIME_BY_EXT: Record<string, string> = {
     // 讲话人表：打开的项目自带的称呼必须恢复，否则整份工程读回来就少了信息
     const speakers = useSpeakerStore()
     const sp = doc.speakers
+    speakers.resetAll()
     speakers.byFile = sp?.byFile ?? {}
     speakers.globals = sp?.globals ?? []
     speakers.mapping = sp?.mapping ?? {}
     speakers.declared = sp?.declared ?? {}
     speakers.mappingConfirmed = sp?.confirmed === true
-    settings.speakerNamesShared = doc.project.shared
+    // `shared` 是项目级属性：打开哪一份工程，就用它自己记的那个值
+    speakers.shared = doc.project.shared
 
     exportRecords.value.clear()
     savedSignatures.value.clear()
@@ -2389,12 +2542,25 @@ const MIME_BY_EXT: Record<string, string> = {
     onQueueChanged()
     revalidate()
 
+    /*
+     * 核对音频还在不在。这一条必须在「打开」时就做：项目文件里存的只是一个
+     * 路径，换台电脑、换个盘符、或者原始素材被挪走之后，那个路径随时会失效。
+     * 不主动问一次，用户会先看到一片空波形，再以为是软件坏了。
+     */
+    const bad = await checkMedia()
+
     // 等这一轮响应式触发跑完，再解除抑制并确认「刚打开 = 没改过」
     await nextTick()
     suppressDirty = false
     projectDirty.value = false
 
-    ui.notify('success', '项目已打开', `${doc.project.name}：${items.length} 个子项目`)
+    ui.notify(
+      'success',
+      '项目已打开',
+      bad > 0
+        ? `${doc.project.name}：${items.length} 个子项目，其中 ${bad} 个的音频对不上`
+        : `${doc.project.name}：${items.length} 个子项目`,
+    )
     return true
   }
 
@@ -2506,6 +2672,12 @@ const MIME_BY_EXT: Record<string, string> = {
     receiveDroppedFiles,
     ensureMedia,
     mediaOf,
+    mediaState,
+    mediaStateOf,
+    audioProblemFiles,
+    checkMedia,
+    remapMedia,
+    reloadSubtitle,
     peaksOf,
     mediaErrorOf,
     mediaVersion,

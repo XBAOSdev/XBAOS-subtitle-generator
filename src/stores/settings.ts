@@ -95,14 +95,12 @@ export interface SettingsSnapshot {
    */
   speakerPrefixUserSet: boolean
   /**
-   * 讲话人称呼跨文件共用。
+   * @deprecated 已迁到**项目级**（`speakers.shared`）。
    *
-   * 默认关：分离是对每份音频各跑一遍的，A 里的 0 号与 B 里的 0 号不必是同一个人。
-   * 只有同一场录制被拆成多个文件时，把它们当成同一批人才对 —— 那种情况下
-   * 开着它，改一次称呼所有文件一起变。
-   *
-   * 默认值**只由批量处理模式决定**：合并为一条时间轴时开启，独立处理时关闭；
-   * 切换模式即重置（`project.setBatchMode`）。不落盘，见 `persist`。
+   * 这里只留一个恒为 `false` 的占位字段，让旧存档与旧探针脚本不至于读到
+   * `undefined`，运行时**不读也不写**。共用与否描述的是「这一份工程怎么看待
+   * 称呼」，不是「这个软件怎么工作」；存在设置里会让两个项目互相污染 ——
+   * 打开 A 勾着共用，切到 B 也是勾着，而 B 本来各叫各的。
    */
   speakerNamesShared: boolean
   /**

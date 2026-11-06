@@ -133,6 +133,22 @@ export interface AudioFile {
   /** 导入时检测到的源文件编码，覆盖保存时原样写回 */
   sourceEncoding?: TextEncoding
   /**
+   * 字幕源文件路径（只有「导入的是字幕文件」才有）。
+   *
+   * 与 `path` 分开，是因为 `path` 表示「音频在哪」：纯字幕条目 `path` 先指向
+   * 那个 srt，一旦用户给它映射了音频，`path` 就变成音频路径 —— 那时字幕源
+   * 只剩这里记着，「重新读取源文件」也才有地方读。
+   */
+  subtitlePath?: string
+  /**
+   * 音频文件的修改时间（毫秒）。只在打开项目时从 `.xbsgp` 带进来，
+   * 用来判断「这个音频还是不是上次那一个」。
+   *
+   * 只比字节数是不够的：换个同名同长的文件、或者原地重新导出一遍，
+   * 大小常常一模一样，但内容变了 —— 波形与时间码会悄悄错位。
+   */
+  mediaMtimeMs?: number
+  /**
    * 演示数据标记。浏览器预览模式（?demo=1）下没有真实音频文件，
    * 波形用合成峰值代替，播放走模拟计时器。
    */
@@ -294,8 +310,16 @@ export interface ProjectItemDoc {
   name: string
   /** 有音频轨的是 audio；纯字幕导入、没挂音频的是 subtitle */
   kind: 'audio' | 'subtitle'
-  /** 音频来源。纯字幕子项目为 null（P3 才支持给它挂音频） */
+  /** 音频来源。纯字幕子项目为 null */
   media: { path: string; sizeBytes: number; mtimeMs: number } | null
+  /**
+   * 纯字幕子项目的源文件路径（srt / vtt / ass）。
+   *
+   * 与 `media` 分开存，是因为它们回答的是两个不同的问题：「这里是音频」vs
+   * 「这段字幕是从哪个文件读来的」。合并成一个 `path` 字段时，纯字幕条目
+   * 存下去再打开，就会被当成音频去解码，波形区一片报错。
+   */
+  sourcePath?: string
   /** 时长，秒。偏移由它累加派生，不落盘 */
   durationSec: number
   status: FileStatus

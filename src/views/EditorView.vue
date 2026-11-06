@@ -42,6 +42,19 @@ const mergePending = computed(
   () => project.isMerge && (project.viewFile?.segments.length ?? 0) === 0,
 )
 
+/**
+ * 音频对不上的子项目（缺失或被换过）。
+ *
+ * 提示条只留一个动作入口，每次处理第一个：修好一个，这一条就少一个，
+ * 用户能看着数字往下走到 0。一次列出十几行按钮反而让人不知道从哪下手。
+ */
+const audioBad = computed(() => project.audioProblemFiles)
+
+function fixAudio(): void {
+  const first = audioBad.value[0]
+  if (first) ui.openDialog('audio-map', { fileId: first.id })
+}
+
 /* -------------------------------------------------------- 全局快捷键 */
 /* 挂在 window 上而不是表格根节点：焦点落在工具栏、波形、侧栏上时
    撤销重做和播放快捷键也得能用。编辑文本时让位给输入框自身的行为。 */
@@ -554,6 +567,17 @@ async function saveInPlace(): Promise<void> {
           </span>
         </div>
 
+        <!-- 音频对不上：路径失效或被换过。不给提示的话，用户先看到的是
+             一片空波形，然后以为软件坏了 -->
+        <div v-if="audioBad.length > 0" class="audbar">
+          <Icon name="alert" :size="13" />
+          <span class="audbar__text">
+            <strong>{{ audioBad.length }}</strong> 个子项目的音频对不上：
+            {{ audioBad[0].name }}{{ audioBad.length > 1 ? ' 等' : '' }}
+          </span>
+          <button class="btn btn--sm" type="button" @click="fixAudio">音频映射</button>
+        </div>
+
         <TimelineTrack />
         <SubtitleTable />
       </div>
@@ -758,6 +782,32 @@ async function saveInPlace(): Promise<void> {
 }
 
 .mergebar__text strong {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-semibold);
+}
+
+/* 音频对不上的提示条：用警告色，与合并说明区分开（那是常态，这是要处理的） */
+.audbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: var(--color-warning-subtle);
+  color: var(--color-warning);
+  font-size: 11px;
+}
+
+.audbar__text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.audbar__text strong {
   font-variant-numeric: tabular-nums;
   font-weight: var(--weight-semibold);
 }

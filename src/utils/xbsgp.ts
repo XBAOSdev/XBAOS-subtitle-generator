@@ -16,6 +16,7 @@
  *    分界线是「换一台电脑打开，内容一模一样」。
  */
 
+import { isSupported } from '@/utils/formats'
 import type {
   FileStatus,
   ProjectDoc,
@@ -100,21 +101,41 @@ export interface ProjectItemLike {
   segments: SubtitleSegment[]
   subtitleFormat?: SubtitleFormat
   sourceEncoding?: TextEncoding
+  /** 字幕源文件（导入的是字幕时才有）；与音频路径分开，见 AudioFile 的说明 */
+  subtitlePath?: string
   ext: string
 }
 
 function itemToDoc(item: ProjectItemLike, mtimeMs: number): ProjectItemDoc {
-  // 有音频路径且扩展名像音频 → audio；纯字幕导入的条目没有音频
-  const kind = item.subtitleFormat ? 'subtitle' : 'audio'
+  /*
+   * 判据是「**有没有音频**」，不是「导入时是不是字幕」。
+   *
+   * 一个纯字幕子项目被用户映射了音频之后，两样都有：音频（`path` + `ext`）
+   * 与字幕源（`subtitlePath`）。按 `subtitleFormat` 判 kind 会把它算成
+   * subtitle、把音频路径丢掉 —— 存一次再打开，刚映射好的音频又没了。
+   */
+  const kind = item.path && isSupported(item.ext) ? 'audio' : 'subtitle'
   const doc: ProjectItemDoc = {
     id: item.id,
     name: item.name,
     kind,
-    media: item.path ? { path: item.path, sizeBytes: item.sizeBytes, mtimeMs } : null,
+    /*
+     * `media` 只写给音频条目。
+     *
+     * 纯字幕条目的 `path` 是那个 srt 的路径，早先无差别写进 `media`，
+     * 于是打开项目后它被当成音频去读、去解码 —— 波形区报错，播放器提示
+     * 「没有音频轨」，而它本来就没有。字幕的来源改记在 `sourcePath`。
+     */
+    media:
+      kind === 'audio' && item.path
+        ? { path: item.path, sizeBytes: item.sizeBytes, mtimeMs }
+        : null,
     durationSec: item.durationSec ?? 0,
     status: item.status,
     segments: item.segments.map(segmentToDoc) as unknown as SubtitleSegment[],
   }
+  // 字幕源与音频是两件独立的事实，各记各的
+  if (item.subtitlePath) doc.sourcePath = item.subtitlePath
   if (item.subtitleFormat) doc.subtitleFormat = item.subtitleFormat
   if (item.sourceEncoding) doc.sourceEncoding = item.sourceEncoding
   return doc
@@ -232,6 +253,7 @@ export function fromProjectText(text: string): ParseResult {
       status: (typeof it.status === 'string' ? it.status : 'pending') as FileStatus,
       segments,
     }
+    if (typeof it.sourcePath === 'string' && it.sourcePath) doc.sourcePath = it.sourcePath
     if (typeof it.subtitleFormat === 'string') {
       doc.subtitleFormat = it.subtitleFormat as SubtitleFormat
     }

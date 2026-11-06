@@ -11,7 +11,6 @@ import { useProjectStore } from '@/stores/project'
 import { useSpeakerStore } from '@/stores/speakers'
 import { useEditorStore } from '@/stores/editor'
 import { useHistoryStore } from '@/stores/history'
-import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
 import { clearSpeaker, mergeSpeakerInto, setSpeakerFor, type SpeakerEntry } from '@/utils/speaker'
 import ModalDialog from '@/components/dialogs/ModalDialog.vue'
@@ -21,11 +20,17 @@ const project = useProjectStore()
 const speakers = useSpeakerStore()
 const editor = useEditorStore()
 const history = useHistoryStore()
-const settings = useSettingsStore()
 const ui = useUiStore()
 
-const file = computed(() => project.viewFile)
-const fileId = computed(() => project.viewFileId ?? '')
+/*
+ * 面板作用在**一个子项目**上，不是拼接视图。
+ *
+ * 编号是子项目本地的：合并模式下两段都有「讲话人 1」。把面板挂到拼接视图上，
+ * 改名就只能落到一个不存在的 fileId（`__merged__`）里 —— 界面上看着改了，
+ * 字幕上的称呼一点没变。所以这里取当前活动子项目，标题里标出是谁。
+ */
+const file = computed(() => (project.isMerge ? project.activeFile : project.viewFile))
+const fileId = computed(() => file.value?.id ?? '')
 const segments = computed(() => file.value?.segments ?? [])
 
 const list = computed(() => speakers.speakersOf(fileId.value, segments.value))
@@ -105,7 +110,7 @@ const speakerFileCount = computed(
 )
 
 /**
- * 勾上「所有文件共用同一套称呼」。
+ * 勾上「本项目共用同一套称呼」。
  *
  * 第一次勾要**先让人确认**不同文件之间谁是谁 —— 直接按编号绑一起，
  * A 文件的 1 号与 B 文件的 1 号会被当成同一个人（编号只是「这个文件里的
@@ -123,7 +128,7 @@ function onShareChange(event: Event): void {
      * 叫法。关掉开关，`namesOf()` 立刻回到各自那份 —— 也就是共用之前
      * 用户已经改好的称呼。
      */
-    settings.speakerNamesShared = false
+    speakers.shared = false
     return
   }
   if (!speakers.mappingConfirmed && speakerFileCount.value > 1) {
@@ -138,7 +143,7 @@ function onShareChange(event: Event): void {
     return
   }
   speakers.ensureMapping(mappingFiles.value)
-  settings.speakerNamesShared = true
+  speakers.shared = true
 }
 
 /** 重新打开对应关系表调整（只是调整，不因此打开共用开关） */
@@ -167,7 +172,7 @@ watch(
       )
       .join('|'),
   () => {
-    if (settings.speakerNamesShared) speakers.ensureMapping(mappingFiles.value)
+    if (speakers.shared) speakers.ensureMapping(mappingFiles.value)
   },
   { immediate: true },
 )
@@ -177,7 +182,7 @@ watch(
  * 没有对应关系就没有统一称呼，侧栏会显示成一片「讲话人 N」。
  */
 watch(
-  () => settings.speakerNamesShared,
+  () => speakers.shared,
   (on) => {
     if (on) speakers.ensureMapping(mappingFiles.value)
   },
@@ -243,6 +248,12 @@ function doDelete(): void {
       </button>
     </div>
 
+    <!-- 合并模式下面板只作用于一个子项目，单独一行说明是哪一个：
+         塞进标题行会把「讲话人」三个字压成竖排 -->
+    <div v-if="project.isMerge && file" class="speakers__scope" :title="file.name">
+      {{ file.name }}
+    </div>
+
     <ul class="speakers__list">
       <li v-for="entry in list" :key="entry.index" class="spkrow">
         <span class="spkrow__index mono">{{ entry.index + 1 }}</span>
@@ -284,10 +295,10 @@ function doDelete(): void {
       <label class="speakers__share-check">
         <input
           type="checkbox"
-          :checked="settings.speakerNamesShared"
+          :checked="speakers.shared"
           @change="onShareChange"
         />
-        <span>所有文件共用同一套称呼</span>
+        <span>本项目共用同一套称呼</span>
       </label>
       <button class="speakers__mapbtn" type="button" @click="openMap">调整对应关系</button>
     </div>
@@ -347,6 +358,9 @@ function doDelete(): void {
 }
 
 .speakers__title {
+  /* flex 行里不加 `flex: none`，中文标题会被压成一列竖排的字 */
+  flex: none;
+  white-space: nowrap;
   font-size: var(--font-size-xs);
   font-weight: var(--weight-semibold);
   color: var(--color-text-secondary);
@@ -355,6 +369,16 @@ function doDelete(): void {
 .speakers__count {
   font-size: 11px;
   color: var(--color-text-tertiary);
+}
+
+/* 合并模式下面板只作用于一个子项目，得让人知道是哪一个 —— 编号是子项目本地的 */
+.speakers__scope {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .speakers__add {
