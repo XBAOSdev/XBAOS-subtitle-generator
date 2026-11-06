@@ -3774,19 +3774,18 @@ const scenarios = {
 
     // ---- 合并模式 → 清空队列 → 直接导入 SRT ----
     check('未导出过 → 底部没有「保存」', !(await footLabels()).includes('保存'))
-    check('初始批量模式是「各自独立处理」', (await useStore(`return s.batchMode`)) === 'separate')
-    check('能切到「合并时间轴」', (await useStore(`return s.setBatchMode('merge')`)) === true)
+    check('初始批量模式是「合并为一个项目」', (await useStore(`return s.batchMode`)) === 'merge')
+    check('能切到「每个文件各建一个项目」', (await useStore(`return s.setBatchMode('separate')`)) === true)
 
     await useStore(`s.clearAll(); return true`)
     const cleared = await useStore(`return {
       mode: s.batchMode,
       files: s.files.length,
       merged: !!s.mergedFile,
-      locked: s.batchModeLocked,
     }`)
     check(
-      '清空队列后批量模式复位（不会再掉进空的合并视图）',
-      cleared.mode === 'separate' && cleared.locked === false,
+      '清空队列后批量模式保持不变（不再复位成独立处理）',
+      cleared.mode === 'separate',
       JSON.stringify(cleared),
     )
     check('清空队列后合并产物一并释放', cleared.merged === false && cleared.files === 0)
@@ -6577,6 +6576,17 @@ const scenarios = {
   },
   /* 共用称呼的默认值 / 取消后回归原称呼 / 进度条悬停摊开日志 */
   'share-default': async (cdp) => {
+    /*
+     * 2026-11-06 起这一段不再跑。
+     *
+     * `speakers.shared` 改成了**项目级**，且不再与批量模式联动（`setBatchMode` 只判
+     * `recognizing`，`batchModeLocked` 也已删除）—— 下面这些「切到合并就自动打开、
+     * 切回独立就自动关掉」的前提整段不成立，留着跑只会给出假的 FAIL。
+     * 保留原文只为留决策脉络；新验收走 `tools/shot-p456.mjs`。
+     */
+    console.log('  (skip) 共用称呼已改项目级、不再随批量模式联动，本场景失效')
+    return
+
     const run = (body) =>
       cdp.evaluate(`(() => {
         const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s

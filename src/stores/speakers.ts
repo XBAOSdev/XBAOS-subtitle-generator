@@ -37,6 +37,17 @@ export interface SpeakerMappingFile {
  * 不随设置落盘（那是软件偏好）；随**项目**落盘 —— 称呼与对应关系是这份
  * 工程的一部分，换台电脑打开必须一模一样。
  */
+/** 一份完整的讲话人状态。切换项目时整份换掉，不做增量合并 */
+export interface SpeakerSnapshot {
+  shared: boolean
+  byFile: Record<string, Record<string, string>>
+  globals: GlobalSpeaker[]
+  mapping: Record<string, Record<string, number>>
+  declared: Record<string, number[]>
+  confirmed: boolean
+  built: boolean
+}
+
 export const useSpeakerStore = defineStore('speakers', () => {
   /**
    * 本项目内是否共用一套称呼。
@@ -46,7 +57,7 @@ export const useSpeakerStore = defineStore('speakers', () => {
    * 而设置描述的才是"这个软件怎么工作"。初值由建项目时的批量模式决定
    * （合并 → 共用，分开 → 各自称呼），之后与模式无关。
    */
-  const shared = ref(false)
+  const shared = ref(true)
   /** fileId → 编号 → 称呼（**每个文件各自一套**，永远保留） */
   const byFile = ref<Record<string, Record<string, string>>>({})
   /**
@@ -374,6 +385,52 @@ export const useSpeakerStore = defineStore('speakers', () => {
     pendingShareConfirm.value = false
   }
 
+  /**
+   * 拷一份完整状态出来（切换项目时存进草稿）。
+   *
+   * 必须深拷：这些表是**当前项目**的，写回草稿时如果只存引用，之后在新项目里
+   * 改一个称呼，上一份草稿也跟着变 —— 切回去才发现名字被串改了。
+   */
+  function snapshot(): SpeakerSnapshot {
+    const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T
+    return {
+      shared: shared.value,
+      byFile: copy(byFile.value),
+      globals: copy(globals.value),
+      mapping: copy(mapping.value),
+      declared: copy(declared.value),
+      confirmed: mappingConfirmed.value,
+      built: mappingBuilt.value,
+    }
+  }
+
+  /** 用一份快照覆盖当前状态（切到另一个项目） */
+  function restore(s: SpeakerSnapshot): void {
+    shared.value = s?.shared ?? false
+    byFile.value = s?.byFile ?? {}
+    globals.value = s?.globals ?? []
+    mapping.value = s?.mapping ?? {}
+    declared.value = s?.declared ?? {}
+    mappingConfirmed.value = s?.confirmed ?? false
+    mappingBuilt.value = s?.built ?? false
+    pendingShareConfirm.value = false
+  }
+
+  /** 空状态（新建项目时用） */
+  function emptySnapshot(mode: 'merge' | 'separate' = 'merge'): SpeakerSnapshot {
+    return {
+      // 初值由建项目时的批量模式决定（合并 → 共用，分开 → 各自称呼），
+      // 之后与模式无关
+      shared: mode === 'merge',
+      byFile: {},
+      globals: [],
+      mapping: {},
+      declared: {},
+      confirmed: false,
+      built: false,
+    }
+  }
+
   return {
     shared,
     byFile,
@@ -402,5 +459,8 @@ export const useSpeakerStore = defineStore('speakers', () => {
     forget,
     forgetFile,
     resetAll,
+    snapshot,
+    restore,
+    emptySnapshot,
   }
 })

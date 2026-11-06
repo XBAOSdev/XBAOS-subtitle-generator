@@ -2273,7 +2273,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
   check(
     '关窗确认走原生对话框且默认落在取消上',
-    /confirmDestructive\(/.test(appSrc) && /仍要关闭/.test(appSrc),
+    /dialog\?\.confirm/.test(appSrc) && /defaultId: 0/.test(appSrc) && /cancelId: 0/.test(appSrc),
     '尚未保存的岔路口不该顺手回车就过',
   )
   check(
@@ -4762,7 +4762,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
   check(
     '素材方块可拖动排序',
-    /draggable="true"/.test(boardSrc) && /project\.reorder\(/.test(boardSrc),
+    /draggable="true"/.test(boardSrc) && /project\.reorderIntake\(/.test(boardSrc),
     '不能拖动就只剩上下箭头，调顺序很别扭',
   )
   check(
@@ -5181,9 +5181,8 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const mapSrc = readSrc('src/components/dialogs/SpeakerMapDialog.vue')
 
   check(
-    '共用称呼默认关，只有合并成一条时间轴时默认开',
-    projectSrc.includes("useSpeakerStore().shared = mode === 'merge'") &&
-      speakerSrc.includes('const shared = ref(false)'),
+    '共用称呼的初值由建项目时的模式决定（合并默认开，分开默认关）',
+    speakerSrc.includes("shared: mode === 'merge'") && speakerSrc.includes('const shared = ref(true)'),
     '独立处理时各文件各拍各的，默认绑在一起就是老毛病；合并成一条时间线才是一套人',
   )
   check(
@@ -5500,15 +5499,15 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   /* ---- P1-1：共用称呼是项目级属性 ---- */
   check(
     '「共用一套称呼」是项目级：存在 speakers 里，settings 只剩废弃占位',
-    speakerSrc.includes('const shared = ref(false)') &&
+    speakerSrc.includes('const shared = ref(true)') &&
       /shared\.value/.test(speakerSrc) &&
       !/settings\.speakerNamesShared/.test(speakerSrc) &&
       /@deprecated[\s\S]{0,240}speakerNamesShared: boolean/.test(settingsSrc),
     '放在设置里，打开 A 勾着共用、切到 B 也勾着 —— 两份工程互相污染',
   )
   check(
-    '建项目 / 清空 / 打开项目三处都跟着换 shared',
-    /useSpeakerStore\(\)\.shared = mode === 'merge'/.test(projectSrc) &&
+    '建项目 / 关项目 / 打开项目三处都跟着换 shared',
+    /emptySnapshot\(batchMode\.value\)/.test(projectSrc) &&
       /useSpeakerStore\(\)\.resetAll\(\)/.test(projectSrc) &&
       /speakers\.shared = doc\.project\.shared/.test(projectSrc),
     '少一处就会「换了工程但开关还停在上一份」',
@@ -5523,10 +5522,8 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '只有一列时两段的「讲话人 1」挤在同一格里，分不出谁是谁',
   )
   check(
-    '合并模式下讲话人面板作用在活动子项目上，不落到虚拟视图 id',
-    /project\.isMerge \? project\.activeFile : project\.viewFile/.test(
-      readSrc('src/components/SpeakerPanel.vue'),
-    ),
+    '讲话人面板作用在活动子项目上，不落到虚拟视图 id',
+    /project\.activeFile \?\? project\.viewFile/.test(readSrc('src/components/SpeakerPanel.vue')),
     '改到 `__merged__` 上等于改了空气：界面显示成功，字幕上的称呼一点没变',
   )
 

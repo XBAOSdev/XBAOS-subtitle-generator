@@ -126,7 +126,7 @@ function onDragEnd(): void {
 function moveTo(from: number, insertAtPos: number): void {
   const to = insertAtPos > from ? insertAtPos - 1 : insertAtPos
   if (to === from) return
-  project.reorder(from, to)
+  project.reorderIntake(from, to)
 }
 
 /* ------------------------------------------------------------ 动画 */
@@ -154,12 +154,6 @@ function onBeforeLeave(el: Element): void {
 }
 
 /* ------------------------------------------------------------ 选择与移除 */
-
-function select(id: string): void {
-  // 合并模式下编辑器里只有一条拼接产物，切目标只会把画面换掉
-  if (project.isMerge) return
-  project.setActiveFile(id)
-}
 
 /** 已经有识别结果的文件才确认：这一下会连带丢掉它的全部字幕 */
 async function askRemove(file: AudioFile): Promise<void> {
@@ -191,17 +185,11 @@ async function openProject(): Promise<void> {
   await project.openProject()
 }
 
-/** 清空队列。会把已经识别出来的内容一起删掉，所以必须把风险讲清楚 */
+/** 清空队列：只清还没识别的素材，已经建出来的项目一条都不动 */
 async function clearAll(): Promise<void> {
-  const total = project.files.length
-  const withResult = project.supportedFiles.filter((f) => f.segments.length > 0)
-  const segmentCount = withResult.reduce((n, f) => n + f.segments.length, 0)
-
+  const total = project.intake.length
   const detail =
-    (withResult.length > 0
-      ? `队列里有 ${withResult.length} 个文件已经识别出 ${segmentCount} 条字幕，清空会把它们一并删除且无法恢复，未导出的内容会丢失。批量处理模式的锁定也会一并解除。`
-      : '清空后可以重新导入文件，批量处理模式的锁定也会一并解除。') +
-    '调整导入顺序、移除单个文件都不会影响已经识别出来的内容，只有清空会。'
+    '已经识别完成的内容在各自的项目里，不受影响。清空只丢掉还没开始识别的这些素材，原始文件不会被删除。'
 
   const bridge = window.xbaos
   if (bridge) {
@@ -219,11 +207,7 @@ async function clearAll(): Promise<void> {
   }
 
   project.clearAll()
-  ui.notify(
-    'info',
-    '队列已清空',
-    segmentCount > 0 ? `同时删除了 ${segmentCount} 条识别结果` : undefined,
-  )
+  ui.notify('info', '队列已清空')
 }
 
 /**
@@ -257,8 +241,8 @@ const SUBTITLE_LABELS = SUBTITLE_EXTS.map((ext) => ext.toUpperCase())
     <header class="col__head">
       <Icon name="layers" :size="14" class="board__headicon" />
       <span class="col__title">素材</span>
-      <span v-if="project.hasFiles" class="hint">
-        {{ project.files.length }} 个文件
+      <span v-if="project.intake.length > 0" class="hint">
+        {{ project.intake.length }} 个文件
       </span>
       <span class="spacer" />
 
@@ -276,7 +260,7 @@ const SUBTITLE_LABELS = SUBTITLE_EXTS.map((ext) => ext.toUpperCase())
         <span>录制音频</span>
       </button>
       <button
-        v-if="project.hasFiles"
+        v-if="project.intake.length > 0"
         class="board__iconbtn"
         type="button"
         title="清空队列"
@@ -296,23 +280,20 @@ const SUBTITLE_LABELS = SUBTITLE_EXTS.map((ext) => ext.toUpperCase())
       name="mtile"
       class="board__grid"
       @dragover.prevent
-      @drop="onDrop($event, project.files.length)"
+      @drop="onDrop($event, project.intake.length)"
       @before-leave="onBeforeLeave"
     >
       <article
-        v-for="(file, index) in project.files"
+        v-for="(file, index) in project.intake"
         :key="file.id"
         class="tile"
         :class="{
-          'is-active': !project.isMerge && project.activeFileId === file.id,
-          'is-static': project.isMerge,
           'is-unsupported': file.status === 'unsupported',
           'is-dragging': dragFrom === index,
           'is-gap': insertAt === index,
         }"
         draggable="true"
         :title="`${file.name}\n${t(`status.${file.status}`)}｜${file.dir}`"
-        @click="select(file.id)"
         @dragstart="onDragStart($event, index)"
         @dragover="onDragOver($event, index)"
         @drop="onDrop($event, index)"
@@ -349,7 +330,7 @@ const SUBTITLE_LABELS = SUBTITLE_EXTS.map((ext) => ext.toUpperCase())
       <button
         key="__add"
         class="tile tile--add"
-        :class="{ 'is-gap': insertAt === project.files.length }"
+        :class="{ 'is-gap': insertAt === project.intake.length }"
         type="button"
         title="添加音频或字幕文件"
         @click="pick"
@@ -470,10 +451,6 @@ const SUBTITLE_LABELS = SUBTITLE_EXTS.map((ext) => ext.toUpperCase())
   background: var(--color-bg-raised);
   border-color: var(--color-accent-border);
   box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--color-accent-border);
-}
-
-.tile.is-static {
-  cursor: pointer;
 }
 
 .tile.is-unsupported {

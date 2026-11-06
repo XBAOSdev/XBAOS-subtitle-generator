@@ -6,7 +6,6 @@ import { useSettingsStore } from '@/stores/settings'
 import { useUpdateStore } from '@/stores/update'
 import { useModelStore } from '@/stores/model'
 import { useLogStore } from '@/stores/logs'
-import { confirmDestructive } from '@/utils/confirm'
 
 import AppTitlebar from '@/components/AppTitlebar.vue'
 import AppSidebar from '@/components/AppSidebar.vue'
@@ -444,29 +443,52 @@ async function onCloseRequest(): Promise<void> {
   if (!bridge) return
   bridge.ackCloseRequest()
 
-  const { count, recognizing, names } = project.unsavedSummary()
-  // 一份没动过、也没在识别 —— 直接放行，不打扰
-  if (count === 0) {
+  const s = project.unsavedSummary()
+  // 没有未保存的项目、队列也空着 —— 直接放行，不打扰
+  if (s.clean) {
     bridge.forceClose()
     return
   }
 
-  const head =
-    recognizing > 0
-      ? `有 ${recognizing} 个文件还没识别完`
-      : count === 1
-        ? '有 1 个文件的内容尚未保存'
-        : `有 ${count} 个文件的内容尚未保存`
-  const shown = names.slice(0, 5).join('、')
-  const more = names.length > 5 ? ` 等 ${names.length} 个文件` : ''
+  const lines: string[] = []
+  if (s.count > 0) {
+    const shown = s.names.slice(0, 3).join('、')
+    const more = s.names.length > 3 ? ` 等 ${s.names.length} 个` : ''
+    lines.push(
+      s.count === 1
+        ? `项目「${shown}」有未保存的改动`
+        : `${s.count} 个项目有未保存的改动：${shown}${more}`,
+    )
+  }
+  if (s.queued > 0) {
+    const names = s.queuedNames.slice(0, 3).join('、')
+    const more = s.queuedNames.length > 3 ? ` 等 ${s.queuedNames.length} 个` : ''
+    lines.push(`导入队列里还有 ${s.queued} 个音频没有识别完：${names}${more}`)
+    lines.push('关闭后这些音频需要重新导入。')
+  }
+  if (project.recognizing) lines.push('识别将中止。')
 
-  const ok = await confirmDestructive({
-    title: '还有未保存的内容',
-    message: `${head}，关闭后不会保留。`,
-    detail: `涉及：${shown}${more}。\n可以先「导出字幕」保存下来，或者留在软件里继续处理。`,
-    confirmLabel: '仍要关闭',
-  })
-  if (ok) bridge.forceClose()
+  const canSaveAll = s.neverSaved.length === 0
+  const buttons = canSaveAll ? ['取消', '不保存，直接关闭', '保存并关闭'] : ['取消', '仍要关闭']
+  const dialog = window.xbaos?.dialog
+  const choice = dialog?.confirm
+    ? await dialog.confirm({
+        type: 'warning',
+        title: '关闭前确认',
+        message: lines[0] ?? '还有没处理完的内容',
+        detail: lines.slice(1).join('\n'),
+        buttons,
+        defaultId: 0,
+        cancelId: 0,
+      })
+    : window.confirm(lines.join('\n')) ? 1 : 0
+  if (choice <= 0) return
+  if (canSaveAll && choice === 2) {
+    const res = await project.saveAllProjects()
+    // 有存不下去的就不关，让用户回到软件里处理
+    if (res.skipped.length > 0) return
+  }
+  bridge.forceClose()
 }
 
 /**

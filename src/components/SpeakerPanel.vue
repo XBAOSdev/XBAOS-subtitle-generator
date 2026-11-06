@@ -29,7 +29,7 @@ const ui = useUiStore()
  * 改名就只能落到一个不存在的 fileId（`__merged__`）里 —— 界面上看着改了，
  * 字幕上的称呼一点没变。所以这里取当前活动子项目，标题里标出是谁。
  */
-const file = computed(() => (project.isMerge ? project.activeFile : project.viewFile))
+const file = computed(() => project.activeFile ?? project.viewFile)
 const fileId = computed(() => file.value?.id ?? '')
 const segments = computed(() => file.value?.segments ?? [])
 
@@ -248,9 +248,9 @@ function doDelete(): void {
       </button>
     </div>
 
-    <!-- 合并模式下面板只作用于一个子项目，单独一行说明是哪一个：
+    <!-- 面板只作用于一个子项目（编号是子项目本地的），单独一行说明是哪一个：
          塞进标题行会把「讲话人」三个字压成竖排 -->
-    <div v-if="project.isMerge && file" class="speakers__scope" :title="file.name">
+    <div v-if="file" class="speakers__scope" :title="file.name">
       {{ file.name }}
     </div>
 

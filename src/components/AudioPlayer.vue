@@ -871,11 +871,7 @@ function detachSpeedListeners(): void {
 
     <p v-if="buffering" class="player__hint">正在缓冲这一段音频…</p>
     <p v-else-if="spanHasNoAudio" class="player__hint player__hint--warn">{{ noAudioHint }}</p>
-    <p v-if="isMerged" class="player__note">
-      合并时间轴由 {{ project.supportedFiles.length }} 段音频依次拼接，试听会自动接续播放各段
-      （段与段之间有 8ms 淡化，消掉拼接处的爆音）；刚切到某一段时需要先解码，可能略有延迟。
-    </p>
-    <p v-else-if="isDemo" class="player__note">
+    <p v-if="isDemo" class="player__note">
       演示数据没有真实音频，播放由模拟进度驱动；导入真实文件后将播放原声。
     </p>
 

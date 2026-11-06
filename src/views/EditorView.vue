@@ -196,10 +196,8 @@ function switchFile(direction: -1 | 1): void {
 }
 
 /** 左栏只在多文件、合并模式或存在不支持的文件时出现 */
-const showFileTree = computed(
-  () =>
-    project.isMerge || project.files.length > 1 || project.unsupportedFiles.length > 0,
-)
+/** 左栏：只要开着项目就显示（项目条 + 子项目行是导航的主入口） */
+const showFileTree = computed(() => project.drafts.length > 0)
 
 /**
  * 校验结果列表。
@@ -429,18 +427,36 @@ async function openAiTranslate(): Promise<void> {
   ui.setAssistActive(true)
 }
 
-/** 保存项目：已有路径就直接写，没有路径才弹自己的保存框（能实时校验重名） */
+/** 有未保存改动的项目（侧栏的多项目都在这里，活动项目读活引用） */
+const dirtyDrafts = computed(() =>
+  project.drafts.filter((d) =>
+    d.id === project.activeDraftId ? project.projectDirty : d.dirty,
+  ),
+)
+
+/**
+ * 保存项目。
+ *
+ * 只有一个项目要存时就是「保存这一个」；同时开着多个、且不止一个脏的时候
+ * 直接存全部 —— 用户按这个按钮的意思是「别让我丢东西」，一个个切过去存
+ * 不是他想干的事。
+ */
 function saveProjectFile(): void {
+  if (dirtyDrafts.value.length > 1) {
+    void project.saveAllProjects()
+    return
+  }
   if (project.projectPath) void project.saveProject()
   else ui.openDialog('save-project')
 }
 
 /** 悬停提示：没保存过的项目要说明「这一下会问你存哪」 */
-const saveProjectHint = computed(() =>
-  project.projectPath
+const saveProjectHint = computed(() => {
+  if (dirtyDrafts.value.length > 1) return `保存 ${dirtyDrafts.value.length} 个有改动的项目`
+  return project.projectPath
     ? `保存到 ${project.projectPath}`
-    : '保存为项目文件（.xbsgp），下次可以直接打开继续编辑',
-)
+    : '保存为项目文件（.xbsgp），下次可以直接打开继续编辑'
+})
 
 function openExport(): void {
   if (project.supportedFiles.length === 0) {
@@ -448,7 +464,7 @@ function openExport(): void {
     return
   }
   // 项目视图要等有字幕内容才值得打开导出（空时间轴导出去只会是空文件）
-  if (project.isMerge && (project.viewFile?.segments.length ?? 0) === 0) {
+  if ((project.viewFile?.segments.length ?? 0) === 0) {
     ui.notify('warning', '还没有可导出的字幕', '合并模式下需要先完成识别，才会有拼接好的时间轴')
     return
   }
@@ -691,14 +707,14 @@ async function saveInPlace(): Promise<void> {
         <span>AI 翻译</span>
       </button>
       <button
-        class="btn editor__iconbtn"
+        class="btn"
         type="button"
-        aria-label="保存项目"
         :title="saveProjectHint"
         :disabled="project.supportedFiles.length === 0"
         @click="saveProjectFile"
       >
-        <Icon name="layers" :size="15" />
+        <Icon name="save" :size="14" />
+        <span>保存项目</span>
         <span v-if="project.projectDirty" class="editor__dot" aria-hidden="true" />
       </button>
       <button
@@ -712,7 +728,7 @@ async function saveInPlace(): Promise<void> {
         <span>保存</span>
       </button>
       <button class="btn" type="button" @click="openExport">
-        <Icon name="save" :size="14" />
+        <Icon name="download" :size="14" />
         <span>导出字幕</span>
       </button>
     </footer>
@@ -727,7 +743,13 @@ async function saveInPlace(): Promise<void> {
   flex-direction: column;
 }
 
-/* 「有未保存改动」的小圆点，挂在保存按钮的图标后面 */
+/*
+ * 「有未保存改动」的小圆点，挂在「保存项目」的文字后面。
+ *
+ * 曾经这里是一个纯图标按钮（`layers` + 一个点），因为文字版会把右边的
+ * 「AI 翻译」挤出可视区。P4 之后侧栏接了多项目，这一排的构成变了，
+ * 图标版反而让人认不出它是保存 —— 现在是「图标 + 文字」。
+ */
 .editor__dot {
   flex: none;
   width: 6px;
@@ -735,18 +757,6 @@ async function saveInPlace(): Promise<void> {
   margin-left: 1px;
   border-radius: 50%;
   background: var(--color-accent);
-}
-
-/*
- * 图标版按钮。
- *
- * 底栏这一排已经满了：「保存项目」用整块文字按钮会把右边的「AI 翻译」
- * 挤出可视区（真机上表现为按钮凭空消失，且没有滚动条）。图标 + 提示
- * 是这里唯一不牺牲可点性的做法；等 P4 侧栏接上项目之后，项目菜单会成为
- * 主入口，那时再把它换成文字按钮。
- */
-.editor__iconbtn {
-  padding: 0 var(--space-2);
 }
 
 .editor__body {

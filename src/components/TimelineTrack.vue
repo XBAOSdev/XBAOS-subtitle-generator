@@ -136,6 +136,16 @@ function timeAtX(x: number): number {
 }
 
 /**
+ * 子项目分界：一条 1px 竖线，位置与字幕列表里的分界行一一对应。
+ *
+ * 只是参照物，不挡鼠标（`pointer-events: none`）—— 它画在字幕条上面，
+ * 挡住的话那几像素上的点击与拖动就全失效了。
+ */
+const itemBorders = computed(() =>
+  project.itemLayout.slice(1).map((b) => ({ id: b.itemId, name: b.name, x: xOf(b.offsetSec) })),
+)
+
+/**
  * 以某个时间点为锚点缩放：锚点停在屏幕上的同一个位置。
  *
  * 不这么做的话，逐级放大时内容会整体往左飘，用户得反复重新定位 ——
@@ -937,6 +947,15 @@ const playedWidth = computed(() => Math.max(0, Math.min(stageW.value, playheadX.
       <!-- 已播区域：一层遮罩跟着播放头走，比每帧重绘波形便宜得多 -->
       <div class="timeline__played" :style="{ width: playedWidth + 'px' }" />
 
+      <!-- 子项目分界：与字幕列表里的分界线对齐 -->
+      <div
+        v-for="b in itemBorders"
+        :key="`bd-${b.id}`"
+        class="tl-border"
+        :style="{ left: b.x + 'px' }"
+        :title="b.name"
+      />
+
       <div class="timeline__lanes">
         <div
           v-for="bar in bars"
@@ -1112,6 +1131,20 @@ const playedWidth = computed(() => Math.max(0, Math.min(stageW.value, playheadX.
   left: 0;
   height: var(--wave-h);
   background: var(--color-waveform-played-mask, rgba(255, 255, 255, 0.06));
+  pointer-events: none;
+}
+
+.tl-border {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  /*
+   * 比网格线重一档：网格线用的就是 subtle，同色的话这条线混在网格里看不出来，
+   * 而它要表达的是「这里换了一个子项目」—— 必须一眼能分辨。
+   */
+  background: var(--color-border-strong);
+  /* 参照物，不参与命中：挡在上面的话那几像素的点击与拖动会全失效 */
   pointer-events: none;
 }
 

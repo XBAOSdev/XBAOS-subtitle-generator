@@ -42,6 +42,33 @@ const bodyRef = ref<HTMLDivElement | null>(null)
 
 const segments = computed(() => project.viewFile?.segments ?? [])
 
+/**
+ * 分界线的落点：`index → true`（在这个下标之前插一条 1px 线）。
+ *
+ * 只在「一个项目里有两段以上」时才有内容。判断依据是 `itemLayout` 里各子项目
+ * 的起始下标，而不是拿相邻两条的 `originFileId` 比 —— 后者在空子项目（识别
+ * 失败、字幕全删）上会漏掉边界：它一条都没有，前后两条自然"同属一段"。
+ *
+ * 线上下**不写名字**（5.1.1 初版写过上下各一个小字，实机上很吵）：此刻在看
+ * 哪一段由侧栏的选中态表达 —— 滚动到哪一段，侧栏那一个子项目就亮起来。
+ */
+const seps = computed(() => {
+  const set = new Set<number>()
+  const layout = project.itemLayout
+  for (let i = 1; i < layout.length; i += 1) set.add(layout[i].firstIndex)
+  return set
+})
+
+/** 下标 → 它属于哪个子项目（分界与滚动跟随共用一张表） */
+const itemAt = computed(() => {
+  const layout = project.itemLayout
+  const arr: string[] = []
+  layout.forEach((item) => {
+    for (let i = 0; i < item.count; i += 1) arr.push(item.itemId)
+  })
+  return arr
+})
+
 /*
  * 整张表里只要有一条带讲话人编号（或者用户手动新增过一位），才腾出一列。
  *
@@ -498,12 +525,105 @@ watch(
   },
 )
 
-// 换文件 / 换合并产物时回到顶部，别把上一份内容的滚动位置带过来
+/* ------------------------------------------------ 顶部那条属于哪个子项目 */
+
+/**
+ * 视口顶部那一行是第几条。
+ *
+ * 行按时间顺序排列，所以二分找「第一条底边还在容器顶部之下的行」——
+ * 逐行量位置在几百条时会明显拖慢滚动，二分只要 log₂n 次。
+ */
+function topRowIndex(body: HTMLElement): number {
+  const rows = body.querySelectorAll<HTMLElement>('.row')
+  if (rows.length === 0) return -1
+  const top = body.getBoundingClientRect().top
+  let lo = 0
+  let hi = rows.length - 1
+  let found = -1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (rows[mid].getBoundingClientRect().bottom <= top + 1) lo = mid + 1
+    else {
+      found = mid
+      hi = mid - 1
+    }
+  }
+  // 全部滚过头了（极端情况下容器比内容还高）：算最后一条
+  return found === -1 ? rows.length - 1 : found
+}
+
+/**
+ * 滚动即切换「当前子项目」。
+ *
+ * 侧栏的选中态跟着视口顶部走 —— 用户滚到第二段，侧栏第二个子项目就亮起来，
+ * 不用再去数分界线。只在跨过边界时写一次 `activeFileId`，不是每帧都写：
+ * 那个值是「当前在看哪一段」，每帧改会让讲话人面板之类的整块重算。
+ */
+let followRaf = 0
+/**
+ * 刚从侧栏跳过来的一小段时间里不认「顶部是谁」。
+ *
+ * 最后一个子项目往往只有几条，滚不到顶端（容器到底就停住），这时顶部那一行
+ * 仍然属于上一段 —— 按规则算会把用户刚点的那一条的选中态又抢走。跳过来的
+ * 400ms 内以点击为准，之后交回滚动跟随。
+ */
+let followLockUntil = 0
+
+function onBodyScroll(): void {
+  const body = bodyRef.value
+  if (!body) return
+  // 位置每次滚动都记，切项目回来才停在原处
+  project.rememberScrollTop(project.activeDraftId, body.scrollTop)
+  if (followRaf) return
+  followRaf = requestAnimationFrame(() => {
+    followRaf = 0
+    if (Date.now() < followLockUntil) return
+    const index = topRowIndex(bodyRef.value as HTMLElement)
+    const id = index >= 0 ? itemAt.value[index] : ''
+    if (id && project.activeFileId !== id) project.setActiveFile(id)
+  })
+}
+
+/** 侧栏点某个子项目 → 跳到它第一行（跨项目时 `revealItem` 已经先切过来了） */
 watch(
-  () => project.viewFileId,
+  () => project.revealRequest,
+  async (req) => {
+    if (!req) return
+    await nextTick()
+    await nextTick()
+    const body = bodyRef.value
+    if (!body) return
+    const at = project.itemLayout.find((i) => i.itemId === req.itemId)
+    if (at === undefined) return
+    const row = body.querySelectorAll<HTMLElement>('.row')[at.firstIndex]
+    if (!row) return
+    followLockUntil = Date.now() + 400
+    const delta = row.getBoundingClientRect().top - body.getBoundingClientRect().top
+    body.scrollTop += delta - 6
+  },
+)
+
+/**
+ * 换项目：先把上一个项目停在哪记下来，再把这一份停过的地方还原。
+ *
+ * 两份工程之间来回对照是常态，每次都从顶部开始等于让用户重新找一遍刚才那一行。
+ *
+ * 盯 `activeDraftId` 而不是 `viewFileId`：拼接视图的 id 恒为 `__merged__`，
+ * 项目之间根本没有变化，那个 watch 从来不会因为切项目而触发（曾经写错过一次，
+ * 表现是「切回来总是回到顶部」）。
+ */
+let lastDraftId = project.activeDraftId
+watch(
+  () => project.activeDraftId,
   () => {
+    const body = bodyRef.value
+    const left = lastDraftId
+    const keep = body?.scrollTop ?? 0
+    lastDraftId = project.activeDraftId
+    if (left) project.rememberScrollTop(left, keep)
     void nextTick().then(() => {
-      if (bodyRef.value) bodyRef.value.scrollTop = 0
+      if (!bodyRef.value) return
+      bodyRef.value.scrollTop = project.scrollTopOf(project.activeDraftId)
     })
   },
 )
@@ -792,173 +912,182 @@ function onKeydown(event: KeyboardEvent): void {
       <span class="cell cell--flag" />
     </div>
 
-    <div ref="bodyRef" class="subtable__body scroll-y">
-      <div
-        v-for="(seg, index) in segments"
-        :key="seg.id"
-        :data-seg-id="seg.id"
-        class="row"
-        :class="{
-          'has-spk': hasSpeakers,
-          'is-selected': selectedSet.has(seg.id),
-          'is-current': editor.selectedIds[0] === seg.id,
-          'is-edited': isEdited(seg),
-          'has-error': worstLevel(seg) === 'error',
-          'has-warning': worstLevel(seg) === 'warning',
-          'is-acked': !!seg.acked,
-          'is-drop-target': dragOverIndex === index && dragFrom !== null && dragFrom !== index,
-        }"
-        @click="onRowClick($event, seg.id)"
-        @contextmenu="openRowMenu($event, seg)"
-        @dragover="onReorderOver($event, index)"
-        @drop="onReorderDrop($event, index)"
-      >
-        <span class="cell cell--check">
-          <input
-            type="checkbox"
-            class="row__check"
-            :checked="selectedSet.has(seg.id)"
-            @click.stop
-            @change="onCheck(seg.id)"
-          />
-        </span>
-
-        <span
-          class="cell cell--index mono"
-          draggable="true"
-          title="按住拖动可以调整顺序：把这一条的内容搬到目标行的时间码上"
-          @dragstart="onReorderStart($event, index)"
-          @dragend="onReorderEnd"
-        >
-          <Icon class="row__grip" name="grip" :size="10" />
-          <span class="row__index-num">{{ index + 1 }}</span>
-        </span>
-
-        <span class="cell cell--time">
-          <TimecodeInput
-            :model-value="seg.start"
-            @update:model-value="setTimecode(seg, 'start', $event)"
-          />
-        </span>
-
-        <span class="cell cell--time">
-          <TimecodeInput
-            :model-value="seg.end"
-            @update:model-value="setTimecode(seg, 'end', $event)"
-          />
-        </span>
-
+    <div ref="bodyRef" class="subtable__body scroll-y" @scroll.passive="onBodyScroll">
+      <template v-for="(seg, index) in segments" :key="seg.id">
         <!--
-          讲话人只是一条标注：没有分离结果时整列都不渲染，也不占位成「未识别」
-          之类的字，免得每条都顶着四个没用的字。
-          有数据之后每一格都可点：点开就是换人（或清除标识）。
+          子项目分界：只插一个**独立的块**，不动 `segments` 的结构
+          （不插假条目），所以行号、选中、全选、快捷键全都不受影响。
+          上下各标一次名字是有意的：滚动时随时知道上下各属谁，等同页码。
         -->
-        <span v-if="hasSpeakers" class="cell cell--spk">
-          <button
-            class="spk"
-            :class="{ 'is-empty': typeof seg.speaker !== 'number', 'is-current': selectedSet.has(seg.id) }"
-            type="button"
-            :title="
-              typeof seg.speaker === 'number'
-                ? `${speakerText(seg)}，点击更换`
-                : '还没有标注讲话人，点击选择'
-            "
-            @click="openSpeakerMenu($event, seg)"
-          >
-            {{ typeof seg.speaker === 'number' ? speakerText(seg) : '未标记' }}
-          </button>
-        </span>
+        <div v-if="seps.has(index)" class="subsep" aria-hidden="true">
+          <span class="subsep__line" />
+        </div>
 
-        <span class="cell cell--text">
-          <!-- 原文行 -->
-          <span
-            v-if="showSourceRow"
-            class="textline textline--src"
-            :class="{ 'is-stale': isStale(seg, SOURCE_SLOT) }"
-            :title="
-              isStale(seg, SOURCE_SLOT)
-                ? '这段原文是分割时整段复制过来的，还没按时间码拆开'
-                : '单击即可编辑'
-            "
-            @click.stop="beginEdit(seg.id, SOURCE_SLOT, $event)"
-          >
-            <textarea
-              v-if="editor.editingId === editKey(seg.id, SOURCE_SLOT)"
-              v-model="seg.text"
-              class="row__editor"
-              rows="2"
-              @blur="endEdit(seg.id, SOURCE_SLOT)"
-              @keydown.enter.exact.prevent="endEdit(seg.id, SOURCE_SLOT)"
-              @keydown.esc.prevent="editor.endEdit()"
-              @keydown="onEditorKeydown"
-              @click="trackCaret"
-              @keyup="trackCaret"
-              @select="trackCaret"
+        <div
+          :data-seg-id="seg.id"
+          class="row"
+          :class="{
+            'has-spk': hasSpeakers,
+            'is-selected': selectedSet.has(seg.id),
+            'is-current': editor.selectedIds[0] === seg.id,
+            'is-edited': isEdited(seg),
+            'has-error': worstLevel(seg) === 'error',
+            'has-warning': worstLevel(seg) === 'warning',
+            'is-acked': !!seg.acked,
+            'is-drop-target': dragOverIndex === index && dragFrom !== null && dragFrom !== index,
+          }"
+          @click="onRowClick($event, seg.id)"
+          @contextmenu="openRowMenu($event, seg)"
+          @dragover="onReorderOver($event, index)"
+          @drop="onReorderDrop($event, index)"
+        >
+          <span class="cell cell--check">
+            <input
+              type="checkbox"
+              class="row__check"
+              :checked="selectedSet.has(seg.id)"
+              @click.stop
+              @change="onCheck(seg.id)"
             />
-            <span v-else class="row__text">{{ seg.text || '（空）' }}</span>
           </span>
 
-          <!-- 译文行：挂在上面那条原文上，靠左侧竖线区分 -->
           <span
-            v-if="settings.subtitleView !== 'source' && hasTrRow(seg)"
-            class="textline textline--tr"
-            :class="{ 'is-stale': isStale(seg, trLang) }"
-            :title="
-              isStale(seg, trLang)
-                ? '这段译文是分割时整段复制过来的，还没按时间码拆开'
-                : '单击即可编辑译文'
-            "
-            @click.stop="beginEdit(seg.id, trLang, $event)"
+            class="cell cell--index mono"
+            draggable="true"
+            title="按住拖动可以调整顺序：把这一条的内容搬到目标行的时间码上"
+            @dragstart="onReorderStart($event, index)"
+            @dragend="onReorderEnd"
           >
-            <textarea
-              v-if="editor.editingId === editKey(seg.id, trLang)"
-              class="row__editor"
-              rows="2"
-              :value="trTextOf(seg)"
-              @input="onTrInput(seg, $event)"
-              @blur="endEdit(seg.id, trLang)"
-              @keydown.enter.exact.prevent="endEdit(seg.id, trLang)"
-              @keydown.esc.prevent="editor.endEdit()"
-              @keydown="onEditorKeydown"
-              @click="trackCaret"
-              @keyup="trackCaret"
-              @select="trackCaret"
-            />
-            <span v-else class="row__text">{{ trTextOf(seg) || '（空）' }}</span>
+            <Icon class="row__grip" name="grip" :size="10" />
+            <span class="row__index-num">{{ index + 1 }}</span>
           </span>
-        </span>
 
-        <span class="cell cell--flag">
+          <span class="cell cell--time">
+            <TimecodeInput
+              :model-value="seg.start"
+              @update:model-value="setTimecode(seg, 'start', $event)"
+            />
+          </span>
+
+          <span class="cell cell--time">
+            <TimecodeInput
+              :model-value="seg.end"
+              @update:model-value="setTimecode(seg, 'end', $event)"
+            />
+          </span>
+
           <!--
-            有标红时给一个「看过了」的出口。
-            校验结论是自动重算的，用户没法把一条真的抹掉；而有些告警是有意为之的
-            （艺术处理的长句、贴得很紧的衔接）。没有出口，这些条目会永远红着、
-            永远计数，用久了只会让人对红色脱敏。
+            讲话人只是一条标注：没有分离结果时整列都不渲染，也不占位成「未识别」
+            之类的字，免得每条都顶着四个没用的字。
+            有数据之后每一格都可点：点开就是换人（或清除标识）。
           -->
-          <button
-            v-if="hasHighlight(seg)"
-            class="row__ack"
-            :class="`row__ack--${worstLevel(seg) ?? 'info'}`"
-            type="button"
-            :title="`${flagTitle(seg)}\n\n点这里忽略这一条的告警（含译文待确认标红）`"
-            @click="toggleAck(seg, $event)"
-          >
-            <Icon name="alert" :size="11" />
-            <span>忽略告警</span>
-          </button>
-          <!-- 忽略之后仍留着入口，否则用户没有后悔的余地 -->
-          <button
-            v-else-if="seg.acked && (seg.issues.length > 0 || (seg.staleSlots?.length ?? 0) > 0)"
-            class="row__ack row__ack--acked"
-            type="button"
-            title="这一条的告警已被忽略，点这里恢复显示"
-            @click="toggleAck(seg, $event)"
-          >
-            <Icon name="eye-off" :size="11" />
-            <span>已忽略</span>
-          </button>
-        </span>
+          <span v-if="hasSpeakers" class="cell cell--spk">
+            <button
+              class="spk"
+              :class="{ 'is-empty': typeof seg.speaker !== 'number', 'is-current': selectedSet.has(seg.id) }"
+              type="button"
+              :title="
+                typeof seg.speaker === 'number'
+                  ? `${speakerText(seg)}，点击更换`
+                  : '还没有标注讲话人，点击选择'
+              "
+              @click="openSpeakerMenu($event, seg)"
+            >
+              {{ typeof seg.speaker === 'number' ? speakerText(seg) : '未标记' }}
+            </button>
+          </span>
+
+          <span class="cell cell--text">
+            <!-- 原文行 -->
+            <span
+              v-if="showSourceRow"
+              class="textline textline--src"
+              :class="{ 'is-stale': isStale(seg, SOURCE_SLOT) }"
+              :title="
+                isStale(seg, SOURCE_SLOT)
+                  ? '这段原文是分割时整段复制过来的，还没按时间码拆开'
+                  : '单击即可编辑'
+              "
+              @click.stop="beginEdit(seg.id, SOURCE_SLOT, $event)"
+            >
+              <textarea
+                v-if="editor.editingId === editKey(seg.id, SOURCE_SLOT)"
+                v-model="seg.text"
+                class="row__editor"
+                rows="2"
+                @blur="endEdit(seg.id, SOURCE_SLOT)"
+                @keydown.enter.exact.prevent="endEdit(seg.id, SOURCE_SLOT)"
+                @keydown.esc.prevent="editor.endEdit()"
+                @keydown="onEditorKeydown"
+                @click="trackCaret"
+                @keyup="trackCaret"
+                @select="trackCaret"
+              />
+              <span v-else class="row__text">{{ seg.text || '（空）' }}</span>
+            </span>
+
+            <!-- 译文行：挂在上面那条原文上，靠左侧竖线区分 -->
+            <span
+              v-if="settings.subtitleView !== 'source' && hasTrRow(seg)"
+              class="textline textline--tr"
+              :class="{ 'is-stale': isStale(seg, trLang) }"
+              :title="
+                isStale(seg, trLang)
+                  ? '这段译文是分割时整段复制过来的，还没按时间码拆开'
+                  : '单击即可编辑译文'
+              "
+              @click.stop="beginEdit(seg.id, trLang, $event)"
+            >
+              <textarea
+                v-if="editor.editingId === editKey(seg.id, trLang)"
+                class="row__editor"
+                rows="2"
+                :value="trTextOf(seg)"
+                @input="onTrInput(seg, $event)"
+                @blur="endEdit(seg.id, trLang)"
+                @keydown.enter.exact.prevent="endEdit(seg.id, trLang)"
+                @keydown.esc.prevent="editor.endEdit()"
+                @keydown="onEditorKeydown"
+                @click="trackCaret"
+                @keyup="trackCaret"
+                @select="trackCaret"
+              />
+              <span v-else class="row__text">{{ trTextOf(seg) || '（空）' }}</span>
+            </span>
+          </span>
+
+          <span class="cell cell--flag">
+            <!--
+              有标红时给一个「看过了」的出口。
+              校验结论是自动重算的，用户没法把一条真的抹掉；而有些告警是有意为之的
+              （艺术处理的长句、贴得很紧的衔接）。没有出口，这些条目会永远红着、
+              永远计数，用久了只会让人对红色脱敏。
+            -->
+            <button
+              v-if="hasHighlight(seg)"
+              class="row__ack"
+              :class="`row__ack--${worstLevel(seg) ?? 'info'}`"
+              type="button"
+              :title="`${flagTitle(seg)}\n\n点这里忽略这一条的告警（含译文待确认标红）`"
+              @click="toggleAck(seg, $event)"
+            >
+              <Icon name="alert" :size="11" />
+              <span>忽略告警</span>
+            </button>
+            <!-- 忽略之后仍留着入口，否则用户没有后悔的余地 -->
+            <button
+              v-else-if="seg.acked && (seg.issues.length > 0 || (seg.staleSlots?.length ?? 0) > 0)"
+              class="row__ack row__ack--acked"
+              type="button"
+              title="这一条的告警已被忽略，点这里恢复显示"
+              @click="toggleAck(seg, $event)"
+            >
+              <Icon name="eye-off" :size="11" />
+              <span>已忽略</span>
+            </button>
+          </span>
       </div>
+      </template>
 
       <p v-if="segments.length === 0" class="subtable__empty">
         <template v-if="project.isMerge">
@@ -1114,6 +1243,21 @@ function onKeydown(event: KeyboardEvent): void {
   flex: 1;
   min-height: 0;
   padding: var(--space-1) 0 var(--space-4);
+}
+
+/* ---------- 子项目分界（只有一条细线） ---------- */
+
+.subsep {
+  display: flex;
+  align-items: center;
+  height: 17px;
+}
+
+.subsep__line {
+  flex: 1;
+  height: 1px;
+  margin: 0 12px;
+  background: var(--color-border-subtle);
 }
 
 .row {

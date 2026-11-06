@@ -21,7 +21,13 @@ interface NavItem {
 }
 
 const items = computed<NavItem[]>(() => [
-  { key: 'home', icon: 'import', label: t('nav.home') },
+  {
+    key: 'home',
+    icon: 'import',
+    label: t('nav.home'),
+    // 角标是「还有几个没识别」，导入页才是排队的地方
+    badge: project.pendingIntake.length || undefined,
+  },
   {
     key: 'editor',
     icon: 'list',

@@ -22,7 +22,7 @@ import type { SubtitleSegment } from '@/types'
 
 const MAX_STEPS = 15
 
-interface HistoryBucket {
+export interface HistoryBucket {
   /** 过去的快照，栈顶是「上一步」 */
   past: SubtitleSegment[][]
   /** 未来的快照，栈顶是「下一步」（撤销后被压进来） */
@@ -31,11 +31,34 @@ interface HistoryBucket {
   lastLabel: string
 }
 
+/** 一份回退记录（切换项目时整份换） */
+export interface HistorySnapshot {
+  buckets: [string, HistoryBucket][]
+}
+
 export const useHistoryStore = defineStore('history', () => {
   const buckets = ref(new Map<string, HistoryBucket>())
 
   /** 变更计数，仅用于驱动 canUndo / canRedo 的响应性 */
   const version = ref(0)
+
+  /**
+   * 拷一份出来。快照数组本身不必再深拷：`cloneAll` 已经在入栈时拷过一遍，
+   * 之后没有任何地方原地改它（undo/redo 都是整份交出去）。
+   */
+  function snapshot(): HistorySnapshot {
+    return { buckets: [...buckets.value.entries()] }
+  }
+
+  function restore(s: HistorySnapshot): void {
+    buckets.value = new Map(s?.buckets ?? [])
+    version.value += 1
+  }
+
+  function resetAll(): void {
+    buckets.value = new Map()
+    version.value += 1
+  }
 
   function bucketOf(fileId: string): HistoryBucket {
     let bucket = buckets.value.get(fileId)
@@ -197,6 +220,9 @@ export const useHistoryStore = defineStore('history', () => {
     undo,
     redo,
     clear,
+    snapshot,
+    restore,
+    resetAll,
     canUndo,
     canRedo,
     canUndoFile,

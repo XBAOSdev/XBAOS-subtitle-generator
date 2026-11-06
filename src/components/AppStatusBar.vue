@@ -112,6 +112,9 @@ watch(issueText, (next, prev) => {
         <span class="statusbar__sep" aria-hidden="true">|</span>
         <span>时长 {{ formatDuration(project.totalDuration) }}</span>
       </template>
+      <template v-else-if="project.intake.length > 0">
+        <span>待识别 {{ project.pendingIntake.length }} 个</span>
+      </template>
       <template v-else>
         <span>尚未导入音频</span>
       </template>

@@ -51,9 +51,7 @@ function toggleLexicon(id: string): void {
   settings.lexiconIds = ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]
 }
 
-const pendingFiles = computed(() =>
-  project.files.filter((f) => f.status === 'queued' || f.status === 'failed'),
-)
+const pendingFiles = computed(() => project.pendingIntake)
 
 const canStart = computed(() => pendingFiles.value.length > 0 && !project.recognizing)
 
@@ -63,7 +61,7 @@ const estimate = computed(() => {
     settings.backend === 'cpu' ? 'cpu' : settings.backend === 'vulkan' ? 'gpu' : 'unknown'
   // 与 depthHint 同一条判据：不支持多遍解码的模型按单遍算
   const depth = model.caps.decode ? settings.reasoningDepth : 'standard'
-  return formatEstimate(estimateSeconds(project.totalDuration, depth, kind))
+  return formatEstimate(estimateSeconds(project.intakeDuration, depth, kind))
 })
 
 /**
@@ -81,17 +79,12 @@ const depthHint = computed(() => {
 /**
  * 选批量处理模式。
  *
- * 识别开始前可以随便改；真正的锁定发生在「开始识别」那一刻（store 里的
- * lockBatchMode）。锁定后再切会让已经识别出来的内容归属发生变化
- * ——先前的成果被卷进合并、时间轴错位、显示错乱。要改必须先清空队列。
+ * 这个开关只回答「这一批识别结果建几个项目」。唯一的限制是识别进行中不许切
+ * （进度单元的前缀和是启动时算好的），识别一结束立刻恢复可改。
  */
 function pickMode(mode: BatchMode): void {
   if (!project.setBatchMode(mode)) {
-    ui.notify(
-      'warning',
-      '批量处理模式已锁定',
-      '已经在识别的批次里生效了，切换会让已识别的内容归属发生变化。请先清空队列再重新选择。',
-    )
+    ui.notify('warning', '识别进行中', '等这一批跑完再切换，已经导入的内容不受影响')
   }
 }
 
@@ -113,7 +106,8 @@ async function start(event?: MouseEvent): Promise<void> {
 
   ui.notify('info', `开始识别 ${count} 个文件`, '识别过程中可以随时取消')
   await project.startRecognition()
-  const failed = project.files.filter((f) => f.status === 'failed').length
+  // 失败的条目会留在队列里（带原因），成功的已经落进项目
+  const failed = project.intake.filter((f) => f.status === 'failed').length
   if (project.progress < 100) {
     ui.notify('warning', '识别已取消', '未完成的文件仍留在队列中，可重新开始')
     return
@@ -121,9 +115,10 @@ async function start(event?: MouseEvent): Promise<void> {
   ui.notify(
     failed > 0 ? 'warning' : 'success',
     failed > 0 ? `识别完成，${failed} 个文件失败` : '识别完成',
-    '已切换到预览与编辑',
+    failed > 0 ? '失败的那些仍留在队列里，可以重试' : '已切换到预览与编辑',
   )
-  ui.navigate('editor')
+  // 还有失败项就留在导入页：用户得看着原因决定重试还是换文件（2.4）
+  if (failed === 0) ui.navigate('editor')
 }
 </script>
 
@@ -302,28 +297,26 @@ async function start(event?: MouseEvent): Promise<void> {
               怎么被合成结果，不是某个文件的状态。放在素材区下面时，它看起来像
               第三个区块，实际上和文件列表没有从属关系。
             -->
-            <div v-if="project.supportedFiles.length > 1" class="field field--wide">
+            <div v-if="project.intakeSupported.length > 1" class="field field--wide">
               <div class="field__head">
                 <span class="field__label">批量处理方式</span>
-                <span v-if="project.batchModeLocked" class="field__tag">已锁定</span>
+                <span v-if="project.recognizing" class="field__tag">识别中</span>
               </div>
               <div class="modes">
                 <button
                   class="mode"
                   :class="{
                     'is-active': project.batchMode === 'merge',
-                    'is-locked': project.batchModeLocked,
+                    'is-locked': project.recognizing,
                   }"
                   type="button"
+                  :disabled="project.recognizing"
                   @click="pickMode('merge')"
                 >
                   <span class="mode__icon"><Icon name="layers" :size="16" /></span>
                   <span class="mode__body">
-                    <span class="mode__title">合并为一条时间轴</span>
-                    <span class="mode__hint">拼成一条时间轴，输出单个文件</span>
-                  </span>
-                  <span v-if="project.batchModeLocked" class="mode__lock">
-                    <Icon name="lock" :size="11" />
+                    <span class="mode__title">合并为一个项目</span>
+                    <span class="mode__hint">这几份排成一条时间轴，一起编辑、一起导出</span>
                   </span>
                 </button>
 
@@ -331,26 +324,22 @@ async function start(event?: MouseEvent): Promise<void> {
                   class="mode"
                   :class="{
                     'is-active': project.batchMode === 'separate',
-                    'is-locked': project.batchModeLocked,
+                    'is-locked': project.recognizing,
                   }"
                   type="button"
+                  :disabled="project.recognizing"
                   @click="pickMode('separate')"
                 >
                   <span class="mode__icon"><Icon name="list" :size="16" /></span>
                   <span class="mode__body">
-                    <span class="mode__title">各自独立处理</span>
-                    <span class="mode__hint">各自输出多个文件</span>
-                  </span>
-                  <span v-if="project.batchModeLocked" class="mode__lock">
-                    <Icon name="lock" :size="11" />
+                    <span class="mode__title">每个文件各建一个项目</span>
+                    <span class="mode__hint">每份单独成一个项目，互不影响</span>
                   </span>
                 </button>
               </div>
               <span class="field__hint">
-                <template v-if="project.batchModeLocked">
-                  已锁定，切换需先清空队列
-                </template>
-                <template v-else>导入顺序即拼接顺序，开始识别后锁定</template>
+                <template v-if="project.recognizing">识别中不能切换，结束后可改</template>
+                <template v-else>导入顺序即时间轴顺序</template>
               </span>
             </div>
 
@@ -410,10 +399,10 @@ async function start(event?: MouseEvent): Promise<void> {
 
     <footer class="view__foot">
       <div class="view__foot-inner">
-        <span v-if="project.hasFiles" class="hint">
+        <span v-if="project.intake.length > 0" class="hint">
           待识别 {{ pendingFiles.length }} 个
-          <template v-if="project.totalDuration > 0">
-            ，总时长 {{ formatDuration(project.totalDuration) }}，{{ estimate }}
+          <template v-if="project.intakeDuration > 0">
+            ，总时长 {{ formatDuration(project.intakeDuration) }}，{{ estimate }}
           </template>
         </span>
         <span v-else class="hint">还没有导入任何音频</span>
@@ -421,7 +410,7 @@ async function start(event?: MouseEvent): Promise<void> {
         <span class="spacer" />
 
         <button
-          v-if="project.supportedFiles.length > 0"
+          v-if="project.files.length > 0"
           class="btn"
           type="button"
           @click="ui.navigate('editor')"
@@ -773,7 +762,7 @@ async function start(event?: MouseEvent): Promise<void> {
   box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--color-accent-border);
 }
 
-/* 已锁定：不再接受切换，但当前生效的那一张仍然看得出来 */
+/* 识别中：不再接受切换，但当前生效的那一张仍然看得出来 */
 .mode.is-locked {
   cursor: default;
 }
@@ -785,13 +774,6 @@ async function start(event?: MouseEvent): Promise<void> {
 .mode.is-locked:not(.is-active):hover {
   border-color: var(--color-border);
   background: none;
-}
-
-.mode__lock {
-  position: absolute;
-  top: var(--space-2);
-  right: var(--space-2);
-  color: var(--color-text-tertiary);
 }
 
 .mode__icon {

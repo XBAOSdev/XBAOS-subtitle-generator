@@ -28,7 +28,8 @@ import {
   type ParsedCue,
 } from '@/utils/llmResult'
 import { validateSegment, countIssues } from '@/utils/validate'
-import { alignOrigin, enforceMonotonicCues, hasText, segmentsSignature } from '@/utils/segmentOps'
+import { alignOrigin, enforceMonotonicCues, segmentsSignature } from '@/utils/segmentOps'
+import { confirmDestructive } from '@/utils/confirm'
 import { applyTermFix, collectFixTerms } from '@/utils/termFix'
 import { assignSpeakers } from '@/utils/speaker'
 import { MAX_LANES, overflowLaneIds } from '@/utils/timelineLayout'
@@ -36,8 +37,8 @@ import { useUiStore } from '@/stores/ui'
 import { useLogStore } from '@/stores/logs'
 import { useSettingsStore } from '@/stores/settings'
 import { useModelStore } from '@/stores/model'
-import { useHistoryStore } from '@/stores/history'
-import { useSpeakerStore } from '@/stores/speakers'
+import { useHistoryStore, type HistorySnapshot } from '@/stores/history'
+import { useSpeakerStore, type SpeakerSnapshot } from '@/stores/speakers'
 import { buildProjectDoc, fromProjectText, toProjectText } from '@/utils/xbsgp'
 import { appVersion } from '@/branding'
 import {
@@ -70,10 +71,13 @@ export const MERGED_FILE_ID = '__merged__'
 export const MERGED_EXT = 'merged'
 
 /**
- * 批量处理的默认模式：独立处理。
- * 清空队列时会复位到这里 —— 「清空」是彻底重来，不该把上一次的合并模式留下。
+ * 批量处理的默认模式：合并。
+ *
+ * 它只回答一个问题 ——「这一批识别结果建几个项目」：合并 = 建 1 个装下全部，
+ * 各自独立 = 每个文件各建 1 个。识别开始后到本次进程结束前记住用户的选择，
+ * 清空队列**不复位**（那只是 TTL 意义上的"这一批结束了"），下次启动回到合并。
  */
-export const DEFAULT_BATCH_MODE: BatchMode = 'separate'
+export const DEFAULT_BATCH_MODE: BatchMode = 'merge'
 
 /**
  * 识别进度的三个阶段。
@@ -104,6 +108,31 @@ export interface ExportRecord {
   lang: string
   /** 绝对路径 */
   path: string
+}
+
+/**
+ * 打开着的一个项目（2.1 的 `Project`）。
+ *
+ * 它是「草稿」而不是「活动状态」：`files` / `name` / `path` 这些字段只在
+ * **活动项目**上实时同步，其余项目的这一份就是它停下来的样子。切走时
+ * `stashActive()` 写回，切回来时 `loadDraft()` 整份换上 —— 不做深拷，
+ * 数组还是同一个数组，所以不存在"两份数据谁是准的"。
+ */
+export interface ProjectDraft {
+  id: string
+  /** 用户起的名字。空串 = 还没起过，显示时按子项目名现算（2.7） */
+  name: string
+  path: string | null
+  dirty: boolean
+  /** 有序子项目：数组顺序 = 时间轴顺序 = 侧栏自上而下 */
+  files: AudioFile[]
+  activeFileId: string | null
+  /** 侧栏里是否折叠（会话状态，不落盘） */
+  collapsed: boolean
+  speakers: SpeakerSnapshot
+  history: HistorySnapshot
+  records: [string, ExportRecord[]][]
+  saved: [string, string][]
 }
 
 /** 演示模式下：文件识别完成后应呈现的最终状态 */
@@ -142,13 +171,32 @@ interface FileMedia {
 
 export const useProjectStore = defineStore('project', () => {
   const files = ref<AudioFile[]>([])
-  const batchMode = ref<BatchMode>(DEFAULT_BATCH_MODE)
   /**
-   * 批量处理模式是否已锁定。选过一次（或已经开始识别）就钉死：
-   * 切换模式会让已经识别出来的内容归属发生变化（先前的成果被卷进合并、
-   * 时间轴错位），所以必须先清空队列才允许改。
+   * 导入队列（2.4 的 `intake`）：只放**还没识别完**的东西。
+   *
+   * 它与 `files`（当前项目的子项目）是两回事：
+   *  - `intake` 是"待处理的工作"，识别一完成就从这里移出；
+   *  - `files` 是"已经成形的项目内容"，进来就再也不出去了（除非用户移出）。
+   *
+   * 以前两者是同一个数组，于是"识别完了列表里还挂着"和"清空队列把成果也清了"
+   * 两个毛病其实是同一个根：队列与成果没分家。
    */
-  const batchModeLocked = ref(false)
+  const intake = ref<AudioFile[]>([])
+  /**
+   * 队列条目的来源（2.4.2）。
+   *
+   * 失败 / 取消的条目留在队列里，重试成功后要**插回原来那个项目的原位置** ——
+   * 否则合并模式下重试一个失败项，它会跑到项目末尾，时间轴顺序就变了。
+   */
+  const intakeOrigin = new Map<string, { draftId: string; index: number }>()
+  /**
+   * 批量处理模式：决定「这一批建几个项目」，不影响编辑器怎么显示。
+   *
+   * 它是**会话状态**（2.2）：识别中禁止切换（进度单元的前缀和是启动时算好的），
+   * 识别结束立刻恢复可改；本次进程内记住，清空队列也不复位，下次启动回默认。
+   * 这里不再有 `batchModeLocked` —— 「识别中」本身就是唯一需要拦住的时刻。
+   */
+  const batchMode = ref<BatchMode>(DEFAULT_BATCH_MODE)
 
   /* ------------------------------------------------------------ 项目元信息 */
 
@@ -290,21 +338,50 @@ export const useProjectStore = defineStore('project', () => {
    * 刻意**不是 computed**：这是全量序列化，做成 computed 会让每次编辑都付一次
    * 全量字符串化的代价。只在真的要关窗时算一次。
    */
-  function unsavedSummary(): { count: number; recognizing: number; names: string[] } {
-    const list = files.value.filter((f) => !f.demo)
-    let recognizingCount = 0
+  /**
+   * 关窗前要问什么（5.5）。
+   *
+   * 两条依据：**有项目没保存** 与 **队列里还有没识别完的音频**。以前问的是
+   * 哪些文件的内容没导出去，那是队列即工程的时代；现在工程有  了，
+   * 没保存才是真正会丢的东西。
+   */
+  function unsavedSummary(): {
+    clean: boolean
+    count: number
+    names: string[]
+    recognizing: number
+    queued: number
+    queuedNames: string[]
+    /** 还没落过盘的（保存并关闭时存不了，要单独说） */
+    neverSaved: string[]
+  } {
     const names: string[] = []
-    for (const f of list) {
-      if (f.status === 'queued' || f.status === 'processing') {
-        recognizingCount += 1
-        names.push(f.name)
-        continue
-      }
-      const hasContent = f.segments.some(hasText) || f.segments.some((s) => s.translations)
-      if (!hasContent) continue
-      if (savedSignatures.value.get(f.id) !== segmentsSignature(f.segments)) names.push(f.name)
+    const neverSaved: string[] = []
+    let count = 0
+    for (const d of drafts.value) {
+      const dirty = d.id === activeDraftId.value ? projectDirty.value : d.dirty
+      const items = draftItems(d)
+      if (items.length === 0) continue
+      const name = d.id === activeDraftId.value
+        ? displayProjectName.value
+        : d.name || defaultProjectName(items.map((f) => f.name))
+      if (!dirty) continue
+      count += 1
+      names.push(name)
+      if (!(d.id === activeDraftId.value ? projectPath.value : d.path)) neverSaved.push(name)
     }
-    return { count: names.length, recognizing: recognizingCount, names }
+
+    const queuedList = pendingIntake.value.filter((f) => !f.demo)
+    const recognizing = queuedList.filter((f) => f.status === 'processing').length
+    return {
+      clean: count === 0 && queuedList.length === 0,
+      count,
+      names,
+      recognizing,
+      queued: queuedList.length,
+      queuedNames: queuedList.map((f) => f.name),
+      neverSaved,
+    }
   }
 
   /* ---------------------------------------------------------------- 派生 */
@@ -313,10 +390,31 @@ export const useProjectStore = defineStore('project', () => {
   const unsupportedFiles = computed(() => files.value.filter((f) => f.status === 'unsupported'))
   const hasFiles = computed(() => files.value.length > 0)
 
+  /* ---- 队列（导入页看的那一边） ---- */
+
+  const intakeSupported = computed(() => intake.value.filter((f) => f.status !== 'unsupported'))
+  const intakeUnsupported = computed(() => intake.value.filter((f) => f.status === 'unsupported'))
+  /** 还要不要跑识别：`failed` 也算（重试） */
+  const pendingIntake = computed(() =>
+    intake.value.filter((f) => f.status === 'queued' || f.status === 'failed'),
+  )
+  /** 队列里还有没有要识别的东西（关窗检测、自动切页都用它） */
+  const hasIntakeWork = computed(() => pendingIntake.value.length > 0)
+  /** 估算耗时用：队列里这些音频加起来多长 */
+  const intakeDuration = computed(() =>
+    intakeSupported.value.reduce((sum, f) => sum + (f.durationSec ?? 0), 0),
+  )
+
   const activeFile = computed(
     () => files.value.find((f) => f.id === activeFileId.value) ?? null,
   )
 
+  /**
+   * 这一批要不要「装进同一个项目」。
+   *
+   * 编辑器不再按它分叉（`viewFile` 永远是项目视图），它还管着两件事：
+   * 导出粒度（合并 = 一个项目出一条，独立 = 一个子项目出一条）与导入页的文案。
+   */
   const isMerge = computed(() => batchMode.value === 'merge')
 
   /**
@@ -475,14 +573,14 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   /**
-   * 编辑器 / 波形 / 播放器 / 工具栏统一看这个「当前视图条目」。
+   * 编辑器 / 波形 / 播放器 / 工具栏统一看这个「项目视图」。
    *
-   * 独立模式下就是被选中的那个文件；合并模式下是项目视图 —— 整个项目呈现为
-   * 一条完整的时间轴，点队列里的某个音频不会换掉预览内容。
+   * **永远**是拼接视图，与批量模式无关：模式只决定「这一批建几个项目」，
+   * 一个项目在编辑器里始终呈现为一整条时间轴（子项目之间用分隔行标边界）。
+   * 曾经按模式二选一（独立模式直接给被选中的那个文件），结果是同一个项目
+   * 在侧栏是一整个、在编辑区却被拆成几段各自为政 —— 用户一眼就看出不对。
    */
-  const viewFile = computed<AudioFile | null>(() =>
-    isMerge.value ? makeViewFile() : activeFile.value,
-  )
+  const viewFile = computed<AudioFile | null>(() => makeViewFile() ?? activeFile.value)
 
   const viewFileId = computed(() => viewFile.value?.id ?? null)
 
@@ -512,6 +610,29 @@ export const useProjectStore = defineStore('project', () => {
       segments: f.segments,
     })),
   )
+
+  /**
+   * 子项目在**项目视图**里的落位表：谁从第几条开始、起点秒数、有几条。
+   *
+   * 一句话：给"在拼接列表里画一条分界线"用的。它只读不改，也不参与存储 ——
+   * 视图里的归属靠每条字幕自带的 `originFileId`，这里只补"名字与序号"。
+   */
+  const itemLayout = computed(() => {
+    const out: { itemId: string; name: string; firstIndex: number; offsetSec: number; count: number }[] =
+      []
+    let index = 0
+    for (const f of supportedFiles.value) {
+      out.push({
+        itemId: f.id,
+        name: f.name,
+        firstIndex: index,
+        offsetSec: offsetOfItem(f.id),
+        count: f.segments.length,
+      })
+      index += f.segments.length
+    }
+    return out
+  })
 
   const totalSegments = computed(() =>
     isMerge.value
@@ -921,45 +1042,32 @@ export const useProjectStore = defineStore('project', () => {
   /**
    * 切换批量处理模式。
    *
-   * 识别开始**之前**可以随便改 —— 点选即锁太严苛，用户点错了就没有退路。
-   * 真正需要钉死的是「开始识别」那一刻（见 lockBatchMode）：从那时起，切换会让
-   * 已经识别出来的内容归属发生变化（先前的成果被卷进合并、时间轴错位、显示错乱），
-   * 所以锁定后想改必须先清空队列。
+   * 只有**识别进行中**不许切：这一轮的进度单元前缀和是启动时按队列算好的，
+   * 中途改归属会让「第几个文件跑到第几格」对不上。其余任何时候随便改，
+   * 只影响下一批 —— 已经建出来的项目不会因为改模式而重组。
    *
    * @returns 是否接受了这次切换
    */
   function setBatchMode(mode: BatchMode): boolean {
-    if (batchModeLocked.value && mode !== batchMode.value) return false
+    if (recognizing.value) return false
     batchMode.value = mode
     /*
-     * 「共用一套称呼」的默认值跟着模式走：合并成一条时间轴，本来就是一条
-     * 完整的时间线，讲话人自然是一套；独立处理时各文件各拍各的，默认不该绑。
-     *
-     * **换模式就是换一套默认**：上一版留了「用户点过就再也不自动改」的例外，
-     * 结果是「合并过再切回独立处理，勾选框还留着勾」—— 独立处理下几个文件
-     * 根本互不相干，却共享一套称呼，正是这个开关不该有的状态。
-     * 所以切模式时一律重置，用户想留着自己再点一下。
+     * 这里**不再连带改**「共用一套称呼」：那是项目级属性，在建项目时按当时
+     * 的模式决定初值，之后与模式无关（用户可能在项目里手动调过）。
      */
-    useSpeakerStore().shared = mode === 'merge'
     return true
-  }
-
-  /** 开始识别即锁定模式：此刻起队列内容与产物归属都不能再变 */
-  function lockBatchMode(): void {
-    batchModeLocked.value = true
   }
 
   /* ---------------------------------------------------------------- 操作 */
 
+  /**
+   * 收进导入队列。
+   *
+   * 不碰 `files`（当前项目）：导入只是"把素材放上工作台"，还不是项目的子项目。
+   * 它们要等识别落地，或者用户直接打开项目之后才有归属。
+   */
   function addFiles(list: AudioFile[]): void {
-    files.value.push(...list)
-    if (!activeFileId.value) {
-      const firstSupported = files.value.find((f) => f.status !== 'unsupported')
-      activeFileId.value = firstSupported?.id ?? files.value[0]?.id ?? null
-    }
-    // 加减文件不改字幕签名（新文件还没有字幕），所以这里单独标一次
-    if (!suppressDirty) projectDirty.value = true
-    onQueueChanged()
+    intake.value.push(...list)
   }
 
   /**
@@ -1043,6 +1151,8 @@ export const useProjectStore = defineStore('project', () => {
         subtitlePath: p,
       }
       addFiles([file])
+      // 队列里没有音频在等识别时，字幕直接落地（它不需要识别）
+      landReadySubtitles()
       ui.notify(
         'success',
         '字幕文件已导入',
@@ -1055,18 +1165,36 @@ export const useProjectStore = defineStore('project', () => {
     }
   }
 
+  /** 从**导入队列**里移除一条（还没识别的东西，不涉及任何项目） */
   function removeFile(id: string): void {
-    const media1 = media.value.get(id)
-    if (media1?.blobUrl) URL.revokeObjectURL(media1.blobUrl)
+    const m = media.value.get(id)
+    if (m?.blobUrl) URL.revokeObjectURL(m.blobUrl)
     media.value.delete(id)
     touchMedia()
-    // 文件都移出队列了，它的导出落点也没有意义了
+    intakeOrigin.delete(id)
+    intake.value = intake.value.filter((f) => f.id !== id)
+  }
+
+  /** 队列内调整顺序：顺序就是合并批次的时间轴顺序 */
+  function reorderIntake(from: number, to: number): void {
+    if (from === to || from < 0 || to < 0) return
+    const list = intake.value
+    if (from >= list.length || to >= list.length) return
+    const [moved] = list.splice(from, 1)
+    list.splice(to, 0, moved)
+  }
+
+  /** 从**项目**里移除一个子项目（字幕一起没了，界面上要二次确认） */
+  function removeItem(id: string): void {
+    const m = media.value.get(id)
+    if (m?.blobUrl) URL.revokeObjectURL(m.blobUrl)
+    media.value.delete(id)
+    touchMedia()
     exportRecords.value.delete(id)
     savedSignatures.value.delete(id)
+    useSpeakerStore().forgetFile(id)
     files.value = files.value.filter((f) => f.id !== id)
-    if (activeFileId.value === id) {
-      activeFileId.value = files.value[0]?.id ?? null
-    }
+    if (activeFileId.value === id) activeFileId.value = files.value[0]?.id ?? null
     if (!suppressDirty) projectDirty.value = true
     onQueueChanged()
   }
@@ -1155,42 +1283,445 @@ export const useProjectStore = defineStore('project', () => {
     item.segments = arr
   }
 
+  /**
+   * 清空**导入队列**。
+   *
+   * P5 之前它与清空整个工程是同一件事，因为队列就是工程。现在项目与队列
+   * 分家了：这个按钮只清还没识别的东西，已经建出来的项目一条都不动 ——
+   * 用户按它的意思始终是这些素材我不要了，不是把我的字幕删掉。
+   */
   function clearAll(): void {
-    for (const m of media.value.values()) {
-      if (m.blobUrl) URL.revokeObjectURL(m.blobUrl)
+    for (const f of intake.value) {
+      const m = media.value.get(f.id)
+      if (m?.blobUrl) URL.revokeObjectURL(m.blobUrl)
+      media.value.delete(f.id)
+      intakeOrigin.delete(f.id)
     }
-    media.value.clear()
+    intake.value = []
     touchMedia()
-    files.value = []
-    activeFileId.value = null
     progress.value = 0
-    // 清空是唯一能解除模式锁定的入口，所以这里必须一起复位
-    mergedMediaToken += 1
-    batchModeLocked.value = false
-    // 项目元信息一并回到「空白、未保存」：清空之后这已经不是一个项目了
-    projectName.value = ''
-    projectPath.value = null
-    projectDirty.value = false
-    // 模式也一并复位：锁解了却留着「合并时间轴」，下一次导入字幕文件就会掉进
-    // 一个没有产物的合并视图里 —— 文件读进来了却什么都看不见。
-    // 真踩到过：合并模式 → 清空队列 → 直接拖入 SRT，界面上空空如也。
-    batchMode.value = DEFAULT_BATCH_MODE
-    /*
-     * 讲话人整套复位，不只是「共用」开关。
-     *
-     * 清空队列之后这就是一个新项目，旧子项目的称呼与对应关系留着没有任何
-     * 用处；更要紧的是 `mapping` 里挂着已经不存在的人，下次打开对应关系表
-     * 会看到一串无主的行。
-     */
-    useSpeakerStore().resetAll()
-    // 导出记录指向的是已经不在队列里的文件，一起释放
-    exportRecords.value.clear()
-    savedSignatures.value.clear()
     finalStatus.clear()
   }
 
   function setActiveFile(id: string): void {
     activeFileId.value = id
+  }
+
+  /* ------------------------------------------------- 滚动位置与定位请求 */
+
+  /**
+   * 每个项目上一次停下来时字幕列表的滚动位置（**只在内存里**）。
+   *
+   * 跨项目点一个子项目时，用户会在这两份工程之间来回看；每次都从顶部开始
+   * 等于让他重新找一遍刚才那一行。进程结束就丢，不需要落盘 —— 它描述的是
+   * 「这一会儿我在看哪儿」，不是工程的一部分。
+   */
+  const scrollTops = new Map<string, number>()
+
+  function scrollTopOf(draftId: string): number {
+    return scrollTops.get(draftId) ?? 0
+  }
+
+  function rememberScrollTop(draftId: string, top: number): void {
+    if (!draftId) return
+    scrollTops.set(draftId, Math.max(0, Math.round(top)))
+  }
+
+  /**
+   * 「把这一条滚进视野」的请求。
+   *
+   * 侧栏点一个子项目 → 字幕列表跳到它第一行。**跨项目**时先切项目再跳，
+   * 所以请求要带 `draftId`；`at` 是自增时间戳 —— 目标相同时也得能再触发一次
+   * （用户自己滚开了，再点一下同一行，应该还能跳回来）。
+   */
+  const revealRequest = ref<{ draftId: string; itemId: string; at: number } | null>(null)
+
+  async function revealItem(draftId: string, itemId: string): Promise<boolean> {
+    if (draftId !== activeDraftId.value) {
+      if (!(await switchDraft(draftId))) return false
+    }
+    activeFileId.value = itemId
+    revealRequest.value = { draftId, itemId, at: Date.now() }
+    return true
+  }
+
+  /* ------------------------------------------------------- 多项目（草稿） */
+
+  /**
+   * 打开着的项目。
+   *
+   * 活动项目的那一份**不是副本**：`files` / `projectName` / `projectPath` 这些
+   * ref 直接指向它的数组与字段（`d.files === files.value`），所以编辑照旧全落在
+   * 它身上，切走时把标量写回、切回来时整份换一遍即可 —— 不做任何深拷，
+   * 也就不存在"两份数据谁是准的"这种问题。
+   *
+   * 讲话人与回退记录在**别的 store** 里，只能存快照（切项目时整份换）。
+   */
+  const drafts = ref<ProjectDraft[]>([])
+  const activeDraftId = ref('')
+
+  function newDraftId(): string {
+    return `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+  }
+
+  function draftOf(id: string): ProjectDraft | undefined {
+    return drafts.value.find((d) => d.id === id)
+  }
+
+  /** 某个项目当前的子项目数组：活动项目读活引用，其余读它自己那份 */
+  function draftItems(d: ProjectDraft): AudioFile[] {
+    return d.id === activeDraftId.value ? files.value : d.files
+  }
+
+  /** 把当前活动状态写回它在列表里的那一格 */
+  function stashActive(): void {
+    const d = draftOf(activeDraftId.value)
+    if (!d) return
+    d.name = projectName.value
+    d.path = projectPath.value
+    d.dirty = projectDirty.value
+    d.files = files.value
+    d.activeFileId = activeFileId.value
+    d.speakers = useSpeakerStore().snapshot()
+    d.history = useHistoryStore().snapshot()
+    d.records = [...exportRecords.value.entries()]
+    d.saved = [...savedSignatures.value.entries()]
+  }
+
+  /** 把某个项目装进活动状态 */
+  function loadDraft(d: ProjectDraft): void {
+    // 整套替换会让字幕签名变一次 —— 那不是用户的改动，别把刚切过去的项目标脏
+    suppressDirty = true
+    activeDraftId.value = d.id
+    files.value = d.files
+    projectName.value = d.name
+    projectPath.value = d.path
+    projectDirty.value = d.dirty
+    activeFileId.value = d.activeFileId
+    useSpeakerStore().restore(d.speakers)
+    useHistoryStore().restore(d.history)
+    exportRecords.value = new Map(d.records)
+    savedSignatures.value = new Map(d.saved)
+    /*
+     * 项目视图的波形是按**上一份内容**拼的，换了项目必须丢掉重拼 ——
+     * 不丢的话会看到"波形是旧项目的、字幕是新的"，而且没有人会怀疑波形。
+     * 各子项目自己的波形按 fileId 缓存，不受影响（fileId 全局唯一）。
+     */
+    mergedMediaToken += 1
+    media.value.delete(MERGED_FILE_ID)
+    touchMedia()
+    rebuildMerged()
+    revalidate()
+    void nextTick(() => {
+      suppressDirty = false
+    })
+  }
+
+  /** 建一个空项目并切过去。返回新项目 id */
+  function createDraft(options?: { name?: string; activate?: boolean }): string {
+    stashActive()
+    const d: ProjectDraft = {
+      id: newDraftId(),
+      name: options?.name ?? '',
+      path: null,
+      dirty: false,
+      files: [],
+      activeFileId: null,
+      collapsed: false,
+      speakers: useSpeakerStore().emptySnapshot(batchMode.value),
+      history: { buckets: [] },
+      records: [],
+      saved: [],
+    }
+    drafts.value.push(d)
+    if (options?.activate !== false) loadDraft(d)
+    return d.id
+  }
+
+  /** 保证有一个能放东西的项目（导入第一批文件时用） */
+  function ensureActiveDraft(): ProjectDraft {
+    const current = draftOf(activeDraftId.value)
+    if (current) return current
+    const id = createDraft({ activate: true })
+    return draftOf(id)!
+  }
+
+  /**
+   * 切换项目。
+   *
+   * 切走之前，**有路径又有改动就静默保存**（5.4）：用户点一下侧栏就丢掉
+   * 半分钟的改动，是这类软件最不可原谅的失败。没有路径的（从没保存过）
+   * 只能留着那个未保存点，等他自己按保存。
+   *
+   * 识别中不许切 —— 正在跑的那一条属于当前项目。
+   */
+  async function switchDraft(id: string): Promise<boolean> {
+    if (id === activeDraftId.value) return true
+    const target = draftOf(id)
+    if (!target) return false
+    if (recognizing.value) {
+      useUiStore().notify('warning', '识别进行中', '等这一批跑完再切换项目')
+      return false
+    }
+    if (projectDirty.value && projectPath.value && supportedFiles.value.length > 0) {
+      const saved = await saveProjectTo(projectPath.value)
+      // 存不下就别切：切过去之后这份内容就只剩内存里那一份了
+      if (!saved) return false
+    }
+    stashActive()
+    loadDraft(target)
+    return true
+  }
+
+  /** 折叠 / 展开（纯会话状态，不落盘） */
+  function toggleDraft(id: string, collapsed?: boolean): void {
+    const d = draftOf(id)
+    if (!d) return
+    d.collapsed = collapsed ?? !d.collapsed
+  }
+
+  /**
+   * 关掉一个项目：从列表移出，**不删磁盘文件**。
+   *
+   * 活动项目被关掉时把视图落到相邻的那一个；一个都不剩就回到空白状态
+   * （下次导入会再建一个）。
+   */
+  function closeDraft(id: string): boolean {
+    const at = drafts.value.findIndex((d) => d.id === id)
+    if (at < 0) return false
+    const d = drafts.value[at]
+    for (const f of draftItems(d)) {
+      const m = media.value.get(f.id)
+      if (m?.blobUrl) URL.revokeObjectURL(m.blobUrl)
+      media.value.delete(f.id)
+    }
+    drafts.value.splice(at, 1)
+    if (id !== activeDraftId.value) {
+      touchMedia()
+      return true
+    }
+    const next = drafts.value[at] ?? drafts.value[at - 1] ?? null
+    if (next) {
+      loadDraft(next)
+    } else {
+      activeDraftId.value = ''
+      files.value = []
+      projectName.value = ''
+      projectPath.value = null
+      projectDirty.value = false
+      activeFileId.value = null
+      useSpeakerStore().resetAll()
+      useHistoryStore().resetAll()
+      exportRecords.value.clear()
+      savedSignatures.value.clear()
+      media.value.delete(MERGED_FILE_ID)
+      touchMedia()
+    }
+    return true
+  }
+
+  /**
+   * 把一个子项目挪到另一个项目（跨项目拖拽，2.5）。
+   *
+   * 只改数组：时间码是子项目本地的，挪过去不需要换算（2.3）。三样东西要跟着走：
+   * 讲话人的三张表、导出落点；回退记录两个项目都清掉 —— 快照里存的是拼接后的
+   * 数组，条目跨了项目之后撤销会把它们塞回错误的位置。
+   */
+  function moveItemTo(
+    itemId: string,
+    fromDraftId: string,
+    toDraftId: string,
+    at: number,
+  ): boolean {
+    const from = draftOf(fromDraftId)
+    const to = draftOf(toDraftId)
+    if (!from || !to || fromDraftId === toDraftId) return false
+    if (recognizing.value) return false
+
+    const src = draftItems(from)
+    const index = src.findIndex((f) => f.id === itemId)
+    if (index < 0) return false
+    const dst = draftItems(to)
+    const pos = Math.max(0, Math.min(at, dst.length))
+
+    const speakers = useSpeakerStore()
+    const activeFrom = fromDraftId === activeDraftId.value
+    const activeTo = toDraftId === activeDraftId.value
+
+    // 讲话人的三张表里属于这条的那一份：先从源项目摘下来
+    const own = activeFrom
+      ? {
+          byFile: speakers.byFile[itemId],
+          mapping: speakers.mapping[itemId],
+          declared: speakers.declared[itemId],
+        }
+      : {
+          byFile: from.speakers.byFile[itemId],
+          mapping: from.speakers.mapping[itemId],
+          declared: from.speakers.declared[itemId],
+        }
+    if (activeFrom) {
+      delete speakers.byFile[itemId]
+      delete speakers.mapping[itemId]
+      delete speakers.declared[itemId]
+    } else {
+      delete from.speakers.byFile[itemId]
+      delete from.speakers.mapping[itemId]
+      delete from.speakers.declared[itemId]
+    }
+
+    // 真正搬数据：数组顺序就是时间轴顺序，时间码是子项目本地的，不用换算
+    const item = src[index]
+    src.splice(index, 1)
+    dst.splice(pos, 0, item)
+
+    // 挂到目标项目的那一份表上
+    const target = activeTo
+      ? speakers.snapshot()
+      : (JSON.parse(JSON.stringify(to.speakers)) as SpeakerSnapshot)
+    if (own.byFile) target.byFile[itemId] = own.byFile
+    if (own.mapping) target.mapping[itemId] = own.mapping
+    if (own.declared) target.declared[itemId] = own.declared
+    if (activeTo) speakers.restore(target)
+    else to.speakers = target
+
+    // 导出落点属于原来那个项目：跟着走会让就地保存写进别人的目录
+    if (activeFrom) exportRecords.value.delete(itemId)
+    else from.records = from.records.filter(([k]) => k !== itemId)
+    if (activeTo) savedSignatures.value.delete(itemId)
+    else to.saved = to.saved.filter(([k]) => k !== itemId)
+
+    // 回退记录两边都清：快照里存的是拼接后的数组，条目跨了项目之后撤销会把它们
+    // 塞回错误的位置 —— 宁可少一步撤销，也不给一个撤销出一堆错位条目的按钮
+    if (activeFrom || activeTo) useHistoryStore().resetAll()
+    from.history = { buckets: [] }
+    to.history = { buckets: [] }
+
+    // 两个项目都标脏：跨项目移动不立即写盘（2.5 第 4 条）
+    from.dirty = true
+    to.dirty = true
+    if (activeFrom || activeTo) projectDirty.value = true
+
+    // 搬空且没落过盘的项目直接回收（2.6），侧栏不留一个空壳。
+    // 不走 closeDraft：那个会切换视图，而此刻用户做的是搬走一条，视图不该跳
+    if (src.length === 0 && !from.path) {
+      const gone = drafts.value.findIndex((d) => d.id === fromDraftId)
+      if (gone >= 0) drafts.value.splice(gone, 1)
+    }
+
+    rebuildMerged()
+    revalidate()
+    return true
+  }
+
+  /**
+   * 一批识别完成的条目落地（2.4.2）。
+   *
+   * 合并模式：全部塞进 `targetDraftId` 那个新项目，顺序 = 队列顺序；
+   * 各自独立：每条各建一个项目，只激活第一个。
+   *
+   * 条目对象**直接搬**（不复制）：字幕、时长、状态都在它身上，搬过去就是它的。
+   */
+  function landBatch(done: AudioFile[], targetDraftId: string): void {
+    if (done.length === 0) return
+    const ids = new Set(done.map((f) => f.id))
+    intake.value = intake.value.filter((f) => !ids.has(f.id))
+
+    const place = (list: AudioFile[], item: AudioFile, draftId: string): void => {
+      const origin = intakeOrigin.get(item.id)
+      intakeOrigin.delete(item.id)
+      const at =
+        origin && origin.draftId === draftId ? Math.min(origin.index, list.length) : list.length
+      list.splice(at, 0, item)
+    }
+
+    if (targetDraftId) {
+      const d = draftOf(targetDraftId)
+      if (!d) return
+      const list = draftItems(d)
+      for (const item of done) place(list, item, targetDraftId)
+      if (activeDraftId.value === targetDraftId) {
+        if (!activeFileId.value) activeFileId.value = done[0].id
+        projectDirty.value = true
+        rebuildMerged()
+        revalidate()
+      } else {
+        d.dirty = true
+      }
+      return
+    }
+
+    // 各自独立：一项目一条；重试的优先还回它自己那个项目
+    let first = ''
+    for (const item of done) {
+      const origin = intakeOrigin.get(item.id)
+      const home = origin && draftOf(origin.draftId) ? origin.draftId : ''
+      const id = home || createDraft({ activate: !first })
+      if (!first) first = id
+      const d = draftOf(id)
+      if (!d) continue
+      draftItems(d).push(item)
+      if (activeDraftId.value === id) {
+        activeFileId.value = item.id
+        projectDirty.value = true
+      } else {
+        d.dirty = true
+      }
+    }
+    rebuildMerged()
+    revalidate()
+  }
+
+  /**
+   * 把队列里**已经就绪的字幕**直接落地。
+   *
+   * 字幕不需要识别：解析完就是成品。但只要有音频还在等识别，它就得留在队列里
+   * 跟着那一批走 —— 否则合并出来的时间轴顺序会和导入顺序对不上。
+   * 队列里只剩字幕时立刻落地，与以往"导入字幕马上能看到内容"一致。
+   */
+  function landReadySubtitles(): void {
+    if (pendingIntake.value.length > 0) return
+    const ready = intake.value.filter((f) => f.subtitleFormat && f.status === 'pending')
+    if (ready.length === 0) return
+    const d = ensureActiveDraft()
+    const list = draftItems(d)
+    for (const item of ready) list.push(item)
+    intake.value = intake.value.filter((f) => !ready.includes(f))
+    if (!activeFileId.value) activeFileId.value = ready[0].id
+    if (!suppressDirty) projectDirty.value = true
+    rebuildMerged()
+    revalidate()
+  }
+
+  /**
+   * 保存全部项目。
+   *
+   * 逐个切过去再写 —— 保存本身是"读当前状态组文档"，只有活动项目是活引用，
+   * 与其复制一套"按草稿组文档"的逻辑，不如切一下（这一步对用户不可见）。
+   * 没有路径的跳过并在最后汇总，不弹一串对话框。
+   */
+  async function saveAllProjects(): Promise<{ saved: number; skipped: string[] }> {
+    const ui = useUiStore()
+    const origin = activeDraftId.value
+    let saved = 0
+    const skipped: string[] = []
+    for (const d of [...drafts.value]) {
+      const name = d.name || defaultProjectName(draftItems(d).map((f) => f.name))
+      if ((await switchDraft(d.id)) === false && d.id !== activeDraftId.value) continue
+      if (!projectDirty.value) continue
+      if (!projectPath.value) {
+        skipped.push(name)
+        continue
+      }
+      if (await saveProjectTo(projectPath.value)) saved += 1
+      else skipped.push(name)
+    }
+    if (origin) await switchDraft(origin)
+    if (saved > 0) ui.notify('success', `已保存 ${saved} 个项目`, skipped.length > 0 ? `${skipped.length} 个没保存` : '')
+    else if (skipped.length > 0) {
+      ui.notify('warning', '这些项目还没保存过', `${skipped.join('、')} 需要先指定保存位置`)
+    }
+    return { saved, skipped }
   }
 
   /**
@@ -1215,6 +1746,34 @@ export const useProjectStore = defineStore('project', () => {
         file.status = applyResult ? (finalStatus.get(file.id) ?? 'pending') : 'queued'
       }
     }
+    /*
+     * 演示数据分两种摆法：
+     *  - `applyResult = false` → 塞进**导入队列**，演示「导进来还没识别」；
+     *  - `applyResult = true` → 直接建一个项目装进去，演示「已经打开一份工程」。
+     *
+     * 后者是截图与界面验收用的主路径：侧栏、项目视图、导出都只有项目存在
+     * 的时候才看得见。
+     */
+    /*
+     * 只导进队列的那一种**不建项目**：它演的就是「刚导进来、还什么都没识别」，
+     * 侧栏这时候本来就该是空的。建了反而会多出一个空壳。
+     */
+    if (!applyResult) {
+      intake.value = list
+      return
+    }
+
+    // 空着的活动项目直接拿来用：演示入口连点两下不该堆出两个空项目
+    const current = draftOf(activeDraftId.value)
+    const blank = current && draftItems(current).length === 0 && !current.path
+    const id = blank ? current.id : createDraft({ activate: true })
+    const d = draftOf(id)
+    if (d) {
+      d.name = defaultProjectName(list.map((f) => f.name))
+      d.dirty = false
+      d.files = list
+    }
+    projectName.value = d?.name ?? ''
     files.value = list
     activeFileId.value = list.find((f) => f.status !== 'unsupported')?.id ?? null
   }
@@ -1535,20 +2094,41 @@ const MIME_BY_EXT: Record<string, string> = {
    *
    * 有 Electron 桥时走真实引擎（engine.transcribe + 流式进度 + 标点后处理）；
    * 浏览器预览（无桥）保留演示进度，方便 UI 开发。
+   *
+   * @param explicit 只跑这几条（单子项目重新识别用）。缺省时跑「队列里待识别 /
+   *   失败」的那些 —— 重识别的那条此时状态已经是 `pending`（字幕刚被清空），
+   *   靠状态是筛不出来的，必须由调用方点名。
    */
-  async function startRecognition(): Promise<void> {
+  async function startRecognition(explicit?: AudioFile[]): Promise<void> {
     if (recognizing.value) return
-    const queue = files.value.filter((f) => f.status === 'queued' || f.status === 'failed')
+    const queue = explicit
+      ? explicit.filter((f) => f.status !== 'unsupported')
+      : intake.value.filter((f) => f.status === 'queued' || f.status === 'failed')
     if (queue.length === 0) return
 
-    // 一旦开跑，队列与产物归属就定下来了，模式随之锁死
-    lockBatchMode()
+    // 队列与模式此刻都定下来了：识别中不允许切换（见 setBatchMode）
 
     const ui = useUiStore()
     const settings = useSettingsStore()
-    const history = useHistoryStore()
     const model = useModelStore()
     const logs = useLogStore()
+
+    recognizing.value = true
+    /*
+     * 合并模式：**批次一开始就把项目建好**（2.4.2）。
+     *
+     * 侧栏会立刻出现一个「正在识别、0 项」的项目，失败项才有地方可回。
+     * 全部失败时收尾会把空项目回收掉，不留一个空壳。
+     *
+     * 重识别（`explicit`）不建：条目本来就在项目里，落地这一步都不需要走。
+     */
+    let targetDraftId = ''
+    if (!explicit && isMerge.value) {
+      // 失败项重试：还回它原来那个项目（项目已关闭才新建）
+      const back = queue.map((f) => intakeOrigin.get(f.id)?.draftId).find((id) => id && draftOf(id))
+      targetDraftId = back ? back : createDraft({ activate: true })
+      if (back && back !== activeDraftId.value) await switchDraft(back)
+    }
 
     // 浏览器预览：没有桥就走旧的模拟进度，演示数据里已备好「结果」
     if (!window.xbaos) {
@@ -1562,6 +2142,16 @@ const MIME_BY_EXT: Record<string, string> = {
 
       const TOTAL_MS = queue.length * 2200
       const startedAt = performance.now()
+
+      /*
+       * 演示数据本身就是「识别结果」，重识别把它清空之后没有引擎能再算一遍。
+       * 从样例里取回同一份字幕，让浏览器预览里的这条路和真实链路看着一样
+       * （真实引擎下这里的一句 `file.segments = baseline` 由引擎结果提供）。
+       */
+      const demoResultOf = (f: AudioFile): { segments: AudioFile['segments']; durationSec: number | null } | null => {
+        const same = mockFiles.find((m) => m.id === f.id) ?? mockFiles.find((m) => m.name === f.name)
+        return same ? { segments: clone(same.segments), durationSec: same.durationSec } : null
+      }
 
       await new Promise<void>((resolve) => {
         const timer = window.setInterval(() => {
@@ -1586,7 +2176,16 @@ const MIME_BY_EXT: Record<string, string> = {
 
           if (ratio >= 1) {
             window.clearInterval(timer)
-            for (const f of queue) f.status = finalStatus.get(f.id) ?? 'pending'
+            for (const f of queue) {
+              f.status = finalStatus.get(f.id) ?? 'pending'
+              if (explicit) {
+                const back = demoResultOf(f)
+                if (back) {
+                  f.segments = back.segments
+                  f.durationSec = back.durationSec ?? f.durationSec
+                }
+              }
+            }
             recognizing.value = false
             progress.value = 100
             progressLabel.value = ''
@@ -1596,7 +2195,18 @@ const MIME_BY_EXT: Record<string, string> = {
           }
         }, 80)
       })
-      // 演示数据同样走一遍合并，浏览器里也能看到合并视图的样子
+      /*
+       * 演示数据同样走一遍落地与拼接，浏览器里也能看到真实流程的样子。
+       *
+       * 重识别（`explicit`）不落地：条目本来就在项目里，搬一遍等于把它
+       * 从原位抽走再塞进一个新建的项目 —— 真实链路那边是同一个道理。
+       */
+      if (!explicit) {
+        landBatch(
+          queue.filter((f) => f.status !== 'failed'),
+          targetDraftId,
+        )
+      }
       rebuildMerged()
       return
     }
@@ -1631,6 +2241,8 @@ const MIME_BY_EXT: Record<string, string> = {
 
     const startedAt = performance.now()
     let doneCount = 0
+    /** 识别成功的条目：收尾时统一从队列搬进项目（2.4.2） */
+    const doneItems: AudioFile[] = []
     let currentPass = 0
 
     // 新一轮识别开一本新账：上一轮的日志留着只会让人对错时间
@@ -2045,13 +2657,18 @@ const MIME_BY_EXT: Record<string, string> = {
           }
         }
 
-        // 用历史提交的方式写入，识别结果本身也可以整体撤销
-        history.commit(file.id, file.segments, '识别结果', () => {
-          file.segments = baseline
-          file.durationSec = lastResult?.duration ?? file.durationSec
-          file.status = 'pending'
-          file.message = undefined
-        })
+        /*
+         * 结果直接写进这一条 —— 它此刻还在队列里，不属于任何项目，
+         * 落地在收尾时统一做（`landBatch`）。
+         *
+         * 这里不再压一步回退记录：识别进一个空条目，撤销回去也是空的。
+         * 真正需要可撤销的是「重识别」，那一步在动手前已经存过快照了。
+         */
+        file.segments = baseline
+        file.durationSec = lastResult?.duration ?? file.durationSec
+        file.status = 'pending'
+        file.message = undefined
+        doneItems.push(file)
 
         if (termFixed.hits.length > 0) {
           // 只报前几组：几十处全列出来没人看，但「改了哪些词」必须能一眼看到
@@ -2121,6 +2738,17 @@ const MIME_BY_EXT: Record<string, string> = {
         remainingSec.value = Math.max(0, Math.round(speed * (queue.length - doneCount)))
         // 整体进度由「工作单元」累计（见 setUnitProgress），这里不再按文件数
         // 另算一份 —— 两套算法混用会让进度条在某些文件组合下卡住不前
+      }
+
+      /*
+       * 没跑出结果的（失败 / 取消）留在队列里，并记下它本该落在哪 ——
+       * 用户重试成功时插回原处（2.4.2），而不是被追加到项目末尾把顺序改掉。
+       */
+      if (!explicit) {
+        for (const [i, f] of queue.entries()) {
+          if (doneItems.includes(f)) continue
+          intakeOrigin.set(f.id, { draftId: targetDraftId, index: i })
+        }
       }
 
       /*
@@ -2200,14 +2828,20 @@ const MIME_BY_EXT: Record<string, string> = {
           'info',
           `识别结束：${doneCount} 个文件，整体用时 ${Math.round((performance.now() - startedAt) / 1000)} 秒`,
         )
-        if (isMerge.value) {
-          rebuildMerged()
+        /*
+         * 落地：成功的条目从队列搬进项目。
+         *
+         * 重识别（`explicit`）不搬 —— 它本来就在项目里，搬一遍等于把它从原位
+         * 抽走再塞回去。失败与取消的留在队列里，`origin` 已经记好位置，
+         * 重试成功时会插回原处。
+         */
+        if (!explicit) {
+          landBatch(doneItems, targetDraftId)
+          // 合并模式的项目一个条目都没落上（全失败）→ 回收空壳
+          const batch = targetDraftId ? draftOf(targetDraftId) : null
+          if (batch && draftItems(batch).length === 0) closeDraft(batch.id)
         } else {
-          // 识别完跳去编辑器时，视图要落在**本轮**的成果上。
-          // 不这么做的话 activeFileId 还停在上一次识别选中的文件上，
-          // 用户看到的是旧内容，得手动点一遍才找到刚识别好的。
-          const firstDone = queue.find((f) => f.status !== 'failed' && f.segments.length > 0)
-          if (firstDone) activeFileId.value = firstDone.id
+          rebuildMerged()
         }
       }
     } catch (err) {
@@ -2235,6 +2869,52 @@ const MIME_BY_EXT: Record<string, string> = {
       progress.value = cancelRequested ? 0 : 100
       cancelRequested = false
     }
+  }
+
+  /**
+   * 重新识别**一个**子项目。
+   *
+   * 与批量识别走同一条引擎链路（多遍 / VAD / 热词 / 标点 / 折行 / 分离全部一样），
+   * 所以这里不复制任何参数，只是把它单独点名送进 `startRecognition`。
+   *
+   * 前置条件只有一条：有音频。纯字幕子项目没音频可识别，界面上那个菜单项
+   * 本来就是灰的；这里再挡一次，避免从别处调进来时把字幕清掉却什么都做不了。
+   */
+  async function recognizeItem(fileId: string): Promise<boolean> {
+    const ui = useUiStore()
+    const history = useHistoryStore()
+    const item = files.value.find((f) => f.id === fileId)
+    if (!item || recognizing.value) return false
+    if (!item.path && !item.demo) {
+      ui.notify('warning', '这条没有音频', '先做音频映射，再重新识别')
+      return false
+    }
+
+    const ok = await confirmDestructive({
+      title: '重新识别',
+      message: `${item.name} 现在的 ${item.segments.length} 条字幕会被全部清除，包括文字、译文、时间码与讲话人。`,
+      detail: '清除后可以用 Ctrl+Z 恢复一次。',
+      confirmLabel: '重新识别',
+    })
+    if (!ok) return false
+
+    // 先留一步回退，再清空 —— 顺序反了就撤不回来了
+    history.commit(MERGED_FILE_ID, concatSegments(), '重新识别前', () => {
+      item.segments = []
+    })
+    // 讲话人的三张表里属于它的那一份、导出落点，一并清掉：
+    // 留着就是"字幕没了、称呼还挂在空编号上"
+    useSpeakerStore().forgetFile(item.id)
+    exportRecords.value.delete(item.id)
+    savedSignatures.value.delete(item.id)
+    item.durationSec = null
+    item.status = 'pending'
+    item.message = undefined
+    // 时长字段一清，后面的子项目起点全变（偏移是派生的），波形也要重拼
+    rebuildMerged()
+
+    await startRecognition([item])
+    return true
   }
 
   /** 接收拖入的文件：Electron 里取真实路径入库，浏览器里退回演示数据 */
@@ -2384,6 +3064,8 @@ const MIME_BY_EXT: Record<string, string> = {
     projectPath.value = target
     projectDirty.value = false
     lastProjectDir.value = dirOf(target)
+    // 名字与路径都变了，草稿那一格跟着更新（侧栏的「未保存」点靠它）
+    stashActive()
     const view = viewFile.value
     if (view) markSaved(MERGED_FILE_ID, view.segments)
     ui.notify('success', '项目已保存', target)
@@ -2444,8 +3126,9 @@ const MIME_BY_EXT: Record<string, string> = {
   /**
    * 打开项目。
    *
-   * 有未保存改动时先问（原生三按钮），用户取消就什么都不做 —— 这里必须
-   * 在**读文件之前**问，否则读完才发现用户不想开，前面做的都白费。
+   * **不再问「当前项目有未保存的改动，要不要先存」**：打开是再开一份，
+   * 当前那份还留在侧栏里，一个字都不会丢（2.6）。真正会丢的时机只有一个 ——
+   * 关窗，那一步在 5.5 里问。
    */
   async function openProject(target?: string): Promise<boolean> {
     const ui = useUiStore()
@@ -2455,21 +3138,9 @@ const MIME_BY_EXT: Record<string, string> = {
       return false
     }
 
-    if (projectDirty.value && supportedFiles.value.length > 0) {
-      const choice = await bridge.dialog.confirm({
-        type: 'question',
-        title: '打开其他项目',
-        message: `「${displayProjectName.value}」有未保存的改动`,
-        detail: '不保存就打开，这些改动会丢失。',
-        buttons: ['取消', '不保存，直接打开', '先保存再打开'],
-        defaultId: 2,
-        cancelId: 0,
-      })
-      if (choice === 0) return false
-      if (choice === 2) {
-        const saved = await saveProject()
-        if (!saved) return false
-      }
+    // 有路径又有改动就顺手存一下：切走之前不静默丢东西，也不用打断用户
+    if (projectDirty.value && projectPath.value && supportedFiles.value.length > 0) {
+      await saveProjectTo(projectPath.value)
     }
 
     const picked = target ?? (await bridge.project.pickOpen())
@@ -2495,6 +3166,23 @@ const MIME_BY_EXT: Record<string, string> = {
     const doc = parsed.doc
     const items = itemsFromDoc(doc)
 
+    /*
+     * 已经打开着同一个文件 → 直接切过去，不要重复开一份。
+     *
+     * 两份内存草稿指向同一个 `.xbsgp` 时，谁后保存谁赢，另一份的改动会被
+     * 静默覆盖 —— 这正是 5.4.1 要拦的那件事，从入口就挡掉。
+     */
+    const opened = drafts.value.find((d) => d.path && samePath(d.path, picked))
+    if (opened) {
+      if (await switchDraft(opened.id)) {
+        ui.notify('info', '项目已经打开', opened.name || displayProjectName.value)
+      }
+      return true
+    }
+
+    // 新开一份草稿来装它（当前项目先写回，之后还能切回来）
+    createDraft({ activate: true })
+
     // ---- 替换整个工程：先把上一份的媒体地址释放掉，否则内存只增不减
     for (const m of media.value.values()) {
       if (m.blobUrl) URL.revokeObjectURL(m.blobUrl)
@@ -2515,12 +3203,9 @@ const MIME_BY_EXT: Record<string, string> = {
     lastProjectDir.value = dirOf(picked)
 
     /*
-     * 打开的项目一律按「一个项目 N 项」呈现 —— 合并模式正是这个视图。
-     * 批量处理方式本身是会话状态、不进项目文件（4.3），这里只是选一个
-     * 与"项目"语义相符的显示方式。
+     * 不动批量处理模式：它是会话状态，与"打开哪个项目"无关。编辑器早就
+     * 一律按项目视图呈现，所以打开一份 N 项的项目不需要先切成合并模式。
      */
-    batchMode.value = 'merge'
-    batchModeLocked.value = false
 
     // 讲话人表：打开的项目自带的称呼必须恢复，否则整份工程读回来就少了信息
     const speakers = useSpeakerStore()
@@ -2553,6 +3238,8 @@ const MIME_BY_EXT: Record<string, string> = {
     await nextTick()
     suppressDirty = false
     projectDirty.value = false
+    // 把整份内容写进这份草稿：`files` 换过数组，草稿那一格还指着创建时的空数组
+    stashActive()
 
     ui.notify(
       'success',
@@ -2604,6 +3291,7 @@ const MIME_BY_EXT: Record<string, string> = {
     projectName.value = clean
     projectPath.value = nextPath
     lastProjectDir.value = dirOf(nextPath)
+    stashActive()
     return true
   }
 
@@ -2615,7 +3303,6 @@ const MIME_BY_EXT: Record<string, string> = {
   return {
     files,
     batchMode,
-    batchModeLocked,
     projectName,
     displayProjectName,
     projectPath,
@@ -2638,6 +3325,7 @@ const MIME_BY_EXT: Record<string, string> = {
     isMerge,
     mergedParts,
     speakerMappingFiles,
+    itemLayout,
     viewFile,
     viewFileId,
     totalDuration,
@@ -2647,16 +3335,38 @@ const MIME_BY_EXT: Record<string, string> = {
     pendingReviewCount,
     unsupportedExts,
     outputDirs,
+    intake,
+    intakeSupported,
+    intakeUnsupported,
+    pendingIntake,
+    hasIntakeWork,
+    intakeDuration,
     addFiles,
     addFilesFromPaths,
     addSubtitleFromPath,
     removeFile,
+    removeItem,
     reorder,
+    reorderIntake,
+    landReadySubtitles,
+    drafts,
+    activeDraftId,
+    createDraft,
+    switchDraft,
+    closeDraft,
+    toggleDraft,
+    moveItemTo,
+    saveAllProjects,
+    draftItems,
     setAcked,
     replaceSegment,
     insertSegmentAfter,
     clearAll,
     setActiveFile,
+    revealItem,
+    revealRequest,
+    scrollTopOf,
+    rememberScrollTop,
     exportRecords,
     rememberExport,
     exportRecordsOf,
@@ -2668,6 +3378,7 @@ const MIME_BY_EXT: Record<string, string> = {
     applyTranslation,
     loadDemo,
     startRecognition,
+    recognizeItem,
     cancelRecognition,
     receiveDroppedFiles,
     ensureMedia,
