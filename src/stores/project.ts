@@ -32,8 +32,10 @@ import {
 import { validateSegment, countIssues } from '@/utils/validate'
 import {
   alignOrigin,
+  dropCharTimes,
   enforceMonotonicCues,
   hasVisibleText,
+  segCharTimes,
   segmentsSignature,
   stripInvisible,
 } from '@/utils/segmentOps'
@@ -2668,15 +2670,21 @@ const MIME_BY_EXT: Record<string, string> = {
         // 引擎给的是原始串，可能带零宽字符（U+200B 等）：`trim()` 不认它们，
         // 入库后就是一条「看着空白、却是有效条目」的字幕 —— 时间轴上只剩个空边框。
         // 在入口清掉，别让它有机会进到数据里再往各处漏。
-        const toSegment = (msg: EngineSegment, i: number): SubtitleSegment => ({
-          id: `seg_${Date.now().toString(36)}_${i.toString(36)}`,
-          start: msg.start,
-          end: msg.end,
-          text: stripInvisible(msg.text).trim(),
-          origin: stripInvisible(msg.text).trim(),
-          issues: [],
-          avgLogprob: msg.avgLogprob,
-        })
+        const toSegment = (msg: EngineSegment, i: number): SubtitleSegment => {
+          const text = stripInvisible(msg.text).trim()
+          return {
+            id: `seg_${Date.now().toString(36)}_${i.toString(36)}`,
+            start: msg.start,
+            end: msg.end,
+            text,
+            origin: text,
+            issues: [],
+            avgLogprob: msg.avgLogprob,
+            // 逐字时间只在「文本一字未动」时可信：清洗过零宽字符或首尾空白之后
+            // 下标就对不上了，宁可不给（退回按字数摊派），也不能给错位的时间轴
+            charTimes: segCharTimes(msg.text, text, msg.charTimes),
+          }
+        }
         // 深度模式的第二遍起改用「带精选词」的提示词
         let runPrompt = basePrompt
         let lastResult: Awaited<ReturnType<typeof engine.transcribe>> | null = null
@@ -2946,8 +2954,12 @@ const MIME_BY_EXT: Record<string, string> = {
          * 就是 `wrapped` 里的这个结果。上面各步（繁转简、标点后处理、按规格
          * 折行）都会改写 text 却不同步 origin，若不在这里对齐一次，识别一完成
          * 就有一批条目顶着「已改动」的小圆点 —— 那个圆点本该只表示人改过。
+         *
+         * 逐字时间轴到这里已经用完了（切条只在上面发生），发出去的条目一律
+         * 丢掉它：留在条目里会被撤销栈、草稿、合并各拷一份，而它一旦与文本
+         * 错位就是一份「看着精致、实际全错」的时间数据。
          */
-        let baseline = alignOrigin(wrapped.segments)
+        let baseline = dropCharTimes(alignOrigin(wrapped.segments))
 
         logs.push(
           'info',

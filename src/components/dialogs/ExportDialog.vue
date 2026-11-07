@@ -126,14 +126,21 @@ const baseSources = computed<PlanSource[]>(() => {
 
   if (isMerge.value) {
     const first = files[0]
-    // 合并产物是按导入顺序拼出来的，用第一个音频的名字命名会让人以为
-    // 只导出了那一个文件。直接用产物的名字，{原名} 也一并替换成它。
+    /*
+     * 合并产物按**项目名**命名。
+     *
+     * 用第一个音频的名字会让人以为只导出了那一个文件；用「合并时间轴」
+     * 这种内部视图名更糟 —— 用户建的项目叫「小包听幕介绍」，导出来却叫
+     * 「合并时间轴.srt」，还得手工改名。项目名是他自己起的、也是他认得的
+     * 那个名字，所以来源名与 `{原名}` 都取它。
+     */
+    const name = project.displayProjectName
     return [
       {
         id: MERGED_FILE_ID,
-        name: '合并时间轴',
+        name,
         dir: first.dir,
-        baseName: '合并时间轴',
+        baseName: name,
         outputDir: resolveDir(first),
         segments: mergedSegments(),
       },

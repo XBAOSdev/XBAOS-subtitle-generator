@@ -75,6 +75,14 @@ export interface EngineSegment {
    * 注意 GPU（fp16）整体比 CPU（fp32）低 0.05–0.1，阈值判断要留余量。
    */
   avgLogprob: number
+  /**
+   * 逐字时间轴：`[起, 止, 起, 止, …]`（毫秒，绝对时间，与 `text` 逐字符对应）。
+   *
+   * 只有 ONNX 引擎（SenseVoice 的 CTC 峰值帧）会给；whisper 引擎没有这个
+   * 字段，渲染层拿不到时退回「按字数摊派」的老算法。长度不等于
+   * `text` 字符数×2 时一律忽略 —— 错位的时间轴比没有更糟。
+   */
+  charTimes?: number[]
 }
 
 export interface EngineDone {
@@ -228,6 +236,15 @@ export interface TranscribeOptions {
    * 渲染层已经知道哪几秒不可信，直接把区间当刀口。
    */
   ranges?: { start: number; end: number }[]
+  /**
+   * 单条最多几个中文字（0 / 不传 = 不限）。
+   *
+   * 交给引擎断句而不是渲染层切，是因为引擎手里有逐 token 的真实时间戳：
+   * 在 token 边界上下刀，两半的起止都是真时间；渲染层只有整句的起止，
+   * 切一刀只能按字数把这段时间分摊，字幕就会与发音错位。
+   * 只对中文主导的句子生效。
+   */
+  maxCueChars?: number
 }
 
 /** VAD 切分参数（与引擎 vad.hpp 的 VadOptions 对应，均为可选字段） */

@@ -13,6 +13,7 @@
 
 import type { PunctuationMode, PunctuationOptions, SubtitleSegment } from '@/types'
 import { uid } from '@/utils/id'
+import { charSpanOf } from '@/utils/segmentOps'
 import { T2S_TABLE } from '@/utils/t2sTable'
 
 /**
@@ -134,23 +135,62 @@ export function stripPausePunctuation(text: string, set: Set<string>): string {
 
 /** 以停顿标点为界切分。切分点上的标点本身被丢弃 */
 export function splitByPausePunctuation(text: string, set: Set<string>): string[] {
-  const parts: string[] = []
+  return splitRanges(text, set).map((p) => p.text)
+}
+
+/** 切分结果里的一段：`text` 是去掉标点后的文本，`[from, to)` 是它在原文里的字符区间 */
+interface Piece {
+  text: string
+  from: number
+  to: number
+}
+
+/**
+ * 带字符区间地切分。
+ *
+ * 区间是给**逐字时间轴**用的：识别结果的每个字都有真实起止，切在第几刀就
+ * 能读到那一刀的真实时间。少了它只能按字数把整句时长摊给各段 —— 语速一
+ * 变，字幕就与发音错开。
+ *
+ * `to` 含切分点上的标点（时间归前一段，符合「说完再停」的直觉），`text`
+ * 不含（中文字幕惯例不带标点）。
+ */
+function splitRanges(text: string, set: Set<string>): Piece[] {
+  const parts: Piece[] = []
   let buf = ''
+  let from = 0
 
   for (let i = 0; i < text.length; i += 1) {
     if (isPauseAt(text, i, set)) {
       const piece = buf.trim()
-      if (piece) parts.push(piece)
+      if (piece) parts.push({ text: piece, from, to: i + 1 })
       buf = ''
+      from = i + 1
       continue
     }
     buf += text[i]
   }
 
   const tail = buf.trim()
-  if (tail) parts.push(tail)
+  if (tail) parts.push({ text: tail, from, to: text.length })
+  return parts.length > 0 ? parts : []
+}
 
-  return parts.length > 0 ? parts : [text.trim()].filter(Boolean)
+/**
+ * 从源条目裁出这一段的逐字时间轴。
+ *
+ * 段文本是「去掉标点之后」的，而区间是含标点的，所以要按字符数对一下：
+ * 正好少一个末尾标点（最常见）就切掉最后一对；其余情况一律返回 undefined
+ * —— 宁可让下一道退回按字数摊派，也不能给一份错位的时间。
+ */
+function sliceCharTimes(source: SubtitleSegment, piece: Piece): number[] | undefined {
+  const ct = source.charTimes
+  if (!ct || ct.length !== [...source.text].length * 2) return undefined
+  const chars = [...piece.text].length
+  const raw = piece.to - piece.from
+  const cutTo = raw === chars ? piece.to : raw - 1 === chars ? piece.to - 1 : -1
+  if (cutTo <= piece.from) return undefined
+  return ct.slice(piece.from * 2, cutTo * 2)
 }
 
 function round(v: number): number {
@@ -219,37 +259,68 @@ export function applyPunctuation(
         continue
       }
       if (text !== source.text) strippedCount += 1
-      out.push({ ...source, text, origin: text, issues: [] })
+      // 标点可能删在句子中间，逐字时间对不上号了，一并丢掉
+      const stripped: SubtitleSegment = { ...source, text, origin: text, issues: [] }
+      if (text !== source.text) delete stripped.charTimes
+      out.push(stripped)
       continue
     }
 
     // strip-split
-    const parts = splitByPausePunctuation(source.text, set)
+    const pieces = splitRanges(source.text, set)
 
-    if (parts.length <= 1) {
-      const text = parts[0] ?? source.text
+    if (pieces.length <= 1) {
+      const piece = pieces[0]
+      const text = piece?.text ?? source.text
       if (!text) {
         out.push(source)
         continue
       }
       if (text !== source.text) strippedCount += 1
-      out.push({ ...source, text, origin: text, issues: [] })
-      continue
-    }
-
-    const times = allocateTime(source.start, source.end, parts)
-    parts.forEach((text, i) => {
       out.push({
-        id: uid('seg'),
-        start: times[i].start,
-        end: times[i].end,
+        ...source,
         text,
         origin: text,
         issues: [],
-        avgLogprob: source.avgLogprob,
+        charTimes: piece && text !== source.text ? sliceCharTimes(source, piece) : source.charTimes,
       })
+      continue
+    }
+
+    /*
+     * 逐字时间轴：这一句的每个字都有真实起止，按刀口取时间即可。
+     * 长度对不上（清洗过零宽字符等）就整条不用，退回按字数摊派。
+     */
+    const ct =
+      source.charTimes && source.charTimes.length === [...source.text].length * 2
+        ? source.charTimes
+        : undefined
+    const fallback = allocateTime(
+      source.start,
+      source.end,
+      pieces.map((p) => p.text),
+    )
+
+    let cursor = source.start
+    pieces.forEach((piece, i) => {
+      const isLast = i === pieces.length - 1
+      const exact = charSpanOf(ct, piece.from, piece.to)
+      const start = i === 0 ? source.start : cursor
+      const end = isLast ? source.end : round(exact ? exact.end : fallback[i].end)
+
+      out.push({
+        id: uid('seg'),
+        start,
+        end,
+        text: piece.text,
+        origin: piece.text,
+        issues: [],
+        avgLogprob: source.avgLogprob,
+        charTimes: sliceCharTimes(source, piece),
+      })
+      cursor = end
     })
-    splitCount += parts.length - 1
+    splitCount += pieces.length - 1
   }
 
   return { segments: out, splitCount, strippedCount }

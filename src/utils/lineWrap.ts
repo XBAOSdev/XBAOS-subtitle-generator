@@ -31,7 +31,7 @@
 
 import type { SubtitleSegment } from '@/types'
 import { uid } from '@/utils/id'
-import { markTranslationsStale } from '@/utils/segmentOps'
+import { charSpanOf, markTranslationsStale } from '@/utils/segmentOps'
 import { widthUnits } from '@/utils/validate'
 
 /** 与 validate.ts 同一口径：汉字算 2 宽 */
@@ -195,6 +195,11 @@ function markWordCuts(atoms: Atom[], words: Set<string>): Set<number> {
  *
  * 权重是按「宁可两条宽度不匀，也不把词切开」定的：词边界与禁则的惩罚
  * 比宽度项高两个数量级，所以只要存在一个合法切点，就不会选到词内部去。
+ *
+ * `pause` 是切点处的**真实停顿**（秒，来自引擎的逐字时间轴）。人换气的地方
+ * 就是该断行的地方 —— 没有标点的长句里，这条比词表更接近「一句话说完」，
+ * 也是「尾巴被扔到下一条」的主要解法：原来切点只看宽度，正好落在第 16 个字
+ * 上，哪怕那里正说到一半。
  */
 function cutScore(
   atoms: Atom[],
@@ -202,6 +207,7 @@ function cutScore(
   capacity: number,
   prefix: number[],
   badWords: Set<number> | null,
+  pause: number,
 ): number {
   const last = atoms[cut - 1]
   const first = atoms[cut]
@@ -213,13 +219,6 @@ function cutScore(
   if (BREAK_AFTER.test(last.text)) score += 800
   else if (last.text === ' ' || first.text === ' ') score += 400
 
-  if (badWords && badWords.has(cut)) score -= 8000
-  if (NO_LINE_START.has(first.text[0])) score -= 12000
-  if (NO_LINE_END.has(last.text[last.text.length - 1])) score -= 2500
-
-  // 一行只剩几个字，观感上同样是「断错了」—— 但代价远低于拆词
-  if (Math.min(leftW, rightW) < capacity * 0.3) score -= 400
-
   /*
    * 宽度目标随剩余量变化：
    *   只剩两行 → 按均分，避免「第一行挤满、第二行只剩几个字」；
@@ -227,19 +226,51 @@ function cutScore(
    */
   const restW = prefix[atoms.length]
   const ideal = restW <= capacity * 2 ? restW / 2 : capacity
+
+  /*
+   * 真实停顿：0.45 秒最多折 2250 分，压过「装满」的宽度项，但压不过标点。
+   * 折扣项很关键 —— 停顿落在很靠前的位置时（第一行只剩五六个字），那一刀
+   * 虽然真有停顿，观感却更差；越偏离理想宽度，停顿的说话权越小。
+   */
+  if (pause > 0) {
+    const nearness = Math.max(0, 1 - Math.abs(leftW - ideal) / capacity)
+    score += Math.min(pause, 0.45) * 5000 * nearness
+  }
+
+  if (badWords && badWords.has(cut)) score -= 8000
+  if (NO_LINE_START.has(first.text[0])) score -= 12000
+  if (NO_LINE_END.has(last.text[last.text.length - 1])) score -= 2500
+
+  // 一行只剩几个字，观感上同样是「断错了」—— 但代价远低于拆词
+  if (Math.min(leftW, rightW) < capacity * 0.3) score -= 400
+
   score -= Math.abs(leftW - ideal) * 5
 
   return score
 }
 
-/**
- * 按容量切行。词表为空时等价于「装满就切」的老行为。
- */
-function breakAtoms(atoms: Atom[], capacity: number, words: Set<string> | null): string[] {
-  const lines: string[] = []
-  let rest = atoms
+/** 一个字符占几个码点：英文词可能不止一个，逐字时间轴按码点排 */
+function atomChars(atom: Atom): number {
+  return [...atom.text].length
+}
 
-  while (atomsWidth(rest) > capacity) {
+/**
+ * 按容量切行，返回每行覆盖的原子下标区间 `[start, end)`。
+ *
+ * 词表为空时等价于「装满就切」的老行为。`pauses` 是逐字时间轴给的切点停顿
+ * （下标同原子边界），拿不到就不参与打分。
+ */
+function breakAtoms(
+  atoms: Atom[],
+  capacity: number,
+  words: Set<string> | null,
+  pauses?: number[],
+): { start: number; end: number }[] {
+  const lines: { start: number; end: number }[] = []
+  let begin = 0
+
+  while (atomsWidth(atoms.slice(begin)) > capacity) {
+    const rest = atoms.slice(begin)
     const prefix: number[] = [0]
     for (const atom of rest) prefix.push(prefix[prefix.length - 1] + atom.width)
     const badWords = words && words.size > 0 ? markWordCuts(rest, words) : null
@@ -249,22 +280,20 @@ function breakAtoms(atoms: Atom[], capacity: number, words: Set<string> | null):
     for (let cut = 1; cut < rest.length; cut += 1) {
       // 切点本身超出容量就没资格参与比较（超宽单词由 cut = 1 兜底）
       if (prefix[cut] > capacity) break
-      const score = cutScore(rest, cut, capacity, prefix, badWords)
+      const score = cutScore(rest, cut, capacity, prefix, badWords, pauses?.[begin + cut] ?? 0)
       if (score > bestScore) {
         bestScore = score
         bestCut = cut
       }
     }
 
-    const line = render(rest.slice(0, bestCut))
-    if (line) lines.push(line)
-    rest = rest.slice(bestCut)
+    lines.push({ start: begin, end: begin + bestCut })
+    begin += bestCut
     // 行首空格带过来没有意义，丢掉
-    while (rest.length > 0 && rest[0].text === ' ') rest = rest.slice(1)
+    while (begin < atoms.length && atoms[begin].text === ' ') begin += 1
   }
 
-  const tail = render(rest)
-  if (tail) lines.push(tail)
+  if (begin < atoms.length && render(atoms.slice(begin))) lines.push({ start: begin, end: atoms.length })
   return lines
 }
 
@@ -281,7 +310,10 @@ export function breakIntoLines(
   const flat = text.replace(/\s+/g, ' ').trim()
   if (!flat) return []
   const words = wrapWords && wrapWords.length > 0 ? new Set(wrapWords) : null
-  return breakAtoms(tokenize(flat), capacity, words)
+  const atoms = tokenize(flat)
+  return breakAtoms(atoms, capacity, words)
+    .map((r) => render(atoms.slice(r.start, r.end)))
+    .filter(Boolean)
 }
 
 function round3(v: number): number {
@@ -304,15 +336,41 @@ function deriveSegment(
     issues: [],
     translations: seg.translations ? { ...seg.translations } : undefined,
   }
+  // 折行会给文本加上 `\n`，字符数与逐字时间轴对不上了；这里之后也用不到它
+  delete derived.charTimes
   // 文本变了，原译文不再逐字对应 —— 标红交给用户确认（与分割/合并同一语义）
   return markTranslationsStale(derived)
 }
 
 /**
+ * 逐字时间轴 → 「切点处的停顿」查表（下标是原子边界）。
+ *
+ * `charAt[i]` 是第 i 个原子之前的字符数。停顿 = 该字符的起始时间 − 前一个
+ * 字符的结束时间；没有时间轴或下标越界就是 0（不参与打分）。
+ */
+function pausesOf(ct: number[] | undefined, charAt: number[]): number[] | undefined {
+  if (!ct) return undefined
+  const out = new Array<number>(charAt.length).fill(0)
+  for (let i = 1; i < charAt.length; i += 1) {
+    const j = charAt[i]
+    if (j <= 0 || j * 2 > ct.length) continue
+    out[i] = Math.max(0, ct[j * 2] - ct[j * 2 - 1])
+  }
+  return out
+}
+
+/** 取 [from, to) 这段字符的真实时间窗；拿不到就返回 null 交给按宽度摊派 */
+
+/**
  * 按字幕规格折行 / 拆分一批条目。
  *
- * 放得下的条目只改文本（按 `\n` 分行）；放不下的按「宽度占比」切时间拆成
- * 多条 —— 时长与字数成正比是拆条能做的最诚实假设，比全部塞在原时间里强。
+ * 放得下的条目只改文本（按 `\n` 分行）；放不下的拆成多条。
+ *
+ * 拆条的时间有两条路：
+ *   ① 识别刚结束、`charTimes` 还在 → 直接读切点那个字的真实起止；
+ *   ② 没有逐字时间（重新断行工具、whisper 引擎、旧草稿）→ 按宽度占比摊派。
+ * 路 ① 是「时间码对得上嘴」的关键：按字数摊派时，语速一快一慢就错开半秒，
+ * 而且误差在整句里累积，越靠句尾越明显。
  */
 export function applyLineWrap(
   segments: SubtitleSegment[],
@@ -343,7 +401,35 @@ export function applyLineWrap(
     }
 
     const capacity = isCjkDominant(parts.join('')) ? capacityCjk : capacityEn
-    const lines = parts.flatMap((part) => breakAtoms(tokenize(part), capacity, words))
+
+    /*
+     * 逐字时间只在「一个自然段」时才用得上：文本里已经有手工换行、或者空格
+     * 被压实过，字符下标就与引擎那份对不上了。
+     */
+    const flat = parts.join('\n') === seg.text ? seg.text : ''
+    const ct =
+      flat && seg.charTimes && seg.charTimes.length === [...flat].length * 2
+        ? seg.charTimes
+        : undefined
+
+    // 每个自然段各自切行；逐字时间的下标需要跨段累加，所以按段推进
+    const lines: string[] = []
+    const spans: { from: number; to: number }[] = []
+    let base = 0
+    for (const part of parts) {
+      const atoms = tokenize(part)
+      const charAt: number[] = [0]
+      for (const atom of atoms) charAt.push(charAt[charAt.length - 1] + atomChars(atom))
+      const ranges = breakAtoms(atoms, capacity, words, parts.length === 1 ? pausesOf(ct, charAt) : undefined)
+      for (const r of ranges) {
+        const text = render(atoms.slice(r.start, r.end))
+        if (!text) continue
+        lines.push(text)
+        spans.push({ from: base + charAt[r.start], to: base + charAt[r.end] })
+      }
+      base += [...part].length
+    }
+
     if (lines.length === 1 && lines[0] === seg.text) {
       out.push(seg)
       continue
@@ -361,10 +447,13 @@ export function applyLineWrap(
       continue
     }
 
-    // 装不下：按 maxLines 一组拆成多条，时间按宽度占比分
+    // 装不下：按 maxLines 一组拆成多条
     const chunks: string[][] = []
+    const chunkChar: { from: number; to: number }[] = []
     for (let i = 0; i < lines.length; i += maxLines) {
-      chunks.push(lines.slice(i, i + maxLines))
+      const slice = lines.slice(i, i + maxLines)
+      chunks.push(slice)
+      chunkChar.push({ from: spans[i].from, to: spans[i + slice.length - 1].to })
     }
 
     const span = Math.max(0.001, seg.end - seg.start)
@@ -374,13 +463,20 @@ export function applyLineWrap(
     let cursor = seg.start
     for (let i = 0; i < chunks.length; i++) {
       const isLast = i === chunks.length - 1
-      const end = isLast ? seg.end : round3(cursor + (span * widths[i]) / totalW)
+      /*
+       * 时间优先取逐字时间轴上这一段的真实边界；首条起见与末条收尾仍夹在
+       * 原条目的 start/end 内，避免相邻两条之间出现缝隙或重叠。
+       */
+      const exact = charSpanOf(ct, chunkChar[i].from, chunkChar[i].to)
+      let end = isLast ? seg.end : round3(cursor + (span * widths[i]) / totalW)
+      if (exact && !isLast) end = round3(Math.min(seg.end, Math.max(cursor + 0.02, exact.end)))
       const text = chunks[i].join('\n')
       if (i === 0) {
         // 第一条沿用原时间轴起点，避免浮点误差把首条挪出去
         out.push(deriveSegment(seg, text, seg.start, end))
       } else {
-        out.push(deriveSegment(seg, text, cursor, end))
+        const start = exact ? round3(Math.max(seg.start, Math.min(exact.start, end - 0.02))) : cursor
+        out.push(deriveSegment(seg, text, start, end))
         splitCount += 1
       }
       cursor = end

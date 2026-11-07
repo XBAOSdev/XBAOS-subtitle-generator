@@ -195,6 +195,71 @@ export function alignOrigin(segments: SubtitleSegment[]): SubtitleSegment[] {
   return segments.map((s) => (s.text === s.origin ? s : { ...s, origin: s.text }))
 }
 
+/**
+ * 引擎的逐字时间轴（毫秒）→ 秒；对齐不上时返回 undefined。
+ *
+ * 对齐条件是「字符数一模一样」。识别入口会清一遍零宽字符并 trim，那一步
+ * 只要少了一个字，下标就全体左移，之后再拿它算时间就会把字幕整条往前挪。
+ * 所以这里只在**一字未动**（或仅首尾空白被去掉，可按个数切）时才交付。
+ */
+export function segCharTimes(
+  rawText: string,
+  cleaned: string,
+  raw?: number[],
+): number[] | undefined {
+  if (!raw || raw.length === 0) return undefined
+  const chars = [...rawText]
+  if (raw.length !== chars.length * 2) return undefined
+
+  const toSec = (from: number, to: number): number[] =>
+    raw.slice(from, to).map((ms) => Number((ms / 1000).toFixed(3)))
+
+  if (cleaned === rawText) return toSec(0, raw.length)
+
+  let lead = 0
+  while (lead < chars.length && /\s/.test(chars[lead])) lead += 1
+  let tail = chars.length
+  while (tail > lead && /\s/.test(chars[tail - 1])) tail -= 1
+  if (chars.slice(lead, tail).join('') !== cleaned) return undefined
+  return toSec(lead * 2, tail * 2)
+}
+
+/**
+ * 逐字时间轴上 `[from, to)` 这段字符的真实时间窗（秒）。
+ *
+ * 拿不到（没有时间轴 / 下标越界 / 时间不递增）就返回 null，调用方退回
+ * 「按字数摊派」的老算法 —— 宁可粗一点，也不要给出错位的时间。
+ */
+export function charSpanOf(
+  ct: number[] | undefined,
+  from: number,
+  to: number,
+): { start: number; end: number } | null {
+  if (!ct || from < 0 || to <= from || to * 2 > ct.length) return null
+  const start = ct[from * 2]
+  const end = ct[to * 2 - 1]
+  if (!(end > start)) return null
+  return { start, end }
+}
+
+/**
+ * 丢掉逐字时间轴。
+ *
+ * 它只服务于「识别刚结束时按规格切条」这一件事。切完之后文本会被人反复改，
+ * 留着只会是一份错位的时间轴；而它又要跟着条目进撤销栈、进草稿，白占内存。
+ */
+export function dropCharTimes(segments: SubtitleSegment[]): SubtitleSegment[] {
+  let touched = false
+  const out = segments.map((s) => {
+    if (s.charTimes === undefined) return s
+    touched = true
+    const rest = { ...s }
+    delete rest.charTimes
+    return rest
+  })
+  return touched ? out : segments
+}
+
 function round(v: number): number {
   return Number(v.toFixed(3))
 }

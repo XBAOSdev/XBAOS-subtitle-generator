@@ -1915,7 +1915,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const projectSrc = readFileSync(new URL('../src/stores/project.ts', import.meta.url), 'utf8')
   check(
     '识别结果入库前清掉不可见字符',
-    /text: stripInvisible\(msg\.text\)\.trim\(\)/.test(projectSrc),
+    /const text = stripInvisible\(msg\.text\)\.trim\(\)/.test(projectSrc),
     '源头清掉，后面各处就不必各自兜底',
   )
 
@@ -5997,6 +5997,62 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '.gitignore 仍放行说话人分离模型',
     /^!resources\/diarization\/\*\.onnx$/m.test(ignore),
     '拦 *.onnx 的那条会连随包分发的两个模型一起挡掉，打包机就找不到真实文件',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 断句与时间码：切点要落在真实停顿上，时间要来自真实发音
+// ---------------------------------------------------------------------------
+{
+  const engineSrc = readFileSync(new URL('../engine-onnx/src/main.cpp', import.meta.url), 'utf8')
+  const lineWrapSrc = readFileSync(new URL('../src/utils/lineWrap.ts', import.meta.url), 'utf8')
+  const punctSrc = readFileSync(new URL('../src/utils/punctuation.ts', import.meta.url), 'utf8')
+  const opsSrc = readFileSync(new URL('../src/utils/segmentOps.ts', import.meta.url), 'utf8')
+  const projectSrc = readFileSync(new URL('../src/stores/project.ts', import.meta.url), 'utf8')
+
+  check(
+    '引擎把逐字时间轴发出来（charTimes）',
+    /w\.key\("charTimes"\)/.test(engineSrc) && /w\.beginArray\(\)/.test(engineSrc),
+    '渲染层切条时没有逐字时间，就只能拿整句时长按字数摊派，字幕与发音越离越远',
+  )
+  check(
+    '引擎用音频能量把 token 终点钉在人声结束处',
+    /double lastVoicedEnd\(/.test(engineSrc) &&
+      /const double voiced = lastVoicedEnd\(vm, next_start\)/.test(engineSrc),
+    'SenseVoice 只给 token 起点；终点全靠估时，两 token 之间的停顿恒为 0，断句就只剩标点和字数两条腿',
+  )
+  check(
+    '逐字时间只在文本一字未动时采用',
+    /if \(raw\.length !== chars\.length \* 2\) return undefined/.test(opsSrc) &&
+      /if \(cleaned === rawText\) return toSec/.test(opsSrc),
+    '清洗过零宽字符后下标就错了，错位的时间轴比没有更糟',
+  )
+  check(
+    '识别收尾把逐字时间丢掉',
+    /dropCharTimes\(alignOrigin\(wrapped\.segments\)\)/.test(projectSrc),
+    '留着会被撤销栈与草稿各拷一份，而它一旦错位就是全错',
+  )
+  check(
+    '断点打分把真实停顿算进去',
+    /score \+= Math\.min\(pause, 0\.45\) \* 5000/.test(lineWrapSrc) &&
+      /pausesOf\(ct, charAt\)/.test(lineWrapSrc),
+    '切点只按宽度填满必然切在句子中间 —— 一句话的尾巴就是这样被扔到下一条的',
+  )
+  check(
+    '折行拆分的时间取自逐字时间轴',
+    /charSpanOf\(ct, chunkChar\[i\]\.from, chunkChar\[i\]\.to\)/.test(lineWrapSrc),
+    '退回按宽度占比时，语速一快一慢就错开半秒',
+  )
+  check(
+    '标点切分按字符数对齐逐字时间',
+    /raw - 1 === chars \? piece\.to - 1 : -1/.test(punctSrc) && /sliceCharTimes\(source, piece\)/.test(punctSrc),
+  )
+  check(
+    '合并产物按项目名导出',
+    /const name = project\.displayProjectName/.test(
+      readFileSync(new URL('../src/components/dialogs/ExportDialog.vue', import.meta.url), 'utf8'),
+    ),
+    '用户建的项目叫「小包听幕介绍」，导出来却叫「合并时间轴.srt」，还得手工改名',
   )
 }
 

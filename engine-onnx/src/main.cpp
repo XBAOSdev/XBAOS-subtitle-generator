@@ -125,6 +125,19 @@ constexpr double kMaxCueSec = 12.0;   // 单条字幕的最长时长
 constexpr int kMaxCueChars = 42;      // 单条字幕的最多字数（中文按字计）
 
 /*
+ * 按「字幕规格」二次断句交给渲染层做（它知道行宽、词表、禁则）。
+ *
+ * 但渲染层手里只有**整句的起止时间**，按字数切一刀就只能按字数比例把这段
+ * 时间分给两半 —— 谁说话都不按字数匀速，于是每条字幕的时间窗与实际发音
+ * 错开，越靠句子末尾偏得越多。这正是「一句话的尾巴被扔到下一条」的来源。
+ *
+ * 所以引擎把**逐字时间戳**一起发出去（`charTimes`）：渲染层在哪个字上切，
+ * 都能读到那个字的真实起止，时间窗不再靠猜。SenseVoice 是 CTC，时间戳来自
+ * 峰值帧，比字数估算准得多。
+ */
+constexpr double kGapScoreCap = 0.45; // （保留：渲染层打分时同口径的停顿封顶值）
+
+/*
  * token 时长估算：SenseVoice 只给起点（timestamps），没有 durations。
  * 中文正常语速约每秒 4.5 字，即每字 0.22 秒，前面再加一点起音余量。
  */
@@ -184,6 +197,9 @@ struct Cue {
     double logprob_sum = 0.0;
     int token_count = 0;
     int chars = 0;
+    /** 本条覆盖 toks 的 [tok_begin, tok_end)，二次断句时靠它取真实时间 */
+    int tok_begin = 0;
+    int tok_end = 0;
 };
 
 // ---------------------------------------------------------------- 模型路径
@@ -253,9 +269,64 @@ const char *mapLanguage(const std::string &lang) {
 
 // ---------------------------------------------------------------- 识别与分句
 
+/*
+ * 人声边界图：把 Pcm 按 10ms 一帧算能量，给一个「有声 / 静音」阈值。
+ *
+ * 为什么需要它：SenseVoice 的 CTC 时间戳只给 token 的**起点**，终点没有。
+ * 没有终点，两件事都做不好：
+ *   · 每条字幕的结束时间只能按字数估，字幕与发音错开；
+ *   · 「两个 token 之间停顿多久」无从得知，断句只能按标点或字数硬切 ——
+ *     一句话的尾巴被切到下一条，正是这么来的。
+ * 音频里这些都有现成答案：说话的人声在哪儿停，能量就掉下去。把终点钉到
+ * 「该 token 起点之后最后一个有声帧」，停顿自然就算出来了。
+ */
+struct VoiceMap {
+    std::vector<double> rms; // 每 10ms 一帧
+    double threshold = 0.0;
+};
+
+VoiceMap buildVoiceMap(const std::vector<float> &pcm) {
+    VoiceMap vm;
+    const size_t frame = 320; // 20ms @16k
+    const size_t hop = 160;   // 10ms
+    for (size_t pos = 0; pos + frame <= pcm.size(); pos += hop) {
+        double sum = 0.0;
+        for (size_t i = 0; i < frame; i++) sum += (double)pcm[pos + i] * (double)pcm[pos + i];
+        vm.rms.push_back(std::sqrt(sum / (double)frame));
+    }
+    if (vm.rms.empty()) return vm;
+
+    // 阈值口径与 vad.hpp 一致：噪声底（第 20 百分位）×3，且不低于 -55dBFS
+    std::vector<double> sorted(vm.rms);
+    std::nth_element(sorted.begin(), sorted.begin() + (long)(sorted.size() / 5), sorted.end());
+    const double floor_rms = std::max(sorted[sorted.size() / 5] * 3.0, std::pow(10.0, -55.0 / 20.0));
+    vm.threshold = floor_rms;
+    return vm;
+}
+
+/**
+ * 在 `t` 之前最后一段人声的结束时间（秒，块内相对）。
+ *
+ * 往回最多找 0.6 秒；整段都安静就返回 -1。找不到有意义的结果时调用方
+ * 保持原来的估算，不会因此把时间改坏。
+ */
+double lastVoicedEnd(const VoiceMap &vm, double t) {
+    if (vm.rms.empty() || t <= 0.0) return -1.0;
+    const double hop = 0.01;
+    long i = (long)std::floor(t / hop);
+    if (i >= (long)vm.rms.size()) i = (long)vm.rms.size() - 1;
+    for (; i >= 0 && (t - (double)i * hop) <= 0.6; i--) {
+        if (vm.rms[(size_t)i] >= vm.threshold) {
+            const double end = ((double)i + 1.0) * hop + 0.02; // 帧尾 + 一点余量
+            return std::min(t, end);
+        }
+    }
+    return -1.0;
+}
+
 /** 把一次识别的原始 token 整理成可用的时间轴条目 */
 std::vector<TokenItem> collectTokens(const SherpaOnnxOfflineRecognizerResult *r,
-                                     double chunk_len) {
+                                     double chunk_len, const VoiceMap &vm) {
     std::vector<TokenItem> out;
     if (!r || r->count <= 0 || !r->tokens_arr) return out;
 
@@ -274,21 +345,34 @@ std::vector<TokenItem> collectTokens(const SherpaOnnxOfflineRecognizerResult *r,
             item.end = item.start + (double)r->durations[i];
         } else if (item.start >= 0.0) {
             /*
-             * durations 常年为空（SenseVoice 只给起点），这时**不能**像别处那样
-             * 拿「下一个 token 的起点」直接当终点：
-             *   ① 句尾那个 token 的下一个 token 在半秒静音之后，终点被拉到静音
-             *      末尾，字幕在没人说话的地方多停半秒；
-             *   ② 更糟的是相邻 token 的 gap 恒为 0，`gap >= kGapSec` 这条静音
-             *      断句规则**永远不会触发**，只剩标点一条腿走路。
-             * 所以按字数估个时长，再用「下一个 token 起点」封顶：连读时两者几乎
-             * 相等，句尾则取估计值 —— gap 这才恢复真实含义。
+             * durations 常年为空（SenseVoice 只给起点）。终点分两步定：
+             *
+             *   ① 先按字数估一个上限（正常语速每字 0.22 秒）；
+             *   ② 再用**音频能量**把终点钉到「下一个 token 起点之前最后一段
+             *      人声结束的位置」。
+             *
+             * ② 是关键：没有它，连续说话时终点只能取「下一个起点」（gap 恒为 0，
+             * 断句拿不到停顿），或者取估算值（句尾伸进静音里）。有了它，连读段
+             * 落点几乎贴着下一个起点，真有停顿时落点就在人声收尾处 —— 停顿这才
+             * 是可测的量。
              */
             double span = kTokenBaseSec + kCharSec * (double)utf8Len(item.text);
-            if (r->timestamps != nullptr && i + 1 < r->count) {
-                const double avail = (double)r->timestamps[i + 1] - item.start;
-                if (avail > 0.0 && avail < span) span = avail;
+            double end = item.start + span;
+            if (i + 1 < r->count && r->timestamps != nullptr) {
+                const double next_start = (double)r->timestamps[i + 1];
+                if (next_start > item.start) {
+                    const double voiced = lastVoicedEnd(vm, next_start);
+                    /*
+                     * 人声一直持续到下一个 token 开始 → 连读，终点就是下一个起点。
+                     * 这时若用估算值收尾，会在字与字之间留下一个并不存在的「停顿」，
+                     * 断句就会照着这个假停顿乱切。
+                     */
+                    if (voiced > item.start && next_start - voiced < 0.05) end = next_start;
+                    else if (voiced > item.start + 0.02) end = std::min(end, voiced);
+                    else end = std::min(end, next_start);
+                }
             }
-            item.end = item.start + span;
+            item.end = std::max(item.start + 0.02, end);
         } else {
             item.end = -1.0;
         }
@@ -322,12 +406,13 @@ std::vector<Cue> buildCues(const std::vector<TokenItem> &toks, double chunk_offs
     Cue cur;
     bool open = false;
 
-    auto flush = [&]() {
+    auto flush = [&](int end_index) {
         if (!open) return;
         // 收尾时去掉首尾空白，避免字幕条两端出现空隙
         while (!cur.text.empty() && (cur.text.front() == ' ' || cur.text.front() == '\t')) {
             cur.text.erase(cur.text.begin());
         }
+        cur.tok_end = end_index;
         if (!cur.text.empty() && utf8Len(cur.text) > 0) cues.push_back(cur);
         open = false;
     };
@@ -342,6 +427,7 @@ std::vector<Cue> buildCues(const std::vector<TokenItem> &toks, double chunk_offs
             cur.logprob_sum = t.logprob;
             cur.token_count = 1;
             cur.chars = utf8Len(t.text);
+            cur.tok_begin = (int)i;
             open = true;
             continue;
         }
@@ -352,7 +438,7 @@ std::vector<Cue> buildCues(const std::vector<TokenItem> &toks, double chunk_offs
         const bool soft_break = isClauseEnd(cur.text) && cur.chars >= 12;
 
         if (isSentenceEnd(cur.text) || gap >= kGapSec || too_long || soft_break) {
-            flush();
+            flush((int)i);
             cur = Cue{};
             cur.start = t.start;
             cur.end = t.end;
@@ -360,6 +446,7 @@ std::vector<Cue> buildCues(const std::vector<TokenItem> &toks, double chunk_offs
             cur.logprob_sum = t.logprob;
             cur.token_count = 1;
             cur.chars = utf8Len(t.text);
+            cur.tok_begin = (int)i;
             open = true;
         } else {
             cur.text += t.text;
@@ -369,7 +456,7 @@ std::vector<Cue> buildCues(const std::vector<TokenItem> &toks, double chunk_offs
             cur.chars += utf8Len(t.text);
         }
     }
-    flush();
+    flush((int)toks.size());
 
     // 加块偏移并夹进本块范围：跨块越界会让渲染层把整条往后推，逐块累积成系统偏移
     for (auto &c : cues) {
@@ -485,7 +572,7 @@ std::vector<TokenItem> recognizeChunk(const std::vector<float> &samples) {
     const SherpaOnnxOfflineRecognizerResult *r = SherpaOnnxGetOfflineStreamResult(stream);
     if (r != nullptr) {
         const double chunk_len = (double)samples.size() / 16000.0;
-        out = collectTokens(r, chunk_len);
+        out = collectTokens(r, chunk_len, buildVoiceMap(samples));
         SherpaOnnxDestroyOfflineRecognizerResult(r);
     }
     SherpaOnnxDestroyOfflineStream(stream);
@@ -625,6 +712,27 @@ void cmdTranscribe(const mj::Value &req, int64_t id) {
             w.key("relStart").value(c.start - ss);
             w.key("relEnd").value(c.end - ss);
             w.key("text").value(c.text);
+            /*
+             * 逐字时间轴：`[起, 止, 起, 止, …]`（毫秒，绝对时间）。
+             *
+             * 渲染层按字幕规格切条时，切在第几个字就从这里读那个字的真实
+             * 起止 —— 不再拿「整句时长 ÷ 字数」摊派。这是时间码能对上的前提。
+             * 一个 token 含多个字时按字均分，token 内部不会成为切点（切点两侧
+             * 至少各留一个字，见渲染层的断点打分）。
+             */
+            w.key("charTimes");
+            w.beginArray();
+            for (int ti = c.tok_begin; ti < c.tok_end; ti++) {
+                const TokenItem &tk = toks[(size_t)ti];
+                const int n = utf8Len(tk.text);
+                if (n <= 0) continue;
+                const double step = (tk.end - tk.start) / (double)n;
+                for (int k = 0; k < n; k++) {
+                    w.value((int64_t)std::llround((tk.start + step * k + ss) * 1000.0));
+                    w.value((int64_t)std::llround((tk.start + step * (k + 1) + ss) * 1000.0));
+                }
+            }
+            w.endArray();
             // CTC 没有 no_speech 概率，留 0；置信度走 avgLogprob
             w.key("noSpeech").value(0.0);
             w.key("avgLogprob").value(c.token_count > 0 ? c.logprob_sum / (double)c.token_count : 0.0);
