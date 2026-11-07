@@ -20,7 +20,7 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -140,11 +140,22 @@ function stopManifestServer() {
 
 const manifestUrl = () => `http://127.0.0.1:${manifest.port}/data/subtitle.json`
 
+/**
+ * 假清单里「更新的那个版本」。
+ *
+ * 不能写死：写死之后每次升版都会让这一组断言集体失败 —— 主进程有一条正确行为是
+ * 「清单版本比本机低就按已是最新处理」（用户装了更新版时不该被提示降级），
+ * 于是应用一过这个写死的号，`state` 就永远是 `latest`，`notes` / `releaseTitle`
+ * 也按设计不返回。所以按当前版本往上抬一个大版本号，永远比本机新。
+ */
+const APP_VERSION = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version
+const MOCK_VERSION = `${Number(APP_VERSION.split(/[.-]/)[0]) + 1}.0.0`
+
 /** 造一份形状与线上一致的清单；只覆盖关心的字段 */
 const makeManifest = (over = {}) => ({
   schema: 1,
   id: 'subtitle-generator',
-  latest: '0.9.9',
+  latest: MOCK_VERSION,
   name: 'XBAOS 字幕生成器',
   summary: '本地离线的音频转字幕工具',
   channel: 'stable',
@@ -153,7 +164,7 @@ const makeManifest = (over = {}) => ({
   download: { label: '第三方网盘下载', url: 'https://example.com/xbaos-subtitle' },
   releases: [
     {
-      version: '0.9.9',
+      version: MOCK_VERSION,
       date: '2026-11-01',
       title: '探针专用版本',
       items: ['探针第一条变更', '探针第二条变更'],
@@ -433,7 +444,18 @@ const scenarios = {
   async info({ cdp }) {
     const info = await cdp.evaluate(`window.xbaos.info()`)
     check('app:info 可用', !!info, `版本 ${info?.version}`)
-    check('引擎文件已定位', info?.engine?.available === true, `${info?.engine?.source}: ${info?.engine?.exe}`)
+    /*
+     * 两套引擎各自就位。这里原来断言的是 `info.engine`（单引擎时代的字段），
+     * 双引擎之后主进程返回的是 `info.engines[arch]`，旧断言永远拿不到值。
+     */
+    const engines = info?.engines ?? {}
+    check(
+      '两套引擎文件都已定位',
+      engines.whisper?.available === true && engines.sherpa?.available === true,
+      Object.entries(engines)
+        .map(([k, v]) => `${k}=${v?.available ? v.exe : '缺失'}`)
+        .join(' | '),
+    )
     check('Electron 版本已知', !!info?.electron, `Electron ${info?.electron} / Chromium ${info?.chrome}`)
     check('模型目录已知', !!info?.modelsDir, info?.modelsDir)
   },
@@ -645,13 +667,19 @@ const scenarios = {
       const project = pinia.get('project')
       const before = project.files.length
       const n = await project.addFilesFromPaths([${JSON.stringify(wav)}])
-      const file = project.files[project.files.length - 1]
-      if (!file) return { added: n, before }
+      if (n === 0) return { added: 0, before }
       void project.startRecognition()
       const t0 = Date.now()
       while (project.recognizing && Date.now() - t0 < 180000) {
         await new Promise((resolve) => setTimeout(resolve, 500))
       }
+      /*
+       * 条目要在识别**之后**取：新导入先落 intake，识别完 landBatch 才成为项目里的
+       * 子项目。识别之前 files 里还是空的（原来在这里取，拿到 undefined，
+       * 后面每条断言都跟着塌）。
+       */
+      const file = project.files[project.files.length - 1]
+      if (!file) return { added: n, before, landed: project.files.length }
       await project.ensureMedia(file.id)
       const m = project.media.get(file.id)
       return {
@@ -1477,7 +1505,7 @@ const scenarios = {
       up?.ok === true && up?.state === 'update',
       JSON.stringify(up).slice(0, 140),
     )
-    check('解析出新版本号', up?.latest === '0.9.9', String(up?.latest))
+    check('解析出新版本号', up?.latest === MOCK_VERSION, String(up?.latest))
     check('带上更新条目', Array.isArray(up?.notes) && up.notes.length === 2, `notes=${up?.notes?.length}`)
     check('带上官网地址', up?.homepage === 'https://subtitle.xbaos.com.cn', String(up?.homepage))
     check('带上版本标题与变更概要', !!up?.releaseTitle && !!up?.highlight, `${up?.releaseTitle} / ${up?.highlight}`)
@@ -1585,10 +1613,10 @@ const scenarios = {
           manifest.requests[0] ?? '(没有请求)',
         )
         check('关于页状态显示发现新版本', shown?.stateClass === 'new', `${shown?.stateClass} ${shown?.map?.['状态']}`)
-        check('关于页最新版本一栏显示清单里的版本', shown?.map?.['最新版本'] === 'v0.9.9', String(shown?.map?.['最新版本']))
+        check('关于页最新版本一栏显示清单里的版本', shown?.map?.['最新版本'] === `v${MOCK_VERSION}`, String(shown?.map?.['最新版本']))
         check(
           '左下角同步出现更新提示',
-          !!shown?.hint && shown.hint.includes('0.9.9'),
+          !!shown?.hint && shown.hint.includes(MOCK_VERSION),
           shown?.hint ?? '没有提示条',
         )
         await shot(cdp, 'electron-update.png')

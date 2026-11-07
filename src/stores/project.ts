@@ -9,6 +9,7 @@ import type {
   SegmentIssue,
   SubtitleSegment,
 } from '@/types'
+import type { EngineSegment } from '@/types/engine'
 import { makeAudioFile, mockFiles } from '@/mock/mockData'
 import { extOf, isSupported, unsupportedReason, isSubtitleExt } from '@/utils/formats'
 import { parseSubtitle } from '@/utils/subtitleParse'
@@ -2524,6 +2525,16 @@ const MIME_BY_EXT: Record<string, string> = {
 
         // 每一遍的结果都留下来，跑完统一整合（见 utils/transcriptMerge.ts）
         const runs: RecognitionRun[] = []
+        // 引擎段 → 界面段。主识别与低置信复核都用它，id 里的下标按各自批次算
+        const toSegment = (msg: EngineSegment, i: number): SubtitleSegment => ({
+          id: `seg_${Date.now().toString(36)}_${i.toString(36)}`,
+          start: msg.start,
+          end: msg.end,
+          text: msg.text.trim(),
+          origin: msg.text.trim(),
+          issues: [],
+          avgLogprob: msg.avgLogprob,
+        })
         // 深度模式的第二遍起改用「带精选词」的提示词
         let runPrompt = basePrompt
         let lastResult: Awaited<ReturnType<typeof engine.transcribe>> | null = null
@@ -2549,8 +2560,15 @@ const MIME_BY_EXT: Record<string, string> = {
           progressStalled.value = true
           lastProgressAt = performance.now()
 
-          // 每个文件每一遍开一个段收集器：流式 segment 用于收集结果，
-          // 引擎 done 不回传段落明细
+          /*
+           * 段落收集器。
+           *
+           * 流式 `segment` 只用来「边跑边看」，**正确性不靠它**：`done` 的返回
+           * 与流式消息是两路排队的，实测出现过「返回先到、后面几段 segment 后到」
+           * 的次序问题 —— 监听已解绑，那几段就静默消失（一条 15 秒音频只剩第一句）。
+           * 主进程会把本次全部段落随返回值一起交回（`result.segments`），
+           * 下面优先用它，流式的内容只在老版本主进程时才回退使用。
+           */
           const collected: SubtitleSegment[] = []
 
           const off = engine.onStream(({ taskId, msg }) => {
@@ -2558,15 +2576,7 @@ const MIME_BY_EXT: Record<string, string> = {
             if (msg.type === 'segment') {
               const text = msg.text.trim()
               if (!text) return
-              collected.push({
-                id: `seg_${Date.now().toString(36)}_${collected.length.toString(36)}`,
-                start: msg.start,
-                end: msg.end,
-                text,
-                origin: text,
-                issues: [],
-                avgLogprob: msg.avgLogprob,
-              })
+              collected.push(toSegment(msg, collected.length))
             } else if (msg.type === 'fallback') {
               ui.notify('warning', 'GPU 加速不可用，已回退到 CPU', msg.reason)
             }
@@ -2614,13 +2624,40 @@ const MIME_BY_EXT: Record<string, string> = {
           }
 
           lastResult = result
+
+          /*
+           * 段落以返回值为准；流式收到的只作兜底。
+           *
+           * `result.segments` 是主进程逐条攒下来的权威副本，长度必然等于引擎
+           * 实际吐出的段数。流式通道可能因为时序（返回先到、监听已解绑）少几段，
+           * 一旦少了，用户看到的就是「这段音频没字幕」。
+           */
+          const authoritative = Array.isArray(result.segments) ? result.segments : null
+          const picked: SubtitleSegment[] = authoritative
+            ? authoritative
+                .filter((m) => typeof m.text === 'string' && m.text.trim() !== '')
+                .map((m, i) => toSegment(m, i))
+            : collected
+
+          /*
+           * 兜底的兜底：引擎报了 N 段，但两路拿到的都少于 N，说明确实丢了。
+           * 这种情况不能装作没发生 —— 少于实际段数的字幕会让用户以为音频被漏掉，
+           * 却完全不知道该怀疑哪里。留一条 warn，日志气泡里能看见。
+           */
+          if (typeof result.count === 'number' && picked.length < result.count) {
+            logs.push(
+              'warn',
+              `${file.name}：引擎报告 ${result.count} 段，只收到 ${picked.length} 段，可能有内容未落地`,
+            )
+          }
+
           logs.push(
             'info',
-            `${file.name}：第 ${k + 1} 遍完成，${result.count ?? collected.length} 条，音频 ${Math.round(result.duration ?? 0)} 秒，引擎耗时 ${((result.elapsed ?? 0) / 1000).toFixed(1)} 秒`,
+            `${file.name}：第 ${k + 1} 遍完成，${picked.length} 条，音频 ${Math.round(result.duration ?? 0)} 秒，引擎耗时 ${((result.elapsed ?? 0) / 1000).toFixed(1)} 秒`,
           )
           runs.push({
             temperature: preset.temperatures[k] ?? 0,
-            segments: collected,
+            segments: picked,
             stats: {
               avgLogprob: result.avgLogprob,
               noSpeechRatio: result.noSpeechRatio,
@@ -2689,8 +2726,9 @@ const MIME_BY_EXT: Record<string, string> = {
               })
             })
 
+            let rescueResult
             try {
-              await engine.transcribe({
+              rescueResult = await engine.transcribe({
                 taskId: currentTaskId.value,
                 audio: file.path,
                 model: settings.modelFile || undefined,
@@ -2707,8 +2745,15 @@ const MIME_BY_EXT: Record<string, string> = {
               rescueActive = false
             }
 
-            if (!cancelRequested && rescued.length > 0) {
-              const applied = applyRescue(chosen.segments, rescued, ranges)
+            // 与主识别同一条规矩：段数以返回值为准，流式的只兜底
+            const rescuedFinal = Array.isArray(rescueResult?.segments)
+              ? rescueResult.segments
+                  .filter((m) => typeof m.text === 'string' && m.text.trim() !== '')
+                  .map((m, i) => toSegment(m, i))
+              : rescued
+
+            if (!cancelRequested && rescuedFinal.length > 0) {
+              const applied = applyRescue(chosen.segments, rescuedFinal, ranges)
               if (applied.replaced > 0) chosen.segments = applied.segments
             }
           }
@@ -3134,12 +3179,16 @@ const MIME_BY_EXT: Record<string, string> = {
     // 音频进识别队列，字幕文件解析后直接进编辑器。
     const accepted: string[] = []
     const subtitles: string[] = []
+    const projects: string[] = []
     const rejected: { name: string; ext: string; reason: string }[] = []
 
     for (const file of list) {
       const realPath = bridge.pathForFile(file)
       if (!realPath) continue
-      if (isSubtitleExt(extOf(file.name))) {
+      if (isProjectPath(realPath)) {
+        // 拖进一个 `.xbsgp` 就是「打开这个项目」，不该报「格式不支持」
+        projects.push(realPath)
+      } else if (isSubtitleExt(extOf(file.name))) {
         subtitles.push(realPath)
       } else if (isSupported(file.name)) {
         accepted.push(realPath)
@@ -3152,6 +3201,14 @@ const MIME_BY_EXT: Record<string, string> = {
       }
     }
 
+    // 一次拖多个项目文件时只开第一个：开一串窗口没人看得懂要哪一个
+    if (projects.length > 0) {
+      if (recognizing.value) {
+        ui.notify('warning', '正在识别，完成后再打开', `${nameOf(projects[0])} 先等这一批识别跑完`)
+      } else {
+        void openProject(projects[0])
+      }
+    }
     if (accepted.length > 0) void addFilesFromPaths(accepted)
     for (const p of subtitles) void addSubtitleFromPath(p)
     if (rejected.length > 0) ui.openDialog('unsupported-format', { items: rejected })
@@ -3434,7 +3491,40 @@ const MIME_BY_EXT: Record<string, string> = {
         ? `${doc.project.name}：${items.length} 个子项目，其中 ${bad} 个的音频对不上`
         : `${doc.project.name}：${items.length} 个子项目`,
     )
+    /*
+     * 打开就进工作台。
+     *
+     * 用户点「打开项目」要的就是接着编，停在导入页等于让他再找一个入口；
+     * 双击 `.xbsgp`、拖文件进来也走这条路，同样该直接落到字幕上。
+     * 空项目（0 个子项目）例外：进去只有一片空态，没有意义。
+     */
+    if (items.length > 0) ui.navigate('editor')
     return true
+  }
+
+  /**
+   * 打开「双击 / 拖进来」的那个项目。
+   *
+   * 识别中**拒绝**：正在跑的那一批属于当前项目，这时候换项目会让任务归属
+   * 错乱（结果落到别人头上）。宁可让它等，也不要在用户不知情时切开。
+   *
+   * 路径取完即清，所以这里无论成功、失败、被拒绝，都不会残留一个「下次
+   * 打开还冒出来」的幽灵。
+   */
+  async function openPendingProject(): Promise<boolean> {
+    const ui = useUiStore()
+    const bridge = window.xbaos
+    const pending = await bridge?.project?.takePending?.()
+    if (!pending) return false
+    if (recognizing.value) {
+      ui.notify(
+        'warning',
+        '正在识别，完成后再打开',
+        `${nameOf(pending)} 先等这一批识别跑完，双击它就能打开`,
+      )
+      return false
+    }
+    return openProject(pending)
   }
 
   /** 改项目名。已有文件的要同步改磁盘文件名，失败则整次回滚 */
@@ -3594,6 +3684,7 @@ const MIME_BY_EXT: Record<string, string> = {
     saveProject,
     saveProjectTo,
     openProject,
+    openPendingProject,
     renameProject,
     hasProjectContent,
   }

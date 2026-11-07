@@ -137,6 +137,13 @@ export interface EngineStatusResult {
 export interface TranscribeResult extends Partial<Omit<EngineDone, 'id' | 'type'>> {
   ok: boolean
   taskId: string
+  /**
+   * 本次识别的**全部段落**，由主进程随返回值一起交回。
+   *
+   * 流式 `segment` 消息与这个返回值是两路排队的，可能后到；只靠流式收集
+   * 会在「返回先到」时丢掉后面几段。界面的入库逻辑以这里为准。
+   */
+  segments?: EngineSegment[]
   /** 端到端耗时（含进程间往返），秒 */
   wallMs?: number
   canceled?: boolean
@@ -543,6 +550,13 @@ export interface XbaosBridge {
     pickSave: (options?: { defaultName?: string; defaultDir?: string }) => Promise<string | null>
     /** 打开对话框，只列 `.xbsgp` */
     pickOpen: () => Promise<string | null>
+    /**
+     * 取走「等着被打开」的项目路径（双击 `.xbsgp` 时由主进程暂存）。
+     * 取完即清，重复调用拿到 null。
+     */
+    takePending: () => Promise<string | null>
+    /** 有新的待打开项目时收到通知，随后调用 `takePending()` 取走 */
+    onPending: (cb: () => void) => () => void
     /**
      * 写盘。
      * `allowOverwrite` 为 false 时，目标已存在直接拒绝（`code: 'exists'`）——

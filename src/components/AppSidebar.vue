@@ -40,7 +40,10 @@ const items = computed<NavItem[]>(() => [
     key: 'editor',
     icon: 'list',
     label: t('nav.editor'),
-    badge: project.files.length || undefined,
+    // 角标报**全部项目**的子项目数：这一栏在界面最外层，说的是「整个软件里
+    // 有多少条」。只看当前项目的话，切一下项目数字就变，且刚识别完的一批
+    // 会顶掉原来的数，看起来像「新识别了几条」而不是「一共有几条」
+    badge: project.allFiles || undefined,
   },
   { key: 'models', icon: 'cpu', label: t('nav.models') },
   { key: 'settings', icon: 'settings', label: t('nav.settings') },

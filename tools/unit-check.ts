@@ -5815,5 +5815,36 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
 }
 
+/* ------------------------------------- 第 10 轮：识别段落的权威来源 */
+
+{
+  const read = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const proj = read('src/stores/project.ts')
+  const mainSrc = read('electron/main.js')
+  const engineTypes = read('src/types/engine.ts')
+
+  check(
+    '主进程把本次全部段落随返回值交回',
+    /const segments = \[\]/.test(mainSrc) &&
+      /if \(msg\.type === 'segment'\) segments\.push\(msg\)/.test(mainSrc) &&
+      /return \{ \.\.\.done, segments \}/.test(mainSrc),
+    '只靠 engine:stream 时，done 的返回可能先于后面几段到达 → 监听已解绑，那几段静默丢失',
+  )
+  check(
+    '渲染层以返回值里的段落为准（流式只兜底）',
+    /const authoritative = Array\.isArray\(result\.segments\)/.test(proj) &&
+      /: collected\b/.test(proj),
+    '一条 15 秒音频只剩第一句，就是这个回落',
+  )
+  check(
+    '段数少于引擎报告时留一条 warn，不静默',
+    /picked\.length < result\.count/.test(proj),
+  )
+  check(
+    'TranscribeResult 声明了 segments',
+    /segments\?: EngineSegment\[\]/.test(engineTypes),
+  )
+}
+
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 process.exit(fail > 0 ? 1 : 0)

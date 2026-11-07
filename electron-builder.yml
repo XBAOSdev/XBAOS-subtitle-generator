@@ -74,6 +74,29 @@ win:
   requestedExecutionLevel: asInvoker
   legalTrademarks: XBAOS
 
+# `.xbsgp` 双击打开。
+#
+# 关联由 NSIS 在安装时写入 HKCU（perMachine: false，不需要管理员权限），
+# 卸载时由同一条安装脚本删掉它自己写的那几个键 —— 只碰
+# `Software\Classes\.xbsgp` 与本 ProgID，不会去动别人注册的扩展名。
+#
+# 注意：注册表只解决「双击用什么打开」。Windows 8 以后还有一层
+# UserChoice（每个用户的默认程序），所以**第一次**双击仍可能弹出
+# 「你要如何打开」，用户勾一次「始终使用」才会一路直开 —— 这是系统
+# 的防劫持机制，任何安装器都绕不过。
+#
+# 卸载侧的清理：builder 自带的那条宏只删 ProgID 与 OpenWithProgids 里的值，
+# 留下 `Software\Classes\.xbsgp` 这个键（默认值指着已删掉的 ProgID）。
+# 补的那一刀在 build/installer.nsh（`customUnInstall`），builder 会自动把它
+# 作为 include 装进安装脚本，不需要在这里声明。
+fileAssociations:
+  - ext: xbsgp
+    # ProgID。用点分 ASCII，不用中文，避免某些工具按 ANSI 读到乱码
+    name: XBAOS.SubtitleProject
+    description: XBAOS 字幕生成器项目
+    icon: build/icon.ico
+    role: Editor
+
 nsis:
   oneClick: false
   perMachine: false

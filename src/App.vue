@@ -545,6 +545,8 @@ watch(
 let offCloseRequest: (() => void) | undefined
 /** 引擎日志：攒在 logs store 里，底栏进度区悬停时摊给用户看 */
 let offEngineLog: (() => void) | undefined
+/** 双击 `.xbsgp` 的「有项目待打开」通知 */
+let offProjectPending: (() => void) | undefined
 
 onMounted(() => {
   // 先套主题：附属窗口（辅助 / 录音）在这一行之后就返回了，它们同样要认 `?theme=`
@@ -598,6 +600,16 @@ onMounted(() => {
   offEngineLog = window.xbaos?.engine?.onLog(({ level, text }) => {
     logs.push(level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info', text)
   })
+
+  /*
+   * 双击 `.xbsgp` 打开项目。
+   *
+   * 两条路都要接：冷启动时参数在窗口加载前就到了（主进程存着，这里取一次），
+   * 已经在跑时主进程会推一条通知（同样走 takePending 取走，取完即清，
+   * 所以两条路同时存在也不会打开两次）。
+   */
+  offProjectPending = window.xbaos?.project?.onPending(() => void project.openPendingProject())
+  void project.openPendingProject()
 })
 
 onBeforeUnmount(() => {
@@ -607,6 +619,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('drop', onDrop)
   offAssistResult?.()
   offEngineLog?.()
+  offProjectPending?.()
   offAssistClosed?.()
   offRecordSaved?.()
   offRecordClosed?.()

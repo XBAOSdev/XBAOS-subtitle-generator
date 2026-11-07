@@ -149,6 +149,13 @@ contextBridge.exposeInMainWorld('xbaos', {
   project: {
     pickSave: (options) => ipcRenderer.invoke('project:pickSave', options),
     pickOpen: () => ipcRenderer.invoke('project:pickOpen'),
+    /**
+     * 取走「等着被打开」的项目路径（双击 `.xbsgp` 产生）。
+     * 取完即清，重复调用拿到 null。
+     */
+    takePending: () => ipcRenderer.invoke('project:takePending'),
+    /** 有新的待打开项目时收到通知，随后应调用 takePending() 取走 */
+    onPending: (cb) => subscribe('project:open-pending', cb),
     write: (p, content, allowOverwrite) =>
       ipcRenderer.invoke('project:write', p, content, allowOverwrite),
     rename: (from, to) => ipcRenderer.invoke('project:rename', from, to),

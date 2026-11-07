@@ -326,12 +326,20 @@ body.is-dragging {
   align-items: stretch;
 }
 
-.btngroup > .btn:first-child {
+/*
+ * 切割圆角只在**真的有两个按钮**时做。
+ *
+ * `:first-child` / `:last-child` 会同时命中唯一那个按钮（既首又尾），
+ * 左右圆角一起被清零 —— 结果就是「保存项目」时不时变成方块。
+ * 只要出现第二个按钮（有多个项目待保存时那个小三角），它又变回圆角，
+ * 所以看起来像「有一定概率」。加 `:not()` 把单按钮的情形排除掉。
+ */
+.btngroup > .btn:first-child:not(:last-child) {
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
 }
 
-.btngroup > .btn:last-child {
+.btngroup > .btn:last-child:not(:first-child) {
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
   margin-left: -1px;

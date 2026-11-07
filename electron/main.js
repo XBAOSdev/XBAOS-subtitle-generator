@@ -1178,6 +1178,44 @@ function send(channel, payload) {
   }
 }
 
+/* -------------------------------------------------- 双击 .xbsgp 打开项目 */
+
+/**
+ * 待打开的项目路径（双击文件、把文件拖到快捷方式、或第二个实例被唤起时产生）。
+ *
+ * 为什么用「主进程存一份 + 渲染进程来取」而不是直接 `send`：
+ * 冷启动双击文件时，命令行参数在窗口还没加载完就到了 —— 那一刻 `send`
+ * 出去的消息没人收，直接丢掉。存着让人来取，两种时机就都覆盖了：
+ *   · 已经在跑 → 收到 `project:open-pending` 通知立刻来取；
+ *   · 刚启动   → 渲染进程挂载完成后自己来取。
+ */
+let pendingProjectPath = null
+
+/**
+ * 从命令行参数里挑出项目文件。
+ *
+ * **按后缀挑，不按位置挑**：开发模式下参数里混着 `.`、`--remote-debugging-port`
+ * 之类的东西，按下标取必然取错。同理，用户多选几个文件一起双击时也只能认一个。
+ */
+function projectPathFromArgv(argv) {
+  if (!Array.isArray(argv)) return null
+  for (const arg of argv) {
+    if (typeof arg !== 'string') continue
+    if (arg.startsWith('-')) continue
+    if (/\.xbsgp$/i.test(arg)) return arg
+  }
+  return null
+}
+
+/** 记下要打开的项目，并叫渲染进程来取（窗口不在时靠它自己挂载后来取） */
+function queueProjectOpen(pathArg) {
+  if (!pathArg) return
+  pendingProjectPath = pathArg
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('project:open-pending')
+  }
+}
+
 // ------------------------------------------------------------------ IPC
 
 function registerIpc() {
@@ -1511,6 +1549,18 @@ function registerIpc() {
       filters: [{ name: '字幕项目', extensions: [PROJECT_EXT] }],
     })
     return result.canceled ? null : result.filePaths[0] ?? null
+  })
+
+  /**
+   * 取走「等着被打开」的项目路径（取完即清）。
+   *
+   * 渲染进程挂载后来取一次、收到 `project:open-pending` 时再来取一次，
+   * 两条路共用这一个入口，不会重复打开同一个文件。
+   */
+  ipcMain.handle('project:takePending', () => {
+    const picked = pendingProjectPath
+    pendingProjectPath = null
+    return picked
   })
 
   /*
@@ -1970,7 +2020,17 @@ function registerIpc() {
         })
       }
 
-      return client.transcribe(
+      /*
+       * 段落的**权威副本**在这里攒一份，随返回值一起交回渲染进程。
+       *
+       * 为什么不只靠 `engine:stream`：那是「边跑边显示」的通道，渲染进程
+       * 收到 `done` 之后就会把监听解绑。两路消息是分别排队送进渲染进程的，
+       * 实测出现过「`done` 的返回先于后面几段 segment 到达」的次序问题 ——
+       * 结果就是一条 15 秒的音频只留下第一句，其余全部静默丢失（用户看到
+       * 的「这段音频被漏掉了」）。把段落塞进返回值，正确性就不再依赖时序。
+       */
+      const segments = []
+      const done = await client.transcribe(
         {
           audio: opts.audio,
           language: opts.language,
@@ -1985,11 +2045,13 @@ function registerIpc() {
           normalize: opts.normalize,
         },
         (msg) => {
+          if (msg.type === 'segment') segments.push(msg)
           if (msg.type === 'progress' || msg.type === 'segment') {
             send('engine:stream', { taskId, msg })
           }
         },
       )
+      return { ...done, segments }
     }
 
     activeTask = { id: taskId, canceled: false }
@@ -2169,10 +2231,13 @@ function registerIpc() {
 
 // -------------------------------------------------------------- 生命周期
 
-app.on('second-instance', () => {
+app.on('second-instance', (_event, argv) => {
   if (!mainWindow) return
   if (mainWindow.isMinimized()) mainWindow.restore()
   mainWindow.focus()
+  // 双击第二个 `.xbsgp` 时，Windows 会再起一个进程；它拿不到单实例锁就退出，
+  // 参数由这里接住 —— 不接的话现象就是「双击了，软件只是跳到前台，什么都没开」
+  queueProjectOpen(projectPathFromArgv(argv))
 })
 
 app.whenReady().then(async () => {
@@ -2185,6 +2250,11 @@ app.whenReady().then(async () => {
 
   registerIpc()
   createWindow()
+  /*
+   * 冷启动就是「双击了一个 .xbsgp」：把路径存进待打开槽位。
+   * 此刻窗口还没加载完，消息发不出去，等渲染进程挂载后自己来取。
+   */
+  queueProjectOpen(projectPathFromArgv(process.argv))
   // 系统声音采集必须先把 handler 挂上：不挂的话 getDisplayMedia() 会弹
   // Electron 自带的「选择要共享的内容」窗口。
   installDisplayMediaHandler()
