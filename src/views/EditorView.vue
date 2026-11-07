@@ -629,100 +629,109 @@ async function saveInPlace(): Promise<void> {
         <SubtitleTable />
       </div>
 
-      <aside class="editor__side scroll-y">
-        <AudioPlayer />
-        <hr class="divider" />
-        <ToolPanel />
-
-        <!-- AI 功能：与「讲话人」分开成组，两个入口都靠剪贴板中转 -->
-        <hr class="divider" />
-        <div class="aiside">
-          <div class="aiside__head">
-            <span class="aiside__title">AI 功能</span>
-          </div>
-          <div class="aiside__row">
-            <button
-              class="btn btn--ai"
-              type="button"
-              :disabled="!canAiReview"
-              :title="
-                canAiReview
-                  ? '交给网页版 AI 助手校对。经剪贴板中转，软件不代你发送'
-                  : '当前没有可校对的字幕'
-              "
-              @click="openAiReview"
-            >
-              <Icon name="spell-check" :size="14" />
-              <span>AI 校对</span>
-            </button>
-            <button
-              class="btn btn--ai"
-              type="button"
-              :disabled="!canAiTranslate"
-              :title="
-                canAiTranslate
-                  ? '交给网页版 AI 助手翻译成其他语言。经剪贴板中转，软件不代你发送'
-                  : '当前没有可翻译的字幕'
-              "
-              @click="openAiTranslate"
-            >
-              <Icon name="globe" :size="14" />
-              <span>AI 翻译</span>
-            </button>
-          </div>
-
-          <!-- 引导放在按钮下方、随内容走：侧栏只有 232px，浮层压不住也不该压住别的面板 -->
-          <div v-if="showAiTip" class="aitip" role="note">
-            <p class="aitip__text">AI 校对能减少识别里的小错误。</p>
-            <div class="aitip__acts">
-              <button class="aitip__never" type="button" @click="muteAiTip">不再提示</button>
-              <button
-                class="aitip__close"
-                type="button"
-                aria-label="关闭提示"
-                @click="closeAiTip"
-              >
-                <Icon name="x" :size="11" />
-              </button>
-            </div>
-          </div>
+      <aside class="editor__side">
+        <!--
+          播放控制区**不在滚动区里**：它是这一列的第一段，天生固定。
+          以前用 sticky 压在滚动内容上，顶边和右边会露出底下的颜色（滚动条还从旁边穿过）；
+          改成两段之后，滚动只发生在下面那一段，边界由布局给定，不靠浮层盖。
+        -->
+        <div class="editor__side-top">
+          <AudioPlayer />
         </div>
 
-        <!-- 讲话人：只有当前文件真的有讲话人（或手动新增过）时才出现，自带上方分隔线 -->
-        <SpeakerPanel />
-        <hr class="divider" />
+        <div class="editor__side-scroll scroll-y">
+          <ToolPanel />
 
-        <div class="issues">
-          <div class="issues__head">
-            <span class="issues__title">校验结果</span>
-            <span class="issues__count">
-              {{
-                issues.length > 0
-                  ? `${issues.length} 条待处理`
-                  : '未发现问题'
-              }}
-            </span>
+          <!-- AI 功能：与「讲话人」分开成组，两个入口都靠剪贴板中转 -->
+          <hr class="divider" />
+          <div class="aiside">
+            <div class="aiside__head">
+              <span class="aiside__title">AI 功能</span>
+            </div>
+            <div class="aiside__row">
+              <button
+                class="btn btn--ai"
+                type="button"
+                :disabled="!canAiReview"
+                :title="
+                  canAiReview
+                    ? '交给网页版 AI 助手校对。经剪贴板中转，软件不代你发送'
+                    : '当前没有可校对的字幕'
+                "
+                @click="openAiReview"
+              >
+                <Icon name="spell-check" :size="14" />
+                <span>AI 校对</span>
+              </button>
+              <button
+                class="btn btn--ai"
+                type="button"
+                :disabled="!canAiTranslate"
+                :title="
+                  canAiTranslate
+                    ? '交给网页版 AI 助手翻译成其他语言。经剪贴板中转，软件不代你发送'
+                    : '当前没有可翻译的字幕'
+                "
+                @click="openAiTranslate"
+              >
+                <Icon name="globe" :size="14" />
+                <span>AI 翻译</span>
+              </button>
+            </div>
+
+            <!-- 引导放在按钮下方、随内容走：侧栏只有 232px，浮层压不住也不该压住别的面板 -->
+            <div v-if="showAiTip" class="aitip" role="note">
+              <p class="aitip__text">AI 校对能减少识别里的小错误。</p>
+              <div class="aitip__acts">
+                <button class="aitip__never" type="button" @click="muteAiTip">不再提示</button>
+                <button
+                  class="aitip__close"
+                  type="button"
+                  aria-label="关闭提示"
+                  @click="closeAiTip"
+                >
+                  <Icon name="x" :size="11" />
+                </button>
+              </div>
+            </div>
           </div>
 
-          <ul v-if="issues.length > 0" class="issues__list">
-            <li v-for="item in issues.slice(0, 12)" :key="item.seg.id">
-              <button
-                class="issues__row"
-                type="button"
-                @click="gotoSegment(item.seg.id, item.seg.start)"
-              >
-                <span
-                  class="issues__dot"
-                  :class="`issues__dot--${item.seg.issues[0].level}`"
-                />
-                <span class="issues__index mono">#{{ item.index + 1 }}</span>
-                <span class="issues__text">{{ item.seg.issues[0].message }}</span>
-              </button>
-            </li>
-            <li v-if="issues.length > 12" class="issues__more">
-              还有 {{ issues.length - 12 }} 条未列出
-            </li>
-          </ul>
+          <!-- 讲话人：只有当前文件真的有讲话人（或手动新增过）时才出现，自带上方分隔线 -->
+          <SpeakerPanel />
+          <hr class="divider" />
+
+          <div class="issues">
+            <div class="issues__head">
+              <span class="issues__title">校验结果</span>
+              <span class="issues__count">
+                {{
+                  issues.length > 0
+                    ? `${issues.length} 条待处理`
+                    : '未发现问题'
+                }}
+              </span>
+            </div>
+
+            <ul v-if="issues.length > 0" class="issues__list">
+              <li v-for="item in issues.slice(0, 12)" :key="item.seg.id">
+                <button
+                  class="issues__row"
+                  type="button"
+                  @click="gotoSegment(item.seg.id, item.seg.start)"
+                >
+                  <span
+                    class="issues__dot"
+                    :class="`issues__dot--${item.seg.issues[0].level}`"
+                  />
+                  <span class="issues__index mono">#{{ item.index + 1 }}</span>
+                  <span class="issues__text">{{ item.seg.issues[0].message }}</span>
+                </button>
+              </li>
+              <li v-if="issues.length > 12" class="issues__more">
+                还有 {{ issues.length - 12 }} 条未列出
+              </li>
+            </ul>
+          </div>
         </div>
       </aside>
     </div>
@@ -937,9 +946,32 @@ async function saveInPlace(): Promise<void> {
 .editor__side {
   width: 264px;
   flex: none;
-  padding: var(--space-4);
+  /* 两段式：上面播放区不滚、下面工具区自己滚，内边距交给两段各自给 */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   border-left: 1px solid var(--color-border);
   background: var(--color-bg-surface);
+}
+
+/*
+ * 右栏的播放控制区：**滚动区之外**的一段，天生固定。
+ *
+ * 不 sticky、不铺浮层底色、不加阴影：它在布局里就占着这个位置，下面的内容
+ * 在自己的滚动段里滚，永远不会从它身下穿过 —— 也就没有「顶边和右边漏出底色」
+ * 这回事（那是 sticky 压在 padding 里必然留下的缝，滚动条还会从旁边穿过去）。
+ */
+.editor__side-top {
+  flex: none;
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+/* 工具 / AI / 讲话人 / 校验结果：只有这一段滚，滚动条也只在这一段里出现 */
+.editor__side-scroll {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-4);
 }
 
 .editor__foot {

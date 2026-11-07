@@ -18,6 +18,7 @@ import { applyPunctuation, hasContent } from '@/utils/punctuation'
 import { buildPrompt, pickPresentTerms } from '@/utils/prompt'
 import { depthPreset } from '@/utils/reasoningDepth'
 import { mergeRuns, runText, type RecognitionRun } from '@/utils/transcriptMerge'
+import { confirmProjectClose } from '@/utils/confirm'
 import { applyRescue, planRescueRanges, RESCUE_BEAM_SIZE } from '@/utils/lowConfRescue'
 import { applyLineWrap } from '@/utils/lineWrap'
 import { buildWrapWords } from '@/utils/wrapWords'
@@ -500,15 +501,72 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   /**
+   * 字幕条**按重叠面积**归属：时长大半落在哪个子项目，就归谁。
+   *
+   * 以前是「原地不动，`originFileId` 是谁就还归谁」，于是用户把一条字幕拖过
+   * 子项目边界之后，它在列表里仍被框在原来那一段 —— 明明已经播到别的音频了，
+   * 还留在旧段落里，看着就是「顺序错了」。改成按重叠面积判：谁盖住的时长最多
+   * 就归谁，这与「大于等于一半就移交」是同一条规则（过半的那个必然是最多的），
+   * 且在两段各占一半时也给出了确定的答案（取先出现的那个）。
+   *
+   * 零长条目（起止相同）没有面积可算，退回按起点判。
+   */
+  function ownerByOverlap(seg: SubtitleSegment): string {
+    const len = seg.end - seg.start
+    if (len <= 0) return ownerAtTime(seg.start)
+
+    let bestId = ''
+    let bestCovered = 0
+    for (const f of supportedFiles.value) {
+      const offset = offsetOfItem(f.id)
+      const duration = f.durationSec ?? 0
+      const covered = Math.max(0, Math.min(seg.end, offset + duration) - Math.max(seg.start, offset))
+      if (covered > bestCovered) {
+        bestCovered = covered
+        bestId = f.id
+      }
+    }
+    // 一条都没盖住（整条落在所有区间之外）→ 按起点兜底
+    return bestId || ownerAtTime(seg.start)
+  }
+
+  /**
+   * 把每条字幕裁到它所属子项目的时长之内。
+   *
+   * 子项目的区间在它自己的坐标里就是 `[0, durationSec]`，所以**伸出去的**与
+   * **伸进来的**是同一件事的两面：超过 `durationSec` 的尾部（伸到下一个子项目）
+   * 与负的头部（伸到上一个）一刀切掉即可。整条都落在范围外的直接丢弃。
+   *
+   * 用在处分子项目（删除 / 移动 / 改时长）之前：邻居要变了，原来跨界的部分
+   * 必须在**旧**区间下切干净，否则新偏移一算，会出现「字幕横在两个子项目中间」
+   * 这种谁都不认的情形。删除子项目时只裁剩下的那些 —— 被删的那个连字幕一起没。
+   *
+   * @param items 要裁的一批条目，缺省是当前项目的全部（非活动项目要自己传进来）
+   */
+  function trimSegmentsToOwnRange(items?: AudioFile[]): void {
+    for (const f of items ?? supportedFiles.value) {
+      const duration = f.durationSec ?? 0
+      const kept: SubtitleSegment[] = []
+      for (const s of f.segments) {
+        const start = round3(Math.max(0, s.start))
+        const end = round3(Math.min(duration, s.end))
+        if (end - start <= 0) continue
+        kept.push(s.start === start && s.end === end ? s : { ...s, start, end })
+      }
+      if (kept.length !== f.segments.length) f.segments = kept
+    }
+  }
+
+  /**
    * 把拼接视图的整份内容拆回各子项目。
    *
-   * 归属按 `originFileId`（视图拷贝上一定带着），没有标记的是用户新加的
-   * 条目，按绝对时间码归入区间。写回时减掉偏移、剥掉标记 —— 存储层永远
-   * 只放本地时间码，`originFileId` 只是视图层的东西，落盘也不写它。
+   * 归属**按重叠面积现算**（`ownerByOverlap`），不看 `originFileId`：用户把条目
+   * 拖过子项目边界之后，它要跟着新的落点走，留在旧段落里就成了「列表顺序错了」。
+   * 写回时减掉偏移、剥掉标记 —— 存储层永远只放本地时间码，`originFileId`
+   * 只是视图层的东西，落盘也不写它。
    */
   function spreadSegments(next: SubtitleSegment[]): void {
     const list = supportedFiles.value
-    const known = new Set(list.map((f) => f.id))
     const groups = new Map<string, SubtitleSegment[]>()
     const pushTo = (id: string, seg: SubtitleSegment): void => {
       const arr = groups.get(id)
@@ -517,9 +575,7 @@ export const useProjectStore = defineStore('project', () => {
     }
 
     for (const seg of next) {
-      const owner = seg.originFileId
-      if (owner && known.has(owner)) pushTo(owner, seg)
-      else pushTo(ownerAtTime(seg.start), seg)
+      pushTo(ownerByOverlap(seg), seg)
     }
 
     for (const f of list) {
@@ -1253,6 +1309,8 @@ export const useProjectStore = defineStore('project', () => {
     useSpeakerStore().forgetFile(id)
     files.value = files.value.filter((f) => f.id !== id)
     if (activeFileId.value === id) activeFileId.value = files.value[0]?.id ?? null
+    // 被删的这个连字幕一起没了；剩下的那些原来伸进它区间的部分要切干净
+    trimSegmentsToOwnRange()
     if (!suppressDirty) projectDirty.value = true
     onQueueChanged()
   }
@@ -1263,6 +1321,8 @@ export const useProjectStore = defineStore('project', () => {
     if (from >= list.length || to >= list.length) return
     const [moved] = list.splice(from, 1)
     list.splice(to, 0, moved)
+    // 换了邻居：原来跨在边界上的字幕要在旧区间下切干净，免得横在两段中间
+    trimSegmentsToOwnRange()
     if (!suppressDirty) projectDirty.value = true
     onQueueChanged()
   }
@@ -1571,6 +1631,58 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   /**
+   * 关项目（带未保存确认）。**所有关闭入口都走这里**，不要直接调 `closeDraft`。
+   *
+   * 右键菜单的「关闭项目」以前直接 `closeDraft`，未保存的改动就没了；侧栏那个
+   * 小叉却会拦一下 —— 同一件事两个入口两种行为。现在统一：
+   *   没有未保存改动  → 直接关
+   *   有未保存改动    → 问一句（系统原生对话框，会丢内容的岔路口必须抢焦点）
+   *
+   * 「保存并关闭」对**还没落过盘**的项目会走 `saveProject()` 自带的选路径流程，
+   * 用户在选路径时取消，就从那条起不关 —— 不能替用户猜一个存放位置。
+   */
+  async function closeDraftsSafely(ids: string[]): Promise<void> {
+    const list = ids
+      .map((id) => drafts.value.find((d) => d.id === id))
+      .filter((d): d is ProjectDraft => d !== undefined)
+    if (list.length === 0) return
+
+    const dirtyOf = (d: ProjectDraft): boolean =>
+      d.id === activeDraftId.value ? projectDirty.value : d.dirty
+
+    const dirtyList = list.filter(dirtyOf)
+    if (dirtyList.length > 0) {
+      const names = dirtyList.map((d) => d.name || '未命名项目')
+      const message =
+        dirtyList.length === 1
+          ? `「${names[0]}」有未保存的改动，关闭后这些改动将无法找回。`
+          : `这 ${dirtyList.length} 个项目有未保存的改动：${names.join('、')}。`
+      const choice = await confirmProjectClose(message)
+      if (choice === 'cancel') return
+
+      if (choice === 'save') {
+        const origin = activeDraftId.value
+        const toClose: string[] = []
+        for (const d of list) {
+          if (!dirtyOf(d)) {
+            toClose.push(d.id)
+            continue
+          }
+          if ((await switchDraft(d.id)) === false && d.id !== activeDraftId.value) break
+          if (await saveProject()) toClose.push(d.id)
+          else break
+        }
+        for (const id of toClose) closeDraft(id)
+        // 保存时切走的那一个，关完再切回去（它可能已经被关掉了）
+        if (origin && drafts.value.some((d) => d.id === origin)) void switchDraft(origin)
+        return
+      }
+    }
+
+    for (const d of list) closeDraft(d.id)
+  }
+
+  /**
    * 把一个子项目挪到另一个项目（跨项目拖拽，2.5）。
    *
    * 只改数组：时间码是子项目本地的，挪过去不需要换算（2.3）。三样东西要跟着走：
@@ -1647,6 +1759,11 @@ export const useProjectStore = defineStore('project', () => {
     from.history = { buckets: [] }
     to.history = { buckets: [] }
 
+    // 邻居都换了：两个项目里原来跨在边界上的字幕都要切干净，
+    // 免得新偏移一算出现「字幕横在两个子项目中间」
+    trimSegmentsToOwnRange(src)
+    trimSegmentsToOwnRange(dst)
+
     // 两个项目都标脏：跨项目移动不立即写盘（2.5 第 4 条）
     from.dirty = true
     to.dirty = true
@@ -1700,6 +1817,8 @@ export const useProjectStore = defineStore('project', () => {
       }
       const gone = new Set(hit.map((f) => f.id))
       const rest = list.filter((f) => !gone.has(f.id))
+      // 剩下的那些原来伸进被删区间的部分要切干净
+      trimSegmentsToOwnRange(rest)
       if (active) {
         files.value = rest
         if (activeFileId.value && gone.has(activeFileId.value)) {
@@ -3376,6 +3495,13 @@ const MIME_BY_EXT: Record<string, string> = {
   async function openProject(target?: string): Promise<boolean> {
     const ui = useUiStore()
     const bridge = window.xbaos
+
+    // 识别中不开新项目：这一批跑完再开。所有打开入口都过这里（按钮 / 双击 / 拖拽）
+    if (recognizing.value) {
+      ui.notify('warning', '正在识别，完成后再打开', '先等这一批识别跑完，之后再打开项目')
+      return false
+    }
+
     if (!bridge) {
       ui.notify('warning', '浏览器预览无法打开项目', '请在桌面应用里使用')
       return false
@@ -3636,6 +3762,7 @@ const MIME_BY_EXT: Record<string, string> = {
     createDraft,
     switchDraft,
     closeDraft,
+    closeDraftsSafely,
     toggleDraft,
     moveItemTo,
     saveAllProjects,

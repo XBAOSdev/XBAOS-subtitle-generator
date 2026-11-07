@@ -2684,46 +2684,67 @@ const scenarios = {
       check(`${label}：外壳有一层极淡玻璃`, m.shell !== null && m.shell > 0.85 && m.shell < 0.98, JSON.stringify(m))
     }
 
-    // ---- 内容页页脚条（导入页底部那条）：也在内容列里，必须跟内容同一套色系 ----
+    /*
+     * ---- 内容页页脚条（导入页底部那条）----
+     * 2026-11-07 规则变更：页脚**要**铺自己的底（旧断言「不铺底」作废）。
+     * 它坐在 --glass-shell-bg 里，自身 alpha 得做外壳补偿（shell + a×(1-shell) = nav，
+     * 浅色 0.42 / 深色 0.35），成品透过率才与侧栏同档（14% / 22%）——
+     * 比内容画布透、比框架条实，「内侧底栏与字幕编辑区挤在一起」的层级才拉得开。
+     */
     await goto(cdp, `${BASE}/?demo=1&theme=light`)
     await sleep(800)
-    const foot = await cdp.evaluate(`(() => {
-      const root = document.documentElement
-      root.classList.add('glass')
-      const raw = (sel) => {
-        const el = document.querySelector(sel)
-        return el ? getComputedStyle(el).backgroundColor : null
-      }
-      const alpha = (c) => {
-        if (!c) return null
-        const rgba = c.match(/rgba?\\(([^)]+)\\)/)
-        if (rgba) { const p = rgba[1].split(','); return p.length === 4 ? Number(p[3]) : 1 }
-        const slash = c.match(/\\/\\s*([\\d.]+)\\s*\\)/)
-        return slash ? Number(slash[1]) : 1
-      }
-      const out = {
-        footRaw: raw('.view__foot'),
-        footAlpha: alpha(raw('.view__foot')),
-        shellAlpha: alpha(raw('.app__main')),
-        bodyAlpha: alpha(raw('.view__body')),
-        borderRaw: document.querySelector('.view__foot')
-          ? getComputedStyle(document.querySelector('.view__foot')).borderTopColor
-          : null,
-      }
-      root.classList.remove('glass')
-      return out
-    })()`)
-    // 页脚条**不铺自己的底**，只吃外壳那一层 → 材质透出量是内容区的两三倍，玻璃才看得见
-    check(
-      '导入页页脚条不铺底（材质直接透出来）',
-      foot.footAlpha === 0 || foot.footRaw === 'rgba(0, 0, 0, 0)',
-      JSON.stringify(foot),
-    )
-    check(
-      '页脚条的材质透出量明显高于内容区',
-      foot.shellAlpha !== null && foot.bodyAlpha !== null && 1 - foot.shellAlpha > (1 - foot.shellAlpha) * (1 - foot.bodyAlpha) * 2,
-      `外壳透 ${((1 - foot.shellAlpha) * 100).toFixed(0)}% / 内容区透 ${(((1 - foot.shellAlpha) * (1 - foot.bodyAlpha)) * 100).toFixed(1)}%`,
-    )
+    const footOf = (theme) =>
+      cdp.evaluate(`(() => {
+        const root = document.documentElement
+        const prev = root.dataset.theme || ''
+        root.dataset.theme = ${JSON.stringify(theme)}
+        root.classList.add('glass')
+        const alpha = (c) => {
+          if (!c) return null
+          const rgba = c.match(/rgba?\\(([^)]+)\\)/)
+          if (rgba) { const p = rgba[1].split(','); return p.length === 4 ? Number(p[3]) : 1 }
+          const slash = c.match(/\\/\\s*([\\d.]+)\\s*\\)/)
+          return slash ? Number(slash[1]) : 1
+        }
+        const raw = (sel) => {
+          const el = document.querySelector(sel)
+          return el ? getComputedStyle(el).backgroundColor : null
+        }
+        const out = {
+          footAlpha: alpha(raw('.view__foot')),
+          shellAlpha: alpha(raw('.app__main')),
+          bodyAlpha: alpha(raw('.view__body')),
+          sidebarAlpha: alpha(raw('.sidebar')),
+        }
+        root.classList.remove('glass')
+        if (prev) root.dataset.theme = prev
+        else root.removeAttribute('data-theme')
+        return out
+      })()`)
+    for (const [theme, tag] of [
+      ['light', '浅色'],
+      ['dark', '深色'],
+    ]) {
+      const f = await footOf(theme)
+      const footTotal = f.shellAlpha !== null && f.footAlpha !== null ? f.shellAlpha + f.footAlpha * (1 - f.shellAlpha) : null
+      const bodyTotal = f.shellAlpha !== null && f.bodyAlpha !== null ? f.shellAlpha + f.bodyAlpha * (1 - f.shellAlpha) : null
+      const footSee = footTotal === null ? null : (1 - footTotal) * 100
+      const bodySee = bodyTotal === null ? null : (1 - bodyTotal) * 100
+      check(
+        `${tag}：页脚条铺外壳补偿底，透过率与侧栏同档`,
+        f.footAlpha !== null &&
+          f.footAlpha > 0.1 &&
+          footTotal !== null &&
+          f.sidebarAlpha !== null &&
+          Math.abs(footTotal - f.sidebarAlpha) < 0.02,
+        `自身 alpha ${f.footAlpha} 合成 ${footTotal === null ? '-' : footTotal.toFixed(3)} / 侧栏 ${f.sidebarAlpha}`,
+      )
+      check(
+        `${tag}：页脚条比内容画布透（层级才分得开）`,
+        footSee !== null && bodySee !== null && footSee > bodySee * 1.5,
+        `页脚透 ${footSee === null ? '-' : footSee.toFixed(1)}% / 内容区透 ${bodySee === null ? '-' : bodySee.toFixed(1)}%`,
+      )
+    }
 
     await goto(cdp, BASE + '/?demo=1&view=settings&theme=light')
     await sleep(500)
@@ -6456,6 +6477,136 @@ const scenarios = {
       '超出的字幕条用警示配色标出，但仍然渲染（能点中、能删除）',
       overflowView.overflow === 1 && overflowView.total === 6,
       JSON.stringify(overflowView),
+    )
+
+    /* ---------------- 播放指示三角 & 右栏两段式 ---------------- */
+
+    // 收场的三角还挂在 DOM 里（等合体动画走完），先等它落定再量
+    await waitFor(cdp, `document.querySelectorAll('.subtable__mark.mark-leave-active').length === 0`, 3000)
+    await sleep(200)
+
+    // 三角是 6×8 的 border 三角，定位给的是行中心 —— 不补 4px 就整体偏下半格
+    const markInfo = await cdp.evaluate(`(() => {
+      const body = document.querySelector('.subtable__body')
+      if (!body) return null
+      const m = body.querySelector('.subtable__mark:not(.mark-leave-active)')
+      if (!m) return null
+      const id = m.dataset.markId
+      const row = id ? body.querySelector('[data-seg-id="' + id + '"]') : null
+      if (!row) return null
+      const mr = m.getBoundingClientRect()
+      const rr = row.getBoundingClientRect()
+      return {
+        markC: mr.top + mr.height / 2,
+        rowC: rr.top + rr.height / 2,
+        w: mr.width,
+        h: mr.height,
+        // 分身 / 合体只动位置，不许拿透明度凑
+        opacityTouched: m.style.opacity !== '',
+      }
+    })()`)
+    check(
+      '播放指示三角正对字幕行中心（不偏下半格）',
+      markInfo !== null && Math.abs(markInfo.markC - markInfo.rowC) < 1.5,
+      JSON.stringify(markInfo),
+    )
+    check(
+      '播放指示三角是小三角（8px 高以内）',
+      markInfo !== null && markInfo.h <= 9 && markInfo.w <= 7,
+      JSON.stringify(markInfo),
+    )
+    check(
+      '播放指示三角不用透明度做分身 / 收场',
+      markInfo !== null && markInfo.opacityTouched === false,
+      JSON.stringify(markInfo),
+    )
+
+    // 右栏顶部是**布局分段**，不是 sticky 浮层：sticky 压在 padding 里必然漏边
+    const sideLayout = await cdp.evaluate(`(() => {
+      const aside = document.querySelector('.editor__side')
+      const top = document.querySelector('.editor__side-top')
+      const scroller = document.querySelector('.editor__side-scroll')
+      if (!aside || !top || !scroller) return null
+      const ar = aside.getBoundingClientRect()
+      const tr = top.getBoundingClientRect()
+      const sr = scroller.getBoundingClientRect()
+      return {
+        inScroller: scroller.contains(top),
+        position: getComputedStyle(top).position,
+        shadow: getComputedStyle(top).boxShadow,
+        overflowY: getComputedStyle(scroller).overflowY,
+        flushTop: Math.abs(tr.top - ar.top) < 1,
+        flushRight: Math.abs(tr.right - ar.right) < 1,
+        below: sr.top >= tr.bottom - 1,
+      }
+    })()`)
+    check(
+      '播放控制区不在滚动段里，也不是 sticky 浮层',
+      sideLayout !== null && sideLayout.inScroller === false && sideLayout.position === 'static',
+      JSON.stringify(sideLayout),
+    )
+    check(
+      '播放控制区与右栏贴边（顶边 / 右边不漏底色、不带阴影）',
+      sideLayout !== null && sideLayout.flushTop && sideLayout.flushRight && sideLayout.shadow === 'none',
+      JSON.stringify(sideLayout),
+    )
+    check(
+      '右栏两段式：滚动段紧接播放区下方并自己滚',
+      sideLayout !== null && sideLayout.below && sideLayout.overflowY === 'auto',
+      JSON.stringify(sideLayout),
+    )
+
+    /* ---------------- 分身 / 合体是「滑」，不是「淡」 ---------------- */
+
+    await store(`
+      for (const g of project.supportedFiles) g.segments = []
+      const f = project.viewFile
+      f.durationSec = 10
+      f.segments = [
+        ${JSON.stringify(mk('m1', 0, 4, '重叠的那一条甲'))},
+        ${JSON.stringify(mk('m2', 1, 5, '重叠的那一条乙'))},
+      ]
+      editor.setPlayhead(2)
+    `)
+    await sleep(600)
+    // 上一轮的三角可能还在合体（460ms 过渡 / 700ms 兜底），等它落定再数
+    await waitFor(cdp, `document.querySelectorAll('.subtable__mark.mark-leave-active').length === 0`, 2000)
+    const splitMarks = await cdp.evaluate(`(() => {
+      const body = document.querySelector('.subtable__body')
+      const all = [...body.querySelectorAll('.subtable__mark:not(.mark-leave-active)')]
+      return {
+        n: all.length,
+        props: [...new Set(all.map((m) => getComputedStyle(m).transitionProperty))],
+      }
+    })()`)
+    check('时间码重叠时三角分身成两个', splitMarks.n === 2, JSON.stringify(splitMarks))
+    check(
+      '三角的过渡只管位置（不靠透明度淡入淡出）',
+      splitMarks.props.length === 1 && splitMarks.props[0] === 'transform',
+      JSON.stringify(splitMarks),
+    )
+    await shot(cdp, 'probe-marks.png')
+
+    // 让第二条离开重叠区：多出来的那个三角要滑回留下的那一个，而不是淡出
+    await store(`
+      const f = project.viewFile
+      f.segments = f.segments.map((s) => (s.id === 'm2' ? { ...s, start: 6, end: 8 } : s))
+    `)
+    const sawLeaving = await waitFor(
+      cdp,
+      `document.querySelectorAll('.subtable__mark.mark-leave-active').length > 0`,
+      1200,
+      20,
+    )
+    const mergeInfo = await cdp.evaluate(`(() => {
+      const m = document.querySelector('.subtable__mark.mark-leave-active')
+      if (!m) return null
+      return { opacity: getComputedStyle(m).opacity, transform: m.style.transform }
+    })()`)
+    check(
+      '收场是滑回合体，不是淡出消失',
+      sawLeaving && mergeInfo !== null && mergeInfo.opacity === '1' && mergeInfo.transform !== '',
+      JSON.stringify({ sawLeaving, mergeInfo }),
     )
 
     /* ---------------- 底部告警分层：当前文件 vs 整个工程 ---------------- */

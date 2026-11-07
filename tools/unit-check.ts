@@ -1568,8 +1568,8 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     ['深色', darkCss],
   ] as const) {
     const t = tierOf(css)
-    // 外壳与框架条同值：页脚条不铺底、直接吃外壳，数值不同就会和状态条差一档
-    check(`${name}：外壳遮罩与框架条同值（页脚条才对得上状态条）`, t.shell === t.chrome, `${t.shell} vs ${t.chrome}`)
+    // 外壳与框架条同值：内容列与标题栏 / 状态条接缝处才不分层；它同时是页脚补偿公式 shell + a×(1-shell) = nav 的基数
+    check(`${name}：外壳遮罩与框架条同值（接缝不分层，页脚补偿有基准）`, t.shell === t.chrome, `${t.shell} vs ${t.chrome}`)
     check(`${name}：框架条比导航面板更透`, t.chrome < t.nav, `chrome=${t.chrome} nav=${t.nav}`)
     // 内容画布是外壳 × 内层相乘，合成后必须比导航面板更实，否则正文压不住材质
     const canvas = 1 - (1 - t.shell / 100) * (1 - t.region / 100)
@@ -1598,7 +1598,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '状态条与标题栏同一档（框架条）',
     /html\.glass \.statusbar \{\s*background: var\(--glass-chrome-bg/.test(css),
   )
-  // 两级拆分的理由：材质只看「头顶所有层透过率相乘」，页脚条压在内容遮罩之上就只剩 1%
+  // 两级拆分的理由：外壳要与框架条同值（0.76），正文区却得更实 —— 再压一层内层（0.72）乘出 6.7%
   check(
     '壳层分两级（外壳 + 内容区）',
     lightCss.includes('--glass-region-bg') &&
@@ -1606,8 +1606,10 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
       css.includes('background: var(--glass-region-bg'),
   )
   check(
-    '页脚条自己不再铺底（否则材质透不出来）',
-    /html\.glass \.view__foot,\s*\nhtml\.glass \.editor__foot \{\s*background: transparent;/.test(css),
+    '页脚条铺导航档（与侧栏同档，不再吃外壳那层）',
+    /html\.glass \.view__foot,\s*\nhtml\.glass \.editor__foot \{\s*background: var\(--glass-foot-bg/.test(css) &&
+      lightCss.includes('--glass-foot-bg') &&
+      darkCss.includes('--glass-foot-bg'),
   )
   // 两层半透明相叠 = 透过率相乘 ≈ 0.6%，材质等于白做 —— 外壳这一层必须不铺底
   check(
@@ -4947,14 +4949,15 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '一有进度就切数字条、一超时就切滑动条，2.5 秒来回一次，观感上就是进度条在跳',
   )
   check(
-    '进度区悬停摊开运行日志，且关得不那么急',
+    '进度区悬停摊开运行日志，关闭靠鼠标坐标续期（不靠 mouseleave 的时序）',
     statusSrc.includes('@mouseenter="openLog"') &&
-      statusSrc.includes('@mouseleave="scheduleClose"') &&
-      statusSrc.includes('statusbar__log') &&
-      // 进度区与气泡之间有空隙，立刻关就够不到气泡了
+      statusSrc.includes("document.addEventListener('mousemove', onDocMove") &&
       statusSrc.includes('closeTimer') &&
-      statusSrc.includes('statusbar__log::after'),
-    '进度条说不清在等什么，就把引擎日志给用户看；移开即收，但不许收得让人够不到',
+      // 元素出现在**静止的鼠标下方**时浏览器不补发 enter/leave：
+      // 靠 mouseleave 判关闭的话，气泡一渲染就再也唤不出来
+      !statusSrc.includes('@mouseleave="scheduleClose"') &&
+      statusSrc.includes('statusbar__log'),
+    '进度条说不清在等什么，就把引擎日志给用户看；移开即收，但关闭判定不能依赖 mouseleave',
   )
   check(
     '引擎日志收进日志 store',
@@ -5276,8 +5279,10 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
   check(
     '侧栏子项目列表可拖拽排序（两种模式共用同一套行）',
-    // 前缀匹配：识别中禁拖是底线；后面可以再叠别的条件（比如搜索时不拖）
-    treeSrc.includes(':draggable="!project.recognizing') &&
+    // 拖拽**按需武装**：常开 draggable 时，行内输入框的拖选会被浏览器当成拖行
+    treeSrc.includes('function onRowPointerDown') &&
+      treeSrc.includes('row.draggable =') &&
+      treeSrc.includes("tagName === 'INPUT'") &&
       treeSrc.includes('project.reorder(from, to)') &&
       // 合并模式下顺序就是时间轴先后，必须走 store 的 reorder 去重建产物
       /function onDrop[\s\S]{0,900}project\.reorder/.test(treeSrc) &&
@@ -5336,7 +5341,10 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '侧栏搜索：项目名命中出整组，只有子项目命中就只留那一行',
     /row\.name\.toLowerCase\(\)\.includes\(q\)[\s\S]{0,120}return \{ \.\.\.row, view \}[\s\S]{0,200}kept\.length > 0/.test(
       treeSrc,
-    ) && treeSrc.includes(':draggable="!project.recognizing && !query.trim()"'),
+    ) &&
+      // 搜索时禁拖写在**武装**那一步（`:draggable` 已改成按需武装）：
+      // 一拖就把看不见的顺序也改了
+      treeSrc.includes("query.value.trim() === ''"),
     '搜索时还能拖拽，一拖就把看不见的顺序也改了',
   )
   check(

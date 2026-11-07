@@ -225,6 +225,8 @@ async function tryPlay(): Promise<void> {
     rampGain(1, FADE_SEC)
     buffering.value = false
     scheduleFadeOut()
+    // 真的出声了才开始逐帧推游标；只是「想播」不算
+    startSmoothAdvance()
   } catch (err) {
     if (isAbort(err)) return
     reportPlayError(err)
@@ -440,7 +442,48 @@ function onPlaying(): void {
 
 /* ---- 游标 → 元素 ---- */
 
+/**
+ * 播放时的**平滑推进**。
+ *
+ * `timeupdate` 只有每秒约 4 次，游标、右栏时间码会一格一格地跳。播放期间改用
+ * `requestAnimationFrame` 逐帧取 `audio.currentTime` 喂给界面（60fps），
+ * 声音自己在走，这里只是把它的位置如实报出来。
+ *
+ * `advancing` 是**内部推进**的记号：这段时间写的 playheadSec 不该再回写给音频 ——
+ * 音频本身就是时间源，回写等于每帧 seek 一次，声音会碎。
+ */
+let smoothRaf = 0
+let advancing = false
+
+function startSmoothAdvance(): void {
+  stopSmoothAdvance()
+  const step = (): void => {
+    const el = audioEl.value
+    if (el && !el.paused && !editor.scrubbing) {
+      advancing = true
+      if (isMerged.value) {
+        const part = project.mergedParts[loadedPart]
+        editor.setPlayhead((part?.offsetSec ?? 0) + el.currentTime)
+      } else {
+        editor.setPlayhead(el.currentTime)
+      }
+      advancing = false
+    }
+    smoothRaf = requestAnimationFrame(step)
+  }
+  smoothRaf = requestAnimationFrame(step)
+}
+
+function stopSmoothAdvance(): void {
+  if (smoothRaf !== 0) cancelAnimationFrame(smoothRaf)
+  smoothRaf = 0
+}
+
+onBeforeUnmount(stopSmoothAdvance)
+
 function syncAudioToPlayhead(): void {
+  // 播放中的逐帧推进不是「用户挪了游标」，别把它再 seek 回去
+  if (advancing) return
   const el = audioEl.value
   if (!el || !loadedSrc) return
   // 拖播放头期间不跟：每帧 seek 一次会让声音碎成一片，等松手再来（见下面那个 watch）
@@ -477,6 +520,18 @@ watch(
       cancelFadeOut()
       buffering.value = false
       el?.pause()
+      // 停下时补最后一帧，免得游标停在半拍的位置上
+      if (el && !advancing) {
+        advancing = true
+        if (isMerged.value) {
+          const part = project.mergedParts[loadedPart]
+          editor.setPlayhead((part?.offsetSec ?? 0) + el.currentTime)
+        } else {
+          editor.setPlayhead(el.currentTime)
+        }
+        advancing = false
+      }
+      stopSmoothAdvance()
       return
     }
     if (!el) {

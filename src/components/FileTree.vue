@@ -336,6 +336,30 @@ const drag = ref<DragItem | null>(null)
 const dropAt = ref<{ draftId: string; index: number } | null>(null)
 const dropOnNew = ref(false)
 
+/**
+ * 拖拽只在「真的要拖这一行」时才武装。
+ *
+ * `<li>` 上常开 `draggable` 时，其内部 `<input>` 的拖选会被浏览器解读成拖行 ——
+ * 重命名时想用鼠标选中几个字，结果整行被拽起来了。子元素的 `draggable=false`
+ * 也压不过可拖的祖先，只能**按需**开：鼠标落在输入框里就不武装，
+ * 落在别处才允许拖。
+ *
+ * 必须用原生 `row.draggable = true`：Vue 的响应式要到下一个 tick 才刷进 DOM，
+ * 而拖拽在 mousedown 之后立刻就要生效，等不到那时候。
+ */
+function onRowPointerDown(ev: PointerEvent): void {
+  const row = ev.currentTarget as HTMLElement | null
+  if (!row) return
+  const t = ev.target as HTMLElement | null
+  const inTextField = t !== null && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')
+  row.draggable = !inTextField && !project.recognizing && query.value.trim() === ''
+}
+
+function onRowPointerUp(ev: Event): void {
+  const row = ev.currentTarget as HTMLElement | null
+  if (row) row.draggable = false
+}
+
 function onDragStart(event: DragEvent, draftId: string, itemId: string): void {
   // 识别中不许调顺序：这一轮的进度是按**启动时**的顺序算好的单元前缀和
   if (project.recognizing) {
@@ -441,12 +465,14 @@ function newDraft(): void {
   project.createDraft({ activate: true })
 }
 
+/** 打开磁盘上的 .xbsgp。不传路径时 store 自己弹选择框 */
+function openFromFile(): void {
+  void project.openProject()
+}
+
 function close(row: Row): void {
-  if (row.dirty) {
-    ui.notify('info', '有未保存的改动', '先保存，再从侧栏移除这个项目')
-    return
-  }
-  project.closeDraft(row.id)
+  // 带未保存确认：有改动时问一句「保存并关闭 / 不保存关闭 / 取消」
+  void project.closeDraftsSafely([row.id])
 }
 </script>
 
@@ -465,7 +491,14 @@ function close(row: Row): void {
     </div>
 
     <div class="filetree__body scroll-y" @dragend="cleanupDrag" @click="onBlankClick">
-      <section v-for="row in viewRows" :key="row.id" class="filetree__group">
+      <!--
+        项目增删移的动画。用 TransitionGroup 包住项目组：进出与重排会有连贯的
+        位移（删一个项目，下面的补上来是「滑」过去而不是瞬移）。
+        速率与导入页素材区一致（--dur-base + --ease-out）。
+        底部的新建 / 打开按钮留在这个容器外面的滚动区里，不参与动画。
+      -->
+      <TransitionGroup tag="div" name="fprow" class="filetree__groups">
+        <section v-for="row in viewRows" :key="row.id" class="filetree__group">
         <!-- 项目条：箭头只管折叠，条本身是「切到这个项目」 -->
         <div
           class="filetree__proj"
@@ -517,16 +550,32 @@ function close(row: Row): void {
           </button>
         </div>
 
-        <ul v-show="!row.collapsed" class="filetree__list">
+        <!--
+          展开 / 收起：外层 Transition 负责整组淡入淡出（v-show 不销毁，
+          子项目的选中、展开状态都留着）。内层 TransitionGroup 负责子项目本身的
+          增删与拖动重排。搜索时过滤掉的行不做进出场动画 —— 那是筛选不是增删，
+          一屏的行一起闪会很吵。
+        -->
+        <Transition name="ffold">
+          <TransitionGroup
+            v-show="!row.collapsed"
+            tag="ul"
+            :name="query.trim() ? '' : 'ftile'"
+            class="filetree__list"
+          >
           <li
             v-for="entry in row.view"
             :key="entry.file.id"
             class="filetree__sub"
             :class="rowClass(row, entry.index)"
-            :draggable="!project.recognizing && !query.trim()"
+            :draggable="false"
             :title="project.recognizing ? '识别过程中不能调整顺序' : '拖动可调整顺序或移到别的项目'"
+            @pointerdown="onRowPointerDown"
+            @pointerup="onRowPointerUp"
+            @pointercancel="onRowPointerUp"
             @contextmenu="onRowContext(row, entry, $event)"
             @dragstart="onDragStart($event, row.id, entry.file.id)"
+            @dragend="onRowPointerUp"
             @dragover="onRowDragOver($event, row, entry.index)"
             @drop="onDrop"
           >
@@ -600,12 +649,14 @@ function close(row: Row): void {
               </button>
             </span>
           </li>
-        </ul>
+        </TransitionGroup>
+        </Transition>
 
         <p v-if="row.items.length === 0 && !row.collapsed" class="filetree__empty">
           还没有子项目
         </p>
       </section>
+      </TransitionGroup>
 
       <button
         class="filetree__new"
@@ -618,6 +669,16 @@ function close(row: Row): void {
       >
         <Icon name="plus" :size="12" />
         <span>新建项目</span>
+      </button>
+
+      <button
+        class="filetree__new"
+        type="button"
+        title="打开磁盘上的 .xbsgp 项目文件"
+        @click="openFromFile"
+      >
+        <Icon name="folder-open" :size="12" />
+        <span>打开项目</span>
       </button>
 
       <p v-if="totalItems > 0" class="filetree__hint">
@@ -1033,5 +1094,86 @@ function close(row: Row): void {
   padding: 0 var(--space-2);
   font-size: 11px;
   color: var(--color-text-tertiary);
+}
+
+/* ============================================================ 列表动画
+ *
+ * 速率与导入页素材区同一套（--dur-base 180ms + --ease-out / --ease-in），
+ * 观感是「位移滑过去、出现缩放淡入」，不是弹跳。
+ * 判据仍是那一条：动画在解释「东西从哪来、到哪去」才加。
+ */
+
+/* ---- 项目组：增删与重排 ---- */
+.fprow-move,
+.fprow-enter-active {
+  transition:
+    transform var(--dur-base) var(--ease-out),
+    opacity var(--dur-base) var(--ease-out);
+}
+
+.fprow-enter-from,
+.fprow-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+/*
+ * 项目离场**不脱流**（不写 position: absolute）：脱流要实测坐标，
+ * 而项目条是整块 section（含子项目列表），高度随时在变，写死必然错位。
+ * 代价是淡出的这 180ms 里它还占着位置，下面的项目等它走完才补上 ——
+ * 项目数量很少，这个代价可以接受。
+ */
+.fprow-leave-active {
+  transition:
+    transform var(--dur-base) var(--ease-in),
+    opacity var(--dur-base) var(--ease-in);
+}
+
+/* ---- 子项目：增删与拖动重排 ---- */
+.ftile-move,
+.ftile-enter-active {
+  transition:
+    transform var(--dur-base) var(--ease-out),
+    opacity var(--dur-base) var(--ease-out);
+}
+
+.ftile-enter-from,
+.ftile-leave-to {
+  opacity: 0;
+  transform: scale(0.96);
+}
+
+/* 离场的行要脱流，否则后面的行等它彻底消失才敢动 */
+.ftile-leave-active {
+  position: absolute;
+  width: 100%;
+  z-index: 2;
+  pointer-events: none;
+  transition:
+    transform var(--dur-base) var(--ease-in),
+    opacity var(--dur-base) var(--ease-in);
+}
+
+.filetree__list {
+  position: relative;
+}
+
+/* ---- 展开 / 收起整组子项目 ---- */
+.ffold-enter-active {
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+
+.ffold-leave-active {
+  transition:
+    opacity var(--dur-base) var(--ease-in),
+    transform var(--dur-base) var(--ease-in);
+}
+
+.ffold-enter-from,
+.ffold-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 </style>

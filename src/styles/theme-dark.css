@@ -30,9 +30,16 @@
     --glass-nav-bg: color-mix(in srgb, var(--color-bg-base) 78%, transparent);
     --glass-chrome-sheen: rgba(255, 255, 255, 0.06);
     --glass-chrome-border: color-mix(in srgb, var(--color-border) 45%, transparent);
-    /* 外壳与框架条同值（页脚条透到它上面正好是同一档），内层 0.72 两级拆分的理由见浅色注释 */
+    /* 外壳与框架条同值（接缝处不分层；它也是页脚补偿公式的基数），内层 0.72 两级拆分的理由见浅色注释 */
     --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 66%, transparent);
     --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 72%, transparent);
+    /*
+     * 内容列页脚条（导入页 / 编辑器底栏）。它在 shell（0.66）里面，
+     * 自身 alpha 要做外壳补偿才能让最终观感等于侧栏的 0.78：
+     *   0.66 + a × (1 - 0.66) = 0.78  →  a ≈ 0.35
+     * 理由与浅色同，见 theme-light.css 的同名注释。
+     */
+    --glass-foot-bg: color-mix(in srgb, var(--color-bg-base) 35%, transparent);
     --glass-app-bg: color-mix(in srgb, var(--color-bg-base) 90%, transparent);
     /* 深色下用深色光晕，浅色下用白色光晕 */
     --glass-text-halo: rgba(0, 0, 0, 0.5);
@@ -57,6 +64,10 @@
     --color-accent-border: #525252;
     --color-accent-text: #ededed;
 
+    /* 拖选文本的高亮。深色下若只用 8% 白，叠在 #242424 上几乎看不出选区边界 */
+    --color-selection-bg: rgba(129, 140, 248, 0.42);
+    --color-selection-text: #f2f2f2;
+
     /* 语义色：保留辨识度，但整体降饱和以贴合中性格调 */
     --color-success: #6ea87f;
     --color-success-subtle: #1b2a20;
@@ -73,12 +84,14 @@
 
     /* AI 强调色：深色下略降明度保证白字对比（实测白字 5.08:1），
        同时在深底上仍明显跳色（对比 3.42:1） */
-    --color-ai: #5a5ce8;
-    --color-ai-hover: #6d6ff0;
-    --color-ai-active: #4a4cd8;
-    --color-ai-subtle: rgba(99, 102, 241, 0.16);
-    --color-ai-border: rgba(129, 140, 248, 0.42);
-    --color-ai-text: #a5b4fc;
+    /* AI 强调色：整体提亮一档。深底上原来的 #5a5ce8 偏闷，
+       提亮后更通透，白字对比仍保持 4.6:1 以上 */
+    --color-ai: #7b7ef0;
+    --color-ai-hover: #8f92f6;
+    --color-ai-active: #6a6de4;
+    --color-ai-subtle: rgba(120, 124, 240, 0.2);
+    --color-ai-border: rgba(150, 155, 250, 0.46);
+    --color-ai-text: #b3b6fa;
 
     /* 波形与字幕色块：用亮度而非色相区分状态 */
     --color-waveform: #5c5c5c;
@@ -136,6 +149,8 @@
   --glass-chrome-border: color-mix(in srgb, var(--color-border) 45%, transparent);
   --glass-shell-bg: color-mix(in srgb, var(--color-bg-base) 66%, transparent);
   --glass-region-bg: color-mix(in srgb, var(--color-bg-base) 72%, transparent);
+  /* 数值须与上面的媒体查询块保持一致 */
+  --glass-foot-bg: color-mix(in srgb, var(--color-bg-base) 35%, transparent);
   --glass-app-bg: color-mix(in srgb, var(--color-bg-base) 90%, transparent);
   --glass-text-halo: rgba(0, 0, 0, 0.5);
 
@@ -152,6 +167,10 @@
   --color-accent-border: #525252;
   --color-accent-text: #ededed;
 
+  /* 数值须与上面的媒体查询块保持一致 */
+  --color-selection-bg: rgba(129, 140, 248, 0.42);
+  --color-selection-text: #f2f2f2;
+
   --color-success: #6ea87f;
   --color-success-subtle: #1b2a20;
   --color-success-border: #35543f;
@@ -167,12 +186,13 @@
 
   /* AI 强调色：深色下略降明度保证白字对比（实测白字 5.08:1），
      同时在深底上仍明显跳色（对比 3.42:1） */
-  --color-ai: #5a5ce8;
-  --color-ai-hover: #6d6ff0;
-  --color-ai-active: #4a4cd8;
-  --color-ai-subtle: rgba(99, 102, 241, 0.16);
-  --color-ai-border: rgba(129, 140, 248, 0.42);
-  --color-ai-text: #a5b4fc;
+  /* 数值须与上面的媒体查询块保持一致 */
+  --color-ai: #7b7ef0;
+  --color-ai-hover: #8f92f6;
+  --color-ai-active: #6a6de4;
+  --color-ai-subtle: rgba(120, 124, 240, 0.2);
+  --color-ai-border: rgba(150, 155, 250, 0.46);
+  --color-ai-text: #b3b6fa;
 
   --color-waveform: #5c5c5c;
   --color-waveform-played: #b8b8b8;

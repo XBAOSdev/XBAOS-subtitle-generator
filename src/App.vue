@@ -639,14 +639,12 @@ onBeforeUnmount(() => {
       <AppSidebar />
 
       <main class="app__main">
-        <!-- 页面切换过渡。**只做进场、不做出场**（见 global.css 里 viewfade 的注释）：
-             入场缺席时两个视图会同时在 DOM 里待 180ms，「时间轴上有几条字幕」这类
-             查询会数到两倍。mode="out-in" + 出场无过渡，等于「旧的立刻走、新的淡入」。 -->
-        <Transition name="viewfade" mode="out-in">
-          <KeepAlive>
-            <component :is="viewComponent" />
-          </KeepAlive>
-        </Transition>
+        <!-- 页面切换为**硬切**：不做任何过渡动画。切换是导航动作，越利落越好；
+             之前的 viewfade 淡入 180ms，反而让切页显得迟钝。
+             不做 Transition 后旧视图立刻离场，「时间轴上有几条字幕」这类查询也不会数到两倍。 -->
+        <KeepAlive>
+          <component :is="viewComponent" />
+        </KeepAlive>
       </main>
     </div>
 

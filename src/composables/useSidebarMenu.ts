@@ -220,7 +220,8 @@ export function useSidebarMenu(options: SidebarMenuOptions) {
       return
     }
     if (key === 'draft:close') {
-      for (const id of ids) project.closeDraft(id)
+      // 带未保存确认：直接 closeDraft 会把没存的改动丢掉
+      await project.closeDraftsSafely(ids)
       return
     }
     if (key === 'draft:delete') {

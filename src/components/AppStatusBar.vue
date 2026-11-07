@@ -42,34 +42,57 @@ const issueText = computed(() => {
  */
 const logOpen = ref(false)
 const logList = ref<HTMLElement | null>(null)
+const logZone = ref<HTMLElement | null>(null)
+const logPop = ref<HTMLElement | null>(null)
 
 /**
- * 关气泡先排队，不立即关。
+ * 关气泡先排队，不立即关；判定**不靠 mouseleave**，靠鼠标坐标续期。
  *
  * 进度区与气泡之间有一段空隙（气泡浮在底栏上方），指针往上走必然先离开进度区、
- * 再进入气泡 —— 立刻关掉的话，用户根本够不到那块气泡。所以延迟一点关，
- * 期间指针进入气泡就取消这次关闭。
+ * 再进入气泡；更要命的是**元素出现在静止的鼠标下方时，浏览器不会补发 enter/leave** ——
+ * 气泡一渲染、日志一长高，命中区就悄悄换了，可事件不会再通知我们。于是就出现
+ * 「闪现一下之后再也不显示」：鼠标没动过，进不去那个 enter。
+ *
+ * 改成监听 mousemove：鼠标在区域内就续期、移出区域就排队关。鼠标动起来必然有
+ * mousemove，时序竞态就此消失；空隙那 10px 也不用再靠桥的伪元素去接。
  */
 let closeTimer: number | undefined
 
-function openLog(): void {
+function cancelClose(): void {
   if (closeTimer !== undefined) {
     window.clearTimeout(closeTimer)
     closeTimer = undefined
   }
+}
+
+function openLog(): void {
+  cancelClose()
+  if (logOpen.value) return
   logOpen.value = true
+  document.addEventListener('mousemove', onDocMove, { passive: true })
 }
 
 function scheduleClose(): void {
-  if (closeTimer !== undefined) window.clearTimeout(closeTimer)
+  cancelClose()
   closeTimer = window.setTimeout(() => {
     closeTimer = undefined
     logOpen.value = false
+    document.removeEventListener('mousemove', onDocMove)
   }, 180)
 }
 
+function onDocMove(ev: MouseEvent): void {
+  const target = ev.target as Node | null
+  const inside =
+    (target !== null && logZone.value?.contains(target) === true) ||
+    (target !== null && logPop.value?.contains(target) === true)
+  if (inside) cancelClose()
+  else scheduleClose()
+}
+
 onBeforeUnmount(() => {
-  if (closeTimer !== undefined) window.clearTimeout(closeTimer)
+  cancelClose()
+  document.removeEventListener('mousemove', onDocMove)
 })
 
 /** 只摊最后几十行：再往上翻没人看，只会把底栏顶穿 */
@@ -134,10 +157,10 @@ watch(issueText, (next, prev) => {
            若等进度行出现再撑开，底部会因为多出一段文字而横向挤一下。 -->
       <template v-if="project.recognizing || ui.taskFlight">
         <div
+          ref="logZone"
           class="statusbar__progress"
           :class="{ 'is-veiled': ui.taskFlight !== null }"
           @mouseenter="openLog"
-          @mouseleave="scheduleClose"
         >
           <Icon name="spinner" :size="12" />
           <span class="statusbar__progress-text">{{ project.progressLabel }}</span>
@@ -148,10 +171,9 @@ watch(issueText, (next, prev) => {
 
           <div
             v-if="logOpen && recentLogs.length > 0"
+            ref="logPop"
             class="statusbar__log"
             role="log"
-            @mouseenter="openLog"
-            @mouseleave="scheduleClose"
           >
             <div class="statusbar__log-head">
               <span>运行日志</span>
@@ -246,9 +268,12 @@ watch(issueText, (next, prev) => {
   transition: opacity var(--dur-fast) var(--ease-out);
 }
 
-/* 圆点还在飞：占位但透明。飞完 to 掉这个类，120ms 淡入 */
+/* 圆点还在飞：占位但透明。飞完 to 掉这个类，120ms 淡入。
+   透明期间**不接鼠标** —— 否则会打开一个看不见的日志气泡，
+   等淡入之后又莫名其妙「闪现」一下 */
 .statusbar__progress.is-veiled {
   opacity: 0;
+  pointer-events: none;
 }
 
 .statusbar__sep {

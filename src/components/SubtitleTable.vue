@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { useEditorStore } from '@/stores/editor'
 import { useSettingsStore } from '@/stores/settings'
@@ -83,6 +83,182 @@ const hasSpeakers = computed(
     speakerStore.speakersOf(project.viewFileId ?? '', segments.value).length > 0,
 )
 const allIds = computed(() => segments.value.map((s) => s.id))
+
+/* ===================================================== 播放位置指示三角
+ *
+ * 字幕区左缘的黄色小三角，尖头朝右指着游标当前所在的那一行。三件事让它跟得住：
+ *
+ *   1. **重叠分身**：同时有好几条时每个一条（上限 MAX_MARKS）。多出来的那几个
+ *      **从已经在的那个的位置滑出去**，收场时再滑回留下的那一个 —— 全程只动位置、
+ *      不碰透明度：要看的是「一个分成好几个、再合回一个」，淡出淡入不像分身，像闪烁；
+ *   2. **最近吸附**：当前时刻一条都不命中时，吸到时间上最靠近的那一条 ——
+ *      区间内的距离是 0，区间外算到最近端点；
+ *   3. **非线性位移**：位置走 transform 过渡（--dur-slow + --ease-out），
+ *      换行是滑过去的，不是瞬移。
+ *
+ * 位置**只在换行时量一次**，不逐帧量 DOM：播放中 playheadSec 每帧都在变，
+ * 逐帧测量会掉帧；而真正需要重新定位的时机只有「指向哪一行变了」。
+ */
+const MAX_MARKS = 4
+
+const markIds = computed<string[]>(() => {
+  const t = editor.playheadSec
+  const list = segments.value
+  const hits: string[] = []
+  for (const s of list) {
+    if (t >= s.start && t <= s.end) {
+      hits.push(s.id)
+      if (hits.length >= MAX_MARKS) break
+    }
+  }
+  if (hits.length > 0) return hits
+
+  let bestId = ''
+  let bestDist = Infinity
+  for (const s of list) {
+    const d = t < s.start ? s.start - t : t - s.end
+    if (d < bestDist) {
+      bestDist = d
+      bestId = s.id
+    }
+  }
+  return bestId ? [bestId] : []
+})
+
+/**
+ * 被三角指着的行。
+ *
+ * `.row` 带 `content-visibility: auto`（长列表优化），屏幕外的行只按
+ * `contain-intrinsic-size` 的**估算高度**参与排版 —— 这时量出来的 offsetTop
+ * 是估值，行真正排出来后位置就变了，三角会停在旧地方（看着像「没指在行中间」）。
+ * 被指着的那几行先取消跳过、真正排版，量到的才是它画出来的位置。
+ */
+const markSet = computed(() => new Set(markIds.value))
+
+/** 某个字幕行在滚动内容里的垂直中心（px）；行还没渲染出来时给 null */
+function rowCenterY(id: string): number | null {
+  const el = bodyRef.value?.querySelector<HTMLElement>(`[data-seg-id="${id}"]`)
+  return el ? el.offsetTop + el.offsetHeight / 2 : null
+}
+
+/** 每个三角的目标位置（相对滚动区内容顶部，px） */
+const markYs = ref<number[]>([])
+
+/**
+ * 把量到的位置刷到三角上。
+ *
+ * 模板里**不绑** `:style="translateY(…)"`：新增的三角插入那一刻 `markYs` 还是上一轮的值，
+ * 绑上去会先写 0 再写目标 —— 「从第一个分出去」就变成了「从顶上掉下来」。
+ * 统一在这里刷，入场动画才能确定地从锚点起步。
+ */
+function paintMarks(): void {
+  const body = bodyRef.value
+  if (!body) return
+  for (const node of body.querySelectorAll<HTMLElement>('.subtable__mark')) {
+    const idx = markIds.value.indexOf(node.dataset.markId ?? '')
+    if (idx < 0) continue // 正在收场的那个由 leave 钩子自己管
+    node.style.transition = ''
+    node.style.transform = `translateY(${markYs.value[idx] ?? 0}px)`
+  }
+}
+
+function measureMarks(): void {
+  markYs.value = markIds.value.map((id) => rowCenterY(id) ?? 0)
+  paintMarks()
+}
+
+watch(
+  () => markIds.value.join(','),
+  async () => {
+    await nextTick()
+    measureMarks()
+  },
+)
+
+// 换文件、行高变了（重新断行、译文写回）都要重新量
+watch(
+  () => [project.viewFileId, segments.value.length] as const,
+  async () => {
+    await nextTick()
+    measureMarks()
+  },
+)
+
+/*
+ * 行**位置**也会变：改文本 / 写回译文会让行变高，它下面的行跟着整体下移，
+ * 三角却还停在老位置 —— 看上去就是「没指在行中间，偏下半格」。
+ * 所以条目内容一变就重量；换窗口宽度会让断行重排，也要重量。
+ */
+watch(segments, async () => {
+  await nextTick()
+  measureMarks()
+})
+
+function onWindowResize(): void {
+  measureMarks()
+}
+
+onMounted(() => {
+  window.addEventListener('resize', onWindowResize)
+  // 首次渲染时上面几个 watch 都不会触发，不量就一直停在表头
+  void nextTick().then(measureMarks)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onWindowResize)
+})
+
+/**
+ * 入场：从**已经在的那个三角**的位置滑到自己的行。
+ * 只写位置、不碰 opacity —— 分身是「长出去」的，不是「浮出来」的。
+ */
+function onMarkEnter(el: Element): void {
+  const node = el as HTMLElement
+  const to = rowCenterY(node.dataset.markId ?? '') ?? 0
+  const from = markYs.value[0] ?? to
+  node.style.transition = 'none'
+  node.style.transform = `translateY(${from}px)`
+  // 先让「起点」这一帧落定，否则浏览器会把两次赋值合并成一次，直接出现在终点
+  void node.offsetHeight
+  node.style.transition = ''
+  node.style.transform = `translateY(${to}px)`
+}
+
+/**
+ * 收场：多余的三角滑回**留下的那一个**，合体之后才移除 —— 与入场对称。
+ * 没有留下来的（切文件、清空）直接收掉，不做无意义的滑动。
+ */
+function onMarkLeave(el: Element, done: () => void): void {
+  const node = el as HTMLElement
+  const survivor = markIds.value[0]
+  const to = survivor ? rowCenterY(survivor) : null
+  if (to === null) {
+    done()
+    return
+  }
+  const from = Number(node.dataset.y ?? '0')
+  node.style.transition = 'none'
+  node.style.transform = `translateY(${from}px)`
+  void node.offsetHeight
+  // 过渡交给 .mark-leave-active（CSS 里只有 transform 一条），不在这里写 var() 简写
+  node.style.transition = ''
+  node.style.transform = `translateY(${to}px)`
+
+  let settled = false
+  function onEnd(ev: Event): void {
+    if ((ev as TransitionEvent).propertyName !== 'transform') return
+    finish()
+  }
+  const finish = (): void => {
+    if (settled) return
+    settled = true
+    node.removeEventListener('transitionend', onEnd)
+    done()
+  }
+  node.addEventListener('transitionend', onEnd)
+  // 兜底：过渡被取消（元素被复用等）时也要收掉，别留一个幽灵三角
+  window.setTimeout(finish, 700)
+}
 
 const allChecked = computed(
   () => segments.value.length > 0 && editor.selectedIds.length === segments.value.length,
@@ -612,6 +788,8 @@ function onBodyScroll(): void {
   if (followRaf) return
   followRaf = requestAnimationFrame(() => {
     followRaf = 0
+    // 滚动会把「跳过渲染」的行真正排出来，上面那些行的真实高度一变，被指的行就会位移
+    measureMarks()
     if (Date.now() < followLockUntil) return
     const index = topRowIndex(bodyRef.value as HTMLElement)
     const id = index >= 0 ? itemAt.value[index] : ''
@@ -985,6 +1163,28 @@ function onKeydown(event: KeyboardEvent): void {
     </div>
 
     <div ref="bodyRef" class="subtable__body scroll-y" @scroll.passive="onBodyScroll">
+      <!--
+        播放位置指示三角。挂在滚动区内部，随内容一起滚，永远贴着它指的那一行。
+        尖头朝右指着字幕条；同时有多条（时间码重叠）时分身成多个，
+        指向都不命中时吸到时间上最靠近的那一条。
+      -->
+      <TransitionGroup
+        tag="div"
+        name="mark"
+        class="subtable__marks"
+        aria-hidden="true"
+        @enter="onMarkEnter"
+        @leave="onMarkLeave"
+      >
+        <span
+          v-for="(id, i) in markIds"
+          :key="id"
+          class="subtable__mark"
+          :data-mark-id="id"
+          :data-y="markYs[i] ?? 0"
+        />
+      </TransitionGroup>
+
       <template v-for="(seg, index) in segments" :key="seg.id">
         <!--
           子项目分界：只插一个**独立的块**，不动 `segments` 的结构
@@ -1006,6 +1206,7 @@ function onKeydown(event: KeyboardEvent): void {
             'has-error': worstLevel(seg) === 'error',
             'has-warning': worstLevel(seg) === 'warning',
             'is-acked': !!seg.acked,
+            'is-marked': markSet.has(seg.id),
             'is-drop-target': dragOverIndex === index && dragFrom !== null && dragFrom !== index,
           }"
           @click="onRowClick($event, seg.id)"
@@ -1346,6 +1547,55 @@ function onKeydown(event: KeyboardEvent): void {
   padding: var(--space-1) 0 var(--space-4);
   /* 窗口窄到 620px 以下时，行不再压缩，改为左右滑动（表头跟着走） */
   overflow-x: auto;
+  /* 播放位置三角按行的 offsetTop 定位，这里必须是它的定位祖先 */
+  position: relative;
+}
+
+/* ---------------------------------------------------- 播放位置指示三角 */
+/*
+ * 黄色小三角，尖头朝右（border-left 有色）指着字幕条。颜色单独给一条
+ * --color-playmark，与播放头的红橙（--color-playhead）分开：一个是「线」、
+ * 一个是「指针」，撞色就分不清了。
+ *
+ * 位移只动 transform，不动 top —— 每帧改 top 会触发回流，2000 行的表里
+ * 一帧一次就会掉到 30fps 以下。
+ */
+.subtable__marks {
+  position: absolute;
+  top: 0;
+  left: 4px;
+  width: 0;
+  height: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.subtable__mark {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  /*
+   * 上下边框各 4px，盒子高 8px、视觉中心在盒子顶下方 4px；定位给的是行中心，
+   * 所以整体上提 4px —— 不补这一下，三角就总是偏下半格。
+   */
+  margin-top: -4px;
+  border-style: solid;
+  border-width: 4px 0 4px 6px;
+  border-color: transparent transparent transparent var(--color-playmark, #e0a51a);
+  /* 460ms + --ease-out：跨行的空间指引，与「开始识别飞向进度条」同一档 */
+  transition: transform var(--dur-slow) var(--ease-out);
+  will-change: transform;
+}
+
+/*
+ * 收场（分身合体）：多余的三角滑回「留下的那一个」再移除，与入场对称。
+ * 过渡写在类上而不是 JS 里 —— 行内写 `transition: transform var(--dur-slow)`
+ * 会被当成待替换值，拿不到稳定的过渡；类里的这条是实打实的计算值。
+ */
+.mark-leave-active {
+  transition: transform var(--dur-slow) var(--ease-in);
 }
 
 /* ---------- 子项目分界（只有一条细线） ---------- */
@@ -1372,6 +1622,14 @@ function onKeydown(event: KeyboardEvent): void {
   /* 长列表渲染优化 */
   content-visibility: auto;
   contain-intrinsic-size: auto 46px;
+}
+
+/*
+ * 三角指着的那几行不参与「跳过渲染」：跳过时只有估算高度，位置量不准，
+ * 三角就会停在旧地方。最多四条，代价可以忽略。
+ */
+.row.is-marked {
+  content-visibility: visible;
 }
 
 .row:hover {

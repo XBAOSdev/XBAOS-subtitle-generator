@@ -133,8 +133,8 @@ table {
 }
 
 ::selection {
-  background: var(--color-accent-subtle);
-  color: var(--color-text-primary);
+  background: var(--color-selection-bg, var(--color-accent-subtle));
+  color: var(--color-selection-text, var(--color-text-primary));
 }
 
 /* 滚动条 */
@@ -730,27 +730,10 @@ kbd {
    视图通用布局
    ========================================================================== */
 
-/* 页面切换过渡（导入 ↔ 编辑）。
-   两个视图的信息密度差很大，硬切会让人以为界面卡了一下。
-
-   **刻意只做进场**：出场若也占满 180ms，这段时间里新旧两个视图会同时在 DOM 里，
-   于是「时间轴上有几条字幕」「队列里有几个文件」这类查询会数到两倍 ——
-   探针第一轮就被这个坑绊住过。所以：旧的立即卸下（leave-active 不写过渡），
-   新的从下方 4px 淡入。 */
-.viewfade-enter-active {
-  transition:
-    opacity var(--dur-base) var(--ease-out),
-    transform var(--dur-base) var(--ease-out);
-}
-
-.viewfade-enter-from {
-  opacity: 0;
-  transform: translateY(4px);
-}
-
-.viewfade-leave-active {
-  transition: none;
-}
+/* 页面切换**没有过渡动画**，是硬切（2026-11-07 拍板）。
+   曾经做过 180ms 淡入，结果切页显得迟钝；切页是导航动作，越利落越好。
+   旧视图立即卸下，新视图立刻接管 —— 也就不会出现「新旧两个视图同时在 DOM 里、
+   查询数量数到两倍」的情形。 */
 
 .view {
   flex: 1;
@@ -858,8 +841,8 @@ kbd {
    分档统一成**三档**，一档一个语义；具体数值只在 theme-*.css 的 --glass-* 令牌里定义，
    这里只负责把区域归到档上（改区域归位不用碰数值，改数值不用碰这里）：
 
-     框架条   .titlebar/.abar/.rbar · .statusbar · .view__foot/.editor__foot   → --glass-chrome-bg
-     导航面板 .sidebar · .setnav · .editor__side                             → --glass-nav-bg
+     框架条   .titlebar/.abar/.rbar · .statusbar                              → --glass-chrome-bg
+     导航面板 .sidebar · .setnav · .editor__side · .view__foot/.editor__foot   → --glass-nav-bg / --glass-foot-bg
      内容画布 .view__body · .setmain · .editor__center（外壳 × 内层两级相乘）  → shell + region
      卡片     不动（surface 底，正文与表格坐在上面，一透就没法读）
 
@@ -951,13 +934,15 @@ html.glass .editor__foot .editor__stat {
 }
 
 /*
- * 内容列里的页脚条（导入页 / 编辑器底部）：**自己不再铺底**，只留外壳那一层。
- * 这样材质透出量是内容区的两三倍 —— 用户要的「看得见的玻璃」就在这儿。
- * 上一版给它压了一层底色遮罩，结果两层相乘后只剩 1%，怎么调都像块实心板。
+ * 内容列里的页脚条（导入页 / 编辑器底部）。
+ * 它坐在外壳里面，**不能只吃外壳那一层** —— 那样与外侧的状态条同档，
+ * 两条底栏一模一样，和中间的字幕编辑区又差一大截，层级全糊在一起。
+ * 现在自己铺一层做过外壳补偿的导航档（--glass-foot-bg），观感与侧栏一致：
+ * 侧栏、文件树、工具面板、内侧底栏都是「框架」，中间的正文才是「内容」。
  */
 html.glass .view__foot,
 html.glass .editor__foot {
-  background: transparent;
+  background: var(--glass-foot-bg, var(--color-bg-surface));
   border-color: var(--glass-chrome-border, var(--color-border));
 }
 

@@ -75,7 +75,7 @@ async function onUpdateClick(): Promise<void> {
 </script>
 
 <template>
-  <nav class="sidebar" aria-label="主导航">
+  <nav class="sidebar" :class="{ 'is-collapsed': ui.sidebarCollapsed }" aria-label="主导航">
     <ul class="sidebar__list">
       <li v-for="item in items" :key="item.key">
         <button
@@ -83,6 +83,7 @@ async function onUpdateClick(): Promise<void> {
           type="button"
           :class="{ 'is-active': ui.currentView === item.key }"
           :aria-current="ui.currentView === item.key ? 'page' : undefined"
+          :title="ui.sidebarCollapsed ? item.label : undefined"
           @click="go(item)"
         >
           <Icon :name="item.icon" :size="16" />
@@ -96,6 +97,7 @@ async function onUpdateClick(): Promise<void> {
       <!--
         更新提示。只在「有新版本」或「查不到」时出现 ——
         「已是最新」「还没查过」不该在侧边栏常驻占位置。
+        收起后只留图标（那里放不下一行字）。
       -->
       <button
         v-if="update.hintLabel"
@@ -110,7 +112,32 @@ async function onUpdateClick(): Promise<void> {
       </button>
 
       <div class="sidebar__meta">
-        <span class="sidebar__version">v{{ appVersion }}</span>
+        <!--
+          收起 / 展开。放在版本号这一行：截图里用户圈的正是左下角那一带，
+          而它也确实是「这一栏的开关」最该待的地方 —— 离栏本身近，离内容远。
+        -->
+        <button
+          class="sidebar__collapse"
+          type="button"
+          :title="ui.sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
+          :aria-label="ui.sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
+          @click="ui.sidebarCollapsed = !ui.sidebarCollapsed"
+        >
+          <Icon :name="ui.sidebarCollapsed ? 'chevron-right' : 'chevron-left'" :size="13" />
+        </button>
+
+        <!-- 收起后版本号没地方放，换成一个图标；点它去「关于」看完整版本与许可 -->
+        <span v-if="ui.sidebarCollapsed" class="sidebar__meta-icon">
+          <button
+            class="sidebar__collapse"
+            type="button"
+            :title="`v${appVersion} · 前往关于页`"
+            @click="go({ key: 'about', icon: 'info', label: '关于' })"
+          >
+            <Icon name="info" :size="13" />
+          </button>
+        </span>
+        <span v-else class="sidebar__version">v{{ appVersion }}</span>
       </div>
     </div>
   </nav>
@@ -249,5 +276,74 @@ async function onUpdateClick(): Promise<void> {
   gap: var(--space-2);
   font-size: 11px;
   color: var(--color-text-tertiary);
+}
+
+.sidebar__collapse {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-tertiary);
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.sidebar__collapse:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/* ---- 收起态：只留图标 ---- */
+/*
+ * 宽度压到只够放一个图标 + 两侧留白。标签、角标数字、版本号文字一起收掉，
+ * 这一块就只剩「一列能点的图标」—— 要认是哪一个，靠 hover 的 title。
+ * 角标收成一个小圆点挂在图标右上角：数字放不下了，但「这儿有东西」得留个记号。
+ */
+.sidebar.is-collapsed {
+  width: 52px;
+}
+
+.sidebar.is-collapsed .sidebar__item {
+  justify-content: center;
+  padding: 0;
+  gap: 0;
+}
+
+.sidebar.is-collapsed .sidebar__label,
+.sidebar.is-collapsed .sidebar__update-text,
+.sidebar.is-collapsed .sidebar__version {
+  display: none;
+}
+
+.sidebar.is-collapsed .sidebar__badge {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  min-width: 0;
+  width: 6px;
+  height: 6px;
+  padding: 0;
+  font-size: 0;
+}
+
+.sidebar.is-collapsed .sidebar__item {
+  position: relative;
+}
+
+.sidebar.is-collapsed .sidebar__update {
+  justify-content: center;
+  padding: 6px 0;
+}
+
+.sidebar.is-collapsed .sidebar__foot {
+  padding: var(--space-3) var(--space-2);
+}
+
+.sidebar.is-collapsed .sidebar__meta {
+  flex-direction: column;
+  gap: var(--space-1);
 }
 </style>

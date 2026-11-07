@@ -76,6 +76,37 @@ export async function confirmWithOption(
   return { ok: true, checked: window.confirm(`${options.checkboxLabel}？` + '\n（取消 = 按默认方式处理）') }
 }
 
+/**
+ * 关闭项目前的三选：保存并关闭 / 不保存关闭 / 取消。
+ *
+ * 走系统原生对话框，理由同上 —— 会丢内容的岔路口必须真的被看到，
+ * 且必须**模态**：用户正切在别的窗口时，应用内浮层等于没提醒。
+ * 按钮顺序从左到右，「不保存关闭」夹在中间，Esc / 关窗都落在「取消」上。
+ */
+export type ProjectCloseChoice = 'save' | 'discard' | 'cancel'
+
+export async function confirmProjectClose(message: string): Promise<ProjectCloseChoice> {
+  const bridge = window.xbaos
+  if (bridge?.dialog?.confirm) {
+    const index = await bridge.dialog.confirm({
+      type: 'warning',
+      title: '项目有未保存的改动',
+      message,
+      detail: '选择「不保存关闭」后，这些改动将无法找回。',
+      buttons: ['保存并关闭', '不保存关闭', '取消'],
+      // 默认落在「保存并关闭」：它不丢内容，顺手回车也是安全的
+      defaultId: 0,
+      cancelId: 2,
+    })
+    return index === 0 ? 'save' : index === 1 ? 'discard' : 'cancel'
+  }
+
+  // 浏览器预览没有原生三按钮：先问保存，再问要不要不保存关（仅预览路径）
+  const text = `${message}\n\n确定 = 保存并关闭`
+  if (window.confirm(text)) return 'save'
+  return window.confirm('不保存关闭？\n（取消 = 放弃关闭，项目留在列表里）') ? 'discard' : 'cancel'
+}
+
 export interface BlockedNotice {
   /** 标题，一句话说清「为什么不行」 */
   title: string
