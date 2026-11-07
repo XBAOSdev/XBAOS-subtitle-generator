@@ -156,7 +156,7 @@ const makeManifest = (over = {}) => ({
   schema: 1,
   id: 'subtitle-generator',
   latest: MOCK_VERSION,
-  name: 'XBAOS 字幕生成器',
+  name: '小包听幕',
   summary: '本地离线的音频转字幕工具',
   channel: 'stable',
   updated: '2026-11-01',

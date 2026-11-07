@@ -1,7 +1,7 @@
 Noto Sans SC 2.04
 Copyright 2014-2021 Adobe (https://www.adobe.com/), with Reserved Font Name 'Source'.
 
-XBAOS 字幕生成器内嵌的是上述字体按常用字集裁剪后的子集（未改动字形设计，
+小包听幕内嵌的是上述字体按常用字集裁剪后的子集（未改动字形设计，
 保留 wght 变量轴 100-900）。裁剪范围见同一目录下的 THIRD-PARTY.md。
 
 

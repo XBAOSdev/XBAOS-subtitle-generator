@@ -3196,7 +3196,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const manifest = {
     schema: 1,
     id: 'subtitle-generator',
-    name: 'XBAOS 字幕生成器',
+    name: '小包听幕',
     latest: '0.2.0',
     updated: '2026-11-01',
     homepage: 'https://subtitle.xbaos.com.cn',

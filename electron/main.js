@@ -51,6 +51,26 @@ import {
   writableModelsDir,
 } from './paths.js'
 
+/*
+ * 数据目录**钉死**，不随产品名走。
+ *
+ * 默认值是 `%APPDATA%/<app.getName()>`，而 `getName()` 认的是打包后
+ * package.json 里的 `productName`。也就是说产品名一改，设置、模型缓存、
+ * 主题、日志会一起搬到一个新目录里 —— 用户看到的是「软件像刚装好的」，
+ * 那 1.6 GB 模型还得重下。
+ *
+ * 所以这里显式写死成改名前的目录名。它只是磁盘上的一个文件夹名，界面上
+ * 不出现，用户看不见；换来的是**改名对既有数据零影响**。以后产品名再变，
+ * 这一行也不动。
+ *
+ * 例外：命令行带了 `--user-data-dir` 就**不动**。探针靠它起一次性目录
+ * 来假装「一台干净的机器」；硬钉死会让探针实例与用户正在跑的实例抢同一把
+ * 单实例锁，于是探针刚起来就自我退出（报「调试端口就绪前退出」）。
+ */
+if (!process.argv.some((arg) => arg.startsWith('--user-data-dir'))) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'xbaos-subtitle-generator'))
+}
+
 // 同一时刻只允许一个实例：引擎进程和模型都是独占资源，跑两份没有意义
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
@@ -489,7 +509,7 @@ async function writeCrashReport(client, info) {
     await ensureLogsDir()
     const layers = await readVulkanLayers()
     const lines = [
-      'XBAOS 字幕生成器 引擎崩溃现场',
+      '小包听幕 引擎崩溃现场',
       `时间：${new Date().toLocaleString()}`,
       `版本：${app.getVersion()}`,
       `退出码：${info?.code ?? '(无)'} —— ${describeExitCode(info?.code)}`,
@@ -2202,7 +2222,7 @@ function registerIpc() {
       const layers = await readVulkanLayers()
       const lastExit = client?.lastExit
       const lines = [
-        'XBAOS 字幕生成器 诊断信息',
+        '小包听幕 诊断信息',
         `时间：${new Date().toLocaleString()}`,
         `版本：${app.getVersion()}`,
         ...hostSummary(),

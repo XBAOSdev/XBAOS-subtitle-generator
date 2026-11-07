@@ -7,8 +7,10 @@
 #      不依赖 vcruntime140.dll 之类的微软运行时
 
 appId: com.xbaos.subtitle-generator
-productName: XBAOS 字幕生成器
+productName: 小包听幕
 copyright: © 2026 XBAOS
+# 可执行文件名保持英文且**不随产品名改**：它同时是安装目录名与进程名，
+# 改了等于换一个软件装，老版本不会被覆盖。产品名只影响界面与快捷方式。
 executableName: XBAOS-Subtitle-Generator
 
 directories:
@@ -93,7 +95,7 @@ fileAssociations:
   - ext: xbsgp
     # ProgID。用点分 ASCII，不用中文，避免某些工具按 ANSI 读到乱码
     name: XBAOS.SubtitleProject
-    description: XBAOS 字幕生成器项目
+    description: 小包听幕项目
     icon: build/icon.ico
     role: Editor
 
@@ -104,7 +106,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: XBAOS 字幕生成器
+  shortcutName: 小包听幕
   # 安装器与卸载程序图标（桌面快捷方式、开始菜单、控制面板卸载入口共用）
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico

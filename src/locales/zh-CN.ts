@@ -2,8 +2,8 @@
 
 export default {
   app: {
-    name: 'XBAOS 字幕生成器',
-    shortName: '字幕生成器',
+    name: '小包听幕',
+    shortName: '听幕',
   },
 
   nav: {

@@ -5,9 +5,12 @@
 
 export const branding = {
   /** 产品全名（窗口标题、安装包产品名、关于页） */
-  productName: 'XBAOS 字幕生成器',
-  /** 简称（窄侧栏、任务栏悬浮提示） */
-  shortName: '字幕生成器',
+  productName: '小包听幕',
+  /**
+   * 简称（窄侧栏、任务栏悬浮提示、AI 校对窗口副标题）。
+   * 取全名后半截，和原名「字幕生成器」同样是 2 字，宽度不会撑破那块位置。
+   */
+  shortName: '听幕',
   /** 开发者 */
   developer: 'XBAOS',
   /** 本软件官网（官网本身就是这个软件的展示页） */
@@ -27,9 +30,15 @@ export const branding = {
   updateSiteLabel: 'subtitle.xbaos.com.cn',
   /** 版权行 */
   copyright: '© 2026 XBAOS',
-  /** 安装目录片段 */
+  /**
+   * 安装目录片段与数据目录。
+   *
+   * 这两项**不随产品名走**：安装目录由 electron-builder 的 `executableName`
+   * 决定，数据目录由主进程 `app.setPath('userData', ...)` 钉死，两者都是
+   * 磁盘上的路径，改名时留着旧值才能让老用户的数据原地不动。
+   * 目前代码里没有引用它们，改名前请先把上面的来源看一遍再决定要不要动。
+   */
   installDirName: 'SubtitleGenerator',
-  /** 数据目录 */
   dataDirName: 'XBAOS\\SubtitleGenerator',
 } as const
 
