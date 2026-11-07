@@ -115,7 +115,7 @@ async function start(event?: MouseEvent): Promise<void> {
   ui.notify(
     failed > 0 ? 'warning' : 'success',
     failed > 0 ? `识别完成，${failed} 个文件失败` : '识别完成',
-    failed > 0 ? '失败的那些仍留在队列里，可以重试' : '已切换到预览与编辑',
+    failed > 0 ? '失败的那些仍留在队列里，可以重试' : '已切换到字幕工作台',
   )
   // 还有失败项就留在导入页：用户得看着原因决定重试还是换文件（2.4）
   if (failed === 0) ui.navigate('editor')
@@ -410,12 +410,12 @@ async function start(event?: MouseEvent): Promise<void> {
         <span class="spacer" />
 
         <button
-          v-if="project.files.length > 0"
+          v-if="project.files.length > 0 || project.recognizing"
           class="btn btn--lg"
           type="button"
           @click="ui.navigate('editor')"
         >
-          去预览
+          去工作台
         </button>
         <button
           v-if="project.recognizing && ui.taskFlight === null"
@@ -721,7 +721,7 @@ async function start(event?: MouseEvent): Promise<void> {
 
 /* 「开始识别」按钮在圆点飞出去的那 460ms 里隐去自己。
    用 visibility 而不是 display / v-if：**布局不能动** —— 按钮一消失，
-   同一行的「去预览」会往右滑一格，看起来像是页面抖了一下。 */
+   同一行的「去工作台」会往右滑一格，看起来像是页面抖了一下。 */
 .btn.is-flying {
   visibility: hidden;
 }

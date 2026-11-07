@@ -16,10 +16,18 @@ interface NavItem {
   key: ViewKey
   icon: string
   label: string
-  disabled?: boolean
   badge?: number
 }
 
+/**
+ * 五个入口**都常驻可点**。
+ *
+ * 曾经「字幕工作台」在没有可编辑文件时是灰的（`disabled`）。那条规则在
+ * 「第一批识别完成、又拖入第二批」时变成了纯障碍：项目里明明有字幕可看，
+ * 却因为此刻正在识别而进不去 —— 按钮拿识别状态当了门槛，而用户要的恰恰是
+ * 「一边识别一边翻已完成的那些」。有内容就显示内容，没内容就显示空态，
+ * 这在任何时刻都是成立的。
+ */
 const items = computed<NavItem[]>(() => [
   {
     key: 'home',
@@ -32,7 +40,6 @@ const items = computed<NavItem[]>(() => [
     key: 'editor',
     icon: 'list',
     label: t('nav.editor'),
-    disabled: project.supportedFiles.length === 0,
     badge: project.files.length || undefined,
   },
   { key: 'models', icon: 'cpu', label: t('nav.models') },
@@ -41,10 +48,6 @@ const items = computed<NavItem[]>(() => [
 ])
 
 function go(item: NavItem): void {
-  if (item.disabled) {
-    ui.notify('info', '还没有可编辑的字幕', '先导入音频并完成识别')
-    return
-  }
   ui.navigate(item.key)
 }
 
@@ -75,12 +78,8 @@ async function onUpdateClick(): Promise<void> {
         <button
           class="sidebar__item"
           type="button"
-          :class="{
-            'is-active': ui.currentView === item.key,
-            'is-disabled': item.disabled,
-          }"
+          :class="{ 'is-active': ui.currentView === item.key }"
           :aria-current="ui.currentView === item.key ? 'page' : undefined"
-          :disabled="item.disabled"
           @click="go(item)"
         >
           <Icon :name="item.icon" :size="16" />
@@ -148,7 +147,7 @@ async function onUpdateClick(): Promise<void> {
     color var(--dur-fast) var(--ease-out);
 }
 
-.sidebar__item:hover:not(.is-disabled) {
+.sidebar__item:hover {
   background: var(--color-bg-hover);
   color: var(--color-text-primary);
 }
@@ -156,11 +155,6 @@ async function onUpdateClick(): Promise<void> {
 .sidebar__item.is-active {
   background: var(--color-accent-subtle);
   color: var(--color-accent-text);
-}
-
-.sidebar__item.is-disabled {
-  color: var(--color-text-disabled);
-  cursor: not-allowed;
 }
 
 .sidebar__label {

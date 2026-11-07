@@ -18,10 +18,17 @@ const backendLabel = computed(() => {
   return '自动'
 })
 
+/**
+ * 中央那行告警数字。
+ *
+ * 口径是**全工程**（所有项目加起来），与它左右两侧同一层：这条状态栏横跨
+ * 整个窗口、长在最外面，它说的就该是「整个软件里现在有多少问题」。
+ * 当前这一个项目的数字在字幕工作台的底栏里，那一行才是「你正在看的这份」。
+ */
 const issueText = computed(() => {
   const parts: string[] = []
-  if (project.errorCount > 0) parts.push(`${project.errorCount} 条错误`)
-  if (project.warningCount > 0) parts.push(`${project.warningCount} 条警告`)
+  if (project.allErrors > 0) parts.push(`${project.allErrors} 条错误`)
+  if (project.allWarnings > 0) parts.push(`${project.allWarnings} 条警告`)
   return parts.join('，')
 })
 
@@ -105,12 +112,13 @@ watch(issueText, (next, prev) => {
 <template>
   <footer class="statusbar">
     <div class="statusbar__side">
-      <template v-if="project.hasFiles">
-        <span>文件 {{ project.files.length }}</span>
+      <!-- 全工程合计：切项目时这一行不该跟着变（它说的是整个软件） -->
+      <template v-if="project.allFiles > 0">
+        <span>文件 {{ project.allFiles }}</span>
         <span class="statusbar__sep" aria-hidden="true">|</span>
-        <span>字幕 {{ project.totalSegments }} 条</span>
+        <span>字幕 {{ project.allSegments }} 条</span>
         <span class="statusbar__sep" aria-hidden="true">|</span>
-        <span>时长 {{ formatDuration(project.totalDuration) }}</span>
+        <span>时长 {{ formatDuration(project.allDuration) }}</span>
       </template>
       <template v-else-if="project.intake.length > 0">
         <span>待识别 {{ project.pendingIntake.length }} 个</span>
@@ -173,8 +181,8 @@ watch(issueText, (next, prev) => {
     </div>
 
     <div class="statusbar__side statusbar__side--right">
-      <span v-if="project.pendingReviewCount > 0" class="statusbar__pending">
-        {{ project.pendingReviewCount }} 个文件处理完成
+      <span v-if="project.allPendingReview > 0" class="statusbar__pending">
+        {{ project.allPendingReview }} 个文件处理完成
       </span>
       <span class="statusbar__sep" aria-hidden="true">|</span>
       <span class="statusbar__backend" :title="'推理后端：' + backendLabel">

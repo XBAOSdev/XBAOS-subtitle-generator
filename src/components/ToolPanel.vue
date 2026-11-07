@@ -85,30 +85,12 @@ watch(
 const activeFile = computed(() => project.viewFile)
 const disabled = computed(() => !activeFile.value)
 
-/* ------------------------------------------------------ 撤销 / 重做 */
-
-const canUndo = computed(() => history.canUndoFile(project.viewFileId))
-const canRedo = computed(() => history.canRedoFile(project.viewFileId))
-
-function undo(): void {
-  const file = activeFile.value
-  if (!file) return
-  const restored = history.undo(file.id, file.segments)
-  if (!restored) return
-  file.segments = restored
-  editor.clearSelection()
-  editor.endEdit()
-}
-
-function redo(): void {
-  const file = activeFile.value
-  if (!file) return
-  const restored = history.redo(file.id, file.segments)
-  if (!restored) return
-  file.segments = restored
-  editor.clearSelection()
-  editor.endEdit()
-}
+/*
+ * 撤销 / 重做不在这里。
+ *
+ * 它们搬到了表格工具栏：那是「正在改字幕」的地方，手和眼都在那张表上，
+ * 不必横跨到右侧栏。侧栏这两格让给工具与 AI 入口。
+ */
 
 function run(tool: ToolItem): void {
   if (disabled.value) return
@@ -459,33 +441,6 @@ function rewrap(): void {
 
 <template>
   <div class="toolpanel">
-    <!-- 撤销 / 重做 -->
-    <div class="history">
-      <div class="history__row">
-        <button
-          class="history__btn"
-          type="button"
-          title="撤销上一步编辑（Ctrl+Z）。每个文件最多可回退 15 步"
-          :disabled="!canUndo"
-          @click="undo"
-        >
-          <Icon name="undo" :size="14" />
-          <span>撤销</span>
-        </button>
-        <button
-          class="history__btn"
-          type="button"
-          title="重做（Ctrl+Y）"
-          :disabled="!canRedo"
-          @click="redo"
-        >
-          <Icon name="redo" :size="14" />
-          <span>重做</span>
-        </button>
-      </div>
-      <p class="history__note">每个文件最多保留 15 步</p>
-    </div>
-
     <div class="toolpanel__head">
       <span class="toolpanel__title">工具</span>
       <span v-if="disabled" class="toolpanel__note">先选择一个文件</span>
@@ -623,54 +578,6 @@ function rewrap(): void {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-}
-
-/* 撤销重做 */
-.history {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.history__row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.history__btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  /* 侧栏只有 230px 左右，按钮必须禁止收缩：flex 默认会一直压到 min-content，
-     而中文的 min-content 只有一个字宽，「撤销」会被压成竖排两行 */
-  flex: 0 0 auto;
-  white-space: nowrap;
-  height: 28px;
-  padding: 0 var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-surface);
-  font-size: var(--font-size-xs);
-  color: var(--color-text-secondary);
-}
-
-.history__btn:hover:not(:disabled) {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
-
-.history__btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-/* 说明单独一行：挤在按钮右侧时两段文字会互相抢宽度 */
-.history__note {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--color-text-tertiary);
 }
 
 .toolpanel__head {

@@ -594,9 +594,25 @@ async function saveInPlace(): Promise<void> {
 
 <template>
   <div class="editor">
-    <div class="editor__body">
-      <FileTree v-if="showFileTree" />
+    <FileTree v-if="showFileTree" />
 
+    <!--
+      还没有任何子项目：不摆一堆空控件，直接说明这里能干什么。
+      这个页面现在**任何时刻都能进来**（侧栏不再因识别中而灰掉），
+      所以第一次进来很可能什么都没识别完 —— 空态必须是句人话。
+    -->
+    <div v-if="!project.hasFiles" class="editor__empty">
+      <Icon name="list" :size="22" class="editor__empty-icon" />
+      <p class="editor__empty-title">还没有可编辑的字幕</p>
+      <p class="editor__empty-text">
+        导入音频并完成识别，或者直接打开一个 .srt / .vtt / .ass 字幕文件。
+      </p>
+      <button class="btn btn--primary" type="button" @click="ui.navigate('home')">
+        去导入
+      </button>
+    </div>
+
+    <div v-else class="editor__body">
       <div class="editor__center">
         <!-- 音频对不上：路径失效或被换过。不给提示的话，用户先看到的是
              一片空波形，然后以为软件坏了 -->
@@ -711,7 +727,7 @@ async function saveInPlace(): Promise<void> {
       </aside>
     </div>
 
-    <footer class="editor__foot">
+    <footer v-if="project.hasFiles" class="editor__foot">
       <span class="editor__stat">
         共 <strong>{{ activeFile?.segments.length ?? 0 }}</strong> 条
       </span>
@@ -781,11 +797,89 @@ async function saveInPlace(): Promise<void> {
 </template>
 
 <style scoped>
+/*
+ * 页面骨架：两列两行。
+ *
+ * ```
+ * ┌──────────┬──────────────────────┐
+ * │ 侧栏      │ 中间 + 右侧（body）    │
+ * │（跨两行） ├──────────────────────┤
+ * │          │ 底栏（只属于右半边）    │
+ * └──────────┴──────────────────────┘
+ * ```
+ *
+ * 底栏原来横跨整个窗口，读的却是**当前这个项目**的文件数 / 字数 / 告警。
+ * 一行「当前项目」的数字铺满全宽，位置又在最外一层，看起来就像在说全局 ——
+ * 切项目时它整行跟着变，但视觉上没有任何东西提示「这只跟你选的那个项目有关」。
+ * 让侧栏落到底、底栏缩回右半边之后，层级自己就说清楚了。
+ */
 .editor {
   flex: 1;
   min-height: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+/* 侧栏从顶部一路落到底：它是「项目列表」，属于整个页面 */
+.editor > :deep(.filetree) {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  /* 自己那一列宽 232px；grid 的 auto 列跟着它走 */
+  min-height: 0;
+}
+
+.editor__body {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  /*
+   * 窗口很窄时（三栏挤在一起）中间区会被压成一条缝 —— 780px 宽时只剩
+   * 七十几个像素，表格里除复选框什么都放不下。给中间区一个下限，
+   * 不足的部分由这一行**整体横滑**补上：右边的工具面板会被推出去，
+   * 滑一下就能回来，而字幕本身至少还是可读的宽度。
+   *
+   * 表格自己还有一层横滑（min-width 620），那是「列」的层面；
+   * 这里是「三个面板」的层面，两者不冲突。
+   */
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.editor__empty {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-10) var(--space-6);
+  text-align: center;
+}
+
+.editor__empty-icon {
+  margin-bottom: var(--space-1);
+  color: var(--color-text-disabled);
+}
+
+.editor__empty-title {
+  font-size: var(--font-size-md);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.editor__empty-text {
+  max-width: 34em;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-base);
+  color: var(--color-text-tertiary);
+}
+
+.editor__empty > .btn {
+  margin-top: var(--space-2);
 }
 
 /*
@@ -805,15 +899,10 @@ async function saveInPlace(): Promise<void> {
 }
 
 /* 「保存项目」右侧的小三角：只在多项目都有改动时出现 */
-.editor__body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-
 .editor__center {
   flex: 1;
-  min-width: 0;
+  /* 中间区的下限：窗口再窄也不把字幕压成一条缝（见 .editor__body 的注释） */
+  min-width: 360px;
   display: flex;
   flex-direction: column;
 }
@@ -854,6 +943,9 @@ async function saveInPlace(): Promise<void> {
 }
 
 .editor__foot {
+  /* 只占右半边：左边那列是贯穿到底的项目侧栏 */
+  grid-column: 2;
+  grid-row: 2;
   flex: none;
   display: flex;
   align-items: center;
@@ -870,8 +962,14 @@ async function saveInPlace(): Promise<void> {
    */
   flex-wrap: wrap;
   row-gap: var(--space-2);
-  /* 换行之后底栏会变高，不许它把上面的编辑区挤掉 */
-  max-height: 40%;
+  /*
+   * 换行之后底栏会变高，不许它把上面的编辑区挤掉。
+   *
+   * 这里**不能用百分比**：底栏现在是 grid 的一格，`max-height: 40%` 会按
+   * 「这一行的高度」算（约 49px × 0.4 ≈ 20px），把整条底栏压成一条 20px 的缝，
+   * 按钮溢在里面只能竖着滚。给一个绝对上限（两行按钮 + 内边距）。
+   */
+  max-height: 120px;
   overflow-y: auto;
 }
 

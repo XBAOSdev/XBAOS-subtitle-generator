@@ -18,9 +18,12 @@ import type { SubtitleSegment } from '@/types'
  * 刚好落在另一段上就找不到。
  *
  * 上限 15 步，超过后丢掉最老的 —— 用户明确要求的值。
+ *
+ * 这个数字会出现在工具栏的悬停提示里，所以**导出**：界面不该自己再写一遍
+ * 「15」，改上限时漏掉文案就等于骗人。
  */
 
-const MAX_STEPS = 15
+export const MAX_STEPS = 15
 
 export interface HistoryBucket {
   /** 过去的快照，栈顶是「上一步」 */

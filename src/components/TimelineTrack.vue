@@ -118,10 +118,83 @@ const maxZoom = computed(() =>
 
 const viewStartSec = ref(0)
 
+/*
+ * ---- 平滑滚动 / 缩放 ----
+ *
+ * 滚轮事件是**离散**的：鼠标滚一格 deltaY 就是 100，触控板一次滑动则是
+ * 几十个很小的 delta。直接把这一格加进 `viewStartSec`，画面就是一跳一跳
+ * 往前走 —— 鼠标滚轮尤其明显，一格走掉视窗的十分之一，像被推了一把。
+ *
+ * 所以滚轮不再直接改渲染值，而是改「目标值」；渲染值每帧朝目标追一段
+ * （指数逼近）。手指停下之后画面还会滑一小截，这正是想要的惯性感；
+ * 而拖动、点选、跟随播放这些**跟手**的动作仍然直接落值（`jumpTo`），
+ * 它们本来就该和被拖的那个东西严丝合缝。
+ */
+const SMOOTH = 0.32
+/** 平移目标（秒） */
+let panGoalSec = 0
+/** 缩放目标（倍数）*/
+let zoomGoal = 1
+/** 缩放锚点（秒）：整段平滑期间它停在屏幕上同一处 */
+let zoomAnchorSec = 0
+let animRaf = 0
+
+/** 直接落值：把目标也一并挪过去，免得动画回头又把它拉回旧位置 */
+function jumpTo(sec: number): void {
+  viewStartSec.value = sec
+  panGoalSec = sec
+  clampView()
+  clampPanGoal()
+}
+
 function clampView(): void {
   const maxStart = Math.max(0, duration.value - visibleSec.value)
   if (viewStartSec.value > maxStart) viewStartSec.value = maxStart
   if (viewStartSec.value < 0) viewStartSec.value = 0
+}
+
+/**
+ * 目标值也要夹。
+ *
+ * 只夹渲染值是不够的：目标停在视窗外时，动画每帧把渲染值推向它、watch 里的
+ * `clampView` 又把它拉回来，两者相持不下 —— 那一帧的 rAF 永远不会收敛，
+ * 滚轮滑到头的瞬间就开始空转。
+ */
+function clampPanGoal(): void {
+  const maxStart = Math.max(0, duration.value - visibleSec.value)
+  panGoalSec = Math.min(Math.max(0, panGoalSec), maxStart)
+}
+
+function stepAnim(): void {
+  animRaf = 0
+  let busy = false
+
+  const dz = zoomGoal - zoom.value
+  if (Math.abs(dz) > 0.0005) {
+    zoomAround(zoom.value + dz * SMOOTH, zoomAnchorSec)
+    // 缩放会自己挪视窗（锚点不动），平移目标要跟上，否则松手后画面又滑回去
+    panGoalSec = viewStartSec.value
+    busy = true
+  } else if (zoom.value !== zoomGoal) {
+    zoomAround(zoomGoal, zoomAnchorSec)
+    panGoalSec = viewStartSec.value
+  }
+
+  clampPanGoal()
+  const dp = panGoalSec - viewStartSec.value
+  if (Math.abs(dp) > 0.001) {
+    viewStartSec.value += dp * SMOOTH
+    busy = true
+  } else {
+    viewStartSec.value = panGoalSec
+  }
+
+  if (busy) animRaf = requestAnimationFrame(stepAnim)
+}
+
+function startAnim(): void {
+  if (animRaf) return
+  animRaf = requestAnimationFrame(stepAnim)
 }
 
 /** 时间 → 像素（相对 stage 左边缘） */
@@ -159,15 +232,19 @@ function zoomAround(nextZoom: number, anchorSec: number): void {
   zoom.value = clamped
   if (clamped <= 1) {
     viewStartSec.value = 0
+    panGoalSec = 0
     return
   }
   viewStartSec.value = anchorSec - anchorRatio * (width / (fitPxPerSec.value * clamped))
   clampView()
+  // 视窗是被这次缩放推着走的，平移目标必须跟上，否则下一帧又被拉回原处
+  panGoalSec = viewStartSec.value
 }
 
 function resetZoom(): void {
   zoom.value = 1
-  viewStartSec.value = 0
+  zoomGoal = 1
+  jumpTo(0)
 }
 
 /* -------------------------------------------------------------- 泳道布局 */
@@ -538,8 +615,8 @@ function onStagePointerMove(event: PointerEvent): void {
     editor.setPlayhead(panState.playheadBefore)
   }
   if (zoom.value <= 1) return
-  viewStartSec.value = panState.originStart - dx / pxPerSec.value
-  clampView()
+  // 拖动跟手：不走平滑（平滑会让时间轴"追不上"指针）
+  jumpTo(panState.originStart - dx / pxPerSec.value)
 }
 
 function onStagePointerUp(event: PointerEvent): void {
@@ -599,6 +676,8 @@ function onBarContextMenu(event: MouseEvent, seg: SubtitleSegment): void {
  * **必须 preventDefault**：Chromium 默认把 Ctrl+wheel 当整页缩放，不拦住的话
  * 一次捏合会把整个软件界面放大，比缩放不生效更糟。
  * 元素级 addEventListener 默认 passive:false，显式写上是为了不依赖这个默认值。
+ *
+ * 两个动作都只写「目标」，由 `stepAnim` 逐帧追上来 —— 见 smooth 那一段的注释。
  */
 function onWheel(event: WheelEvent): void {
   if (duration.value <= 0) return
@@ -610,7 +689,11 @@ function onWheel(event: WheelEvent): void {
     const rect = stage.getBoundingClientRect()
     // 触控板捏合的 deltaY 很小，鼠标滚轮很大，指数映射让两者手感接近
     const factor = Math.exp(-event.deltaY * 0.0022)
-    zoomAround(zoom.value * factor, timeAtX(event.clientX - rect.left))
+    // 目标在**上一次的目标**上继续累乘：连着滚十下时，每一下都从前一下的
+    // 落点接着放大，而不是每次都从当前这一帧的渲染值重新算（那样会越滚越慢）
+    zoomAnchorSec = timeAtX(event.clientX - rect.left)
+    zoomGoal = Math.min(maxZoom.value, Math.max(1, zoomGoal * factor))
+    startAnim()
     return
   }
 
@@ -618,13 +701,16 @@ function onWheel(event: WheelEvent): void {
   // 横向滚轮优先用 deltaX；只有纵向滚轮时把它当横向用
   const raw = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
   const pixels = event.deltaMode === 1 ? raw * 16 : raw
-  viewStartSec.value += pixels / pxPerSec.value
-  clampView()
+  panGoalSec += pixels / pxPerSec.value
+  clampPanGoal()
+  startAnim()
 }
 
 function zoomBy(factor: number): void {
   const center = viewStartSec.value + visibleSec.value / 2
-  zoomAround(zoom.value * factor, center)
+  zoomGoal = Math.min(maxZoom.value, Math.max(1, zoom.value * factor))
+  zoomAnchorSec = center
+  zoomAround(zoomGoal, center)
 }
 
 /* ---------------------------------------------------------------- 绘制 */
@@ -761,6 +847,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointerup', onWindowPointerUp)
   window.removeEventListener('pointercancel', onWindowPointerUp)
   if (raf) window.cancelAnimationFrame(raf)
+  if (animRaf) window.cancelAnimationFrame(animRaf)
 })
 
 /** 换文件 / 换合并产物：视窗复位，并把演示峰值准备好 */
@@ -810,6 +897,7 @@ watch([zoom, viewStartSec, stageW], () => {
 
 watch(duration, () => {
   clampView()
+  clampPanGoal()
   scheduleDraw()
 })
 
@@ -850,8 +938,7 @@ watch(
     if (left >= 0 && right <= stageW.value) return
     const span = visibleSec.value
     // 居中偏左一点：右边留出余量，方便连看后面几条
-    viewStartSec.value = seg.start - span * 0.3
-    clampView()
+    jumpTo(seg.start - span * 0.3)
   },
 )
 
@@ -862,8 +949,7 @@ watch(
     if (!editor.isPlaying || zoom.value <= 1) return
     const span = visibleSec.value
     if (t >= viewStartSec.value && t <= viewStartSec.value + span * 0.9) return
-    viewStartSec.value = t - span * 0.2
-    clampView()
+    jumpTo(t - span * 0.2)
   },
 )
 
@@ -1074,9 +1160,27 @@ const playedWidth = computed(() => Math.max(0, Math.min(stageW.value, playheadX.
   gap: var(--space-2);
   height: 28px;
   padding: 0 var(--space-3);
+  /*
+   * 窄窗口：状态文字先省略，再窄就整条左右滑。缩放那三个按钮必须一直够得着
+   * —— 它们被挤出可视区时，时间轴就既滑不动也缩不了，等于卡死。
+   */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.timeline__bar > * {
+  flex: none;
+}
+
+/* 撑开中间那段留白（`> *` 里被设成了 none，这里单独放行）。窄到放不下时它先缩到 8px */
+.timeline__bar > .spacer {
+  flex: 1 0 8px;
 }
 
 .timeline__status {
+  /* 状态文字是可省略的那一个：其余控件都 `flex: none` */
+  flex: 0 1 auto;
   font-size: 11px;
   color: var(--color-text-tertiary);
   white-space: nowrap;

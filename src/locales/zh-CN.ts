@@ -8,7 +8,12 @@ export default {
 
   nav: {
     home: '导入',
-    editor: '预览与编辑',
+    /*
+     * 这一页原来叫「预览与编辑」。改名不只是换词：它现在同时承担
+     * 「看识别出来什么」「改字幕」「校对 / 翻译后回看」三件事，
+     * 「预览与编辑」把它的重心说成了「预览」。统一叫「字幕工作台」。
+     */
+    editor: '字幕工作台',
     models: '模型',
     settings: '设置',
     about: '关于',
@@ -16,7 +21,7 @@ export default {
 
   view: {
     home: '导入音频',
-    editor: '预览与编辑',
+    editor: '字幕工作台',
     models: '模型管理',
     settings: '设置',
     about: '关于本软件',

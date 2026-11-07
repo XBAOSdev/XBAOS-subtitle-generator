@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { useEditorStore } from '@/stores/editor'
 import { useSettingsStore } from '@/stores/settings'
-import { useHistoryStore } from '@/stores/history'
+import { useHistoryStore, MAX_STEPS } from '@/stores/history'
 import type { SubtitleSegment, SubtitleViewMode } from '@/types'
 import {
   SOURCE_SLOT,
@@ -39,6 +39,8 @@ const speakerStore = useSpeakerStore()
 
 /** 滚动容器。编辑态取输入框、后续「播放时自动滚动到当前句」都基于它 */
 const bodyRef = ref<HTMLDivElement | null>(null)
+/** 正文的横向滚动量，表头靠它跟平 */
+const scrollLeft = ref(0)
 
 const segments = computed(() => project.viewFile?.segments ?? [])
 
@@ -122,17 +124,11 @@ function isEdited(seg: SubtitleSegment): boolean {
 }
 
 /**
- * 这一条现在有没有标红（校验告警，或分割时留下的译文「待确认」）。
+ * 这一条的告警级别（决定行左侧那根色条）。
  *
- * 「忽略告警」按钮的显示与否就看它 —— 用 `visibleIssues` 而不是裸的
- * `issues`，所以忽略之后按钮自己也会从「忽略告警」变成「恢复」，
- * 不会出现「红没了但按钮还在说别提醒我」的自相矛盾。
+ * 用 `visibleIssues` 而不是裸的 `issues`：用户已经整条忽略过的条目不该
+ * 继续染红 —— 他按下那个动作的意思就是「我看过了」。
  */
-function hasHighlight(seg: SubtitleSegment): boolean {
-  if (seg.acked) return false
-  return seg.issues.length > 0 || (seg.staleSlots?.length ?? 0) > 0
-}
-
 function worstLevel(seg: SubtitleSegment): 'error' | 'warning' | 'info' | null {
   const list = visibleIssues(seg)
   if (list.length === 0) return null
@@ -141,36 +137,40 @@ function worstLevel(seg: SubtitleSegment): 'error' | 'warning' | 'info' | null {
   return 'info'
 }
 
-/** 右侧小旗的提示文案：把这一条的问题一次说全 */
-function flagTitle(seg: SubtitleSegment): string {
-  const messages = visibleIssues(seg).map((i) => i.message)
-  if ((seg.staleSlots?.length ?? 0) > 0) messages.push('有译文还没按时间码拆开')
-  return messages.join('；')
-}
+/* ---------------------------------------------------------- 撤销 / 重做 */
 
-/**
- * 忽略 / 恢复这一条的告警。
+/*
+ * 两个按钮住进工具栏而不是右侧工具面板：它们作用的对象是「这张表」，
+ * 手指已经在表上，眼睛不用横跨整个窗口去找。侧栏那两块位置让给了工具
+ * 与 AI 功能（那些是「做一件事」，撤销是「退回去」）。
  *
- * 走历史栈：忽略是一次真实的状态改变，撤回应能回到「还在标红」的样子；
- * 用 `commitIfChanged` 则是因为重复点同一个方向不该白占一格历史。
+ * 「每个文件最多保留 15 步」不再当常驻文字占一行 —— 它是**限制说明**，
+ * 不是操作提示，放悬停提示里，想看的人看得到，其余人不必每天读一遍。
  */
-function toggleAck(seg: SubtitleSegment, event: MouseEvent): void {
-  event.stopPropagation()
+const undoHint = computed(
+  () => `撤销上一步编辑（Ctrl+Z）\n历史按文件分别记录，每个文件最多保留 ${MAX_STEPS} 步`,
+)
+const canUndo = computed(() => history.canUndoFile(project.viewFileId))
+const canRedo = computed(() => history.canRedoFile(project.viewFileId))
+
+function undo(): void {
   const file = project.viewFile
   if (!file) return
-  const next = !seg.acked
-  const applied = history.commitIfChanged(
-    file.id,
-    () => file.segments,
-    next ? '忽略告警' : '恢复告警',
-    () => {
-      // 必须走 store：项目视图的 `segments` 是 getter 返回的拷贝，
-      // 直接写下标改的是那份临时数组，不会生效也不报错
-      project.setAcked(seg.id, next)
-    },
-  )
-  if (!applied || !next) return
-  ui.notify('info', '已忽略这一条的告警', '它不再标红，也不计入底部的错误 / 警告条数')
+  const restored = history.undo(file.id, file.segments)
+  if (!restored) return
+  file.segments = restored
+  editor.clearSelection()
+  editor.endEdit()
+}
+
+function redo(): void {
+  const file = project.viewFile
+  if (!file) return
+  const restored = history.redo(file.id, file.segments)
+  if (!restored) return
+  file.segments = restored
+  editor.clearSelection()
+  editor.endEdit()
 }
 
 function onRowClick(event: MouseEvent, id: string): void {
@@ -601,6 +601,12 @@ let followLockUntil = 0
 function onBodyScroll(): void {
   const body = bodyRef.value
   if (!body) return
+  /*
+   * 横向偏移喂给表头。窗口窄到需要左右滑时，表头必须跟着正文走 ——
+   * 否则「开始 / 结束 / 字幕文本」会停在原地，跟下面的内容对不上。
+   * 这里只写一个数字、由样式做 transform，不触发重排。
+   */
+  if (body.scrollLeft !== scrollLeft.value) scrollLeft.value = body.scrollLeft
   // 位置每次滚动都记，切项目回来才停在原处
   project.rememberScrollTop(project.activeDraftId, body.scrollTop)
   if (followRaf) return
@@ -896,6 +902,33 @@ function onKeydown(event: KeyboardEvent): void {
         <span>分割</span>
       </button>
 
+      <span class="toolbar__sep" aria-hidden="true" />
+
+      <!-- 撤销 / 重做贴成一组：两个图标按钮之间的缝比工具栏常规间隔更小，
+           一眼看出它们是「一对」而不是两个不相干的动作 -->
+      <span class="opgroup">
+        <button
+          class="op"
+          type="button"
+          :title="undoHint"
+          :disabled="!canUndo"
+          @click="undo"
+        >
+          <Icon name="undo" :size="13" />
+          <span>撤销</span>
+        </button>
+        <button
+          class="op"
+          type="button"
+          title="重做（Ctrl+Y）"
+          :disabled="!canRedo"
+          @click="redo"
+        >
+          <Icon name="redo" :size="13" />
+          <span>重做</span>
+        </button>
+      </span>
+
       <span class="spacer" />
 
       <!-- 显示方式：纯视图状态，不动数据、也不影响导出 -->
@@ -923,22 +956,32 @@ function onKeydown(event: KeyboardEvent): void {
       </span>
     </div>
 
-    <div class="subtable__head" :class="{ 'has-spk': hasSpeakers }">
-      <span class="cell cell--check">
-        <input
-          type="checkbox"
-          class="row__check"
-          :checked="allChecked"
-          title="全选 / 全不选"
-          @change="toggleAll"
-        />
-      </span>
-      <span class="cell cell--index">#</span>
-      <span class="cell cell--time">开始</span>
-      <span class="cell cell--time">结束</span>
-      <span v-if="hasSpeakers" class="cell cell--spk">讲话人</span>
-      <span class="cell cell--text">字幕文本</span>
-      <span class="cell cell--flag" />
+    <!--
+      表头单独套一层：窗口窄到需要横向滚动时，表头要跟着正文一起平移
+      （`translateX(-scrollLeft)`）。直接给表头自己加 overflow 是不行的 ——
+      它和正文是两个滚动容器，滚起来会各走各的。
+    -->
+    <div class="subtable__headwrap">
+      <div
+        class="subtable__head"
+        :class="{ 'has-spk': hasSpeakers }"
+        :style="{ transform: `translateX(${-scrollLeft}px)` }"
+      >
+        <span class="cell cell--check">
+          <input
+            type="checkbox"
+            class="row__check"
+            :checked="allChecked"
+            title="全选 / 全不选"
+            @change="toggleAll"
+          />
+        </span>
+        <span class="cell cell--index">#</span>
+        <span class="cell cell--time">开始</span>
+        <span class="cell cell--time">结束</span>
+        <span v-if="hasSpeakers" class="cell cell--spk">讲话人</span>
+        <span class="cell cell--text">字幕文本</span>
+      </div>
     </div>
 
     <div ref="bodyRef" class="subtable__body scroll-y" @scroll.passive="onBodyScroll">
@@ -1085,37 +1128,6 @@ function onKeydown(event: KeyboardEvent): void {
               <span v-else class="row__text">{{ trTextOf(seg) || '（空）' }}</span>
             </span>
           </span>
-
-          <span class="cell cell--flag">
-            <!--
-              有标红时给一个「看过了」的出口。
-              校验结论是自动重算的，用户没法把一条真的抹掉；而有些告警是有意为之的
-              （艺术处理的长句、贴得很紧的衔接）。没有出口，这些条目会永远红着、
-              永远计数，用久了只会让人对红色脱敏。
-            -->
-            <button
-              v-if="hasHighlight(seg)"
-              class="row__ack"
-              :class="`row__ack--${worstLevel(seg) ?? 'info'}`"
-              type="button"
-              :title="`${flagTitle(seg)}\n\n点这里忽略这一条的告警（含译文待确认标红）`"
-              @click="toggleAck(seg, $event)"
-            >
-              <Icon name="alert" :size="11" />
-              <span>忽略告警</span>
-            </button>
-            <!-- 忽略之后仍留着入口，否则用户没有后悔的余地 -->
-            <button
-              v-else-if="seg.acked && (seg.issues.length > 0 || (seg.staleSlots?.length ?? 0) > 0)"
-              class="row__ack row__ack--acked"
-              type="button"
-              title="这一条的告警已被忽略，点这里恢复显示"
-              @click="toggleAck(seg, $event)"
-            >
-              <Icon name="eye-off" :size="11" />
-              <span>已忽略</span>
-            </button>
-          </span>
       </div>
       </template>
 
@@ -1153,21 +1165,29 @@ function onKeydown(event: KeyboardEvent): void {
 .row {
   display: grid;
   /*
-   * 最后一列从 26px 加宽到 78px：那里现在放「忽略告警」按钮，
-   * 不是一个小圆点。宽度给足，中文按钮才不会被压成竖排。
+   * 最后一列（78px 的「忽略告警」）已撤掉：那个按钮挪进了右键菜单，
+   * 宽度还给正文。文本列给了 240px 的下限 —— 窗口再窄也不把字压成
+   * 一列竖排，改为整张表左右滑动（见下面的 min-width）。
    *
-   * 说话人那列不在这里：它随数据出现（.has-spk），没开分离就不占宽度。
+   * 讲话人那列不在这里：它随数据出现（.has-spk），没开分离就不占宽度。
    */
-  grid-template-columns: 28px 44px 104px 104px minmax(0, 1fr) 78px;
+  grid-template-columns: 28px 44px 104px 104px minmax(240px, 1fr);
   align-items: center;
   gap: var(--space-2);
+  /*
+   * 窄窗口的下限。窗口比它窄时，行不再继续压缩，而是由
+   * `.subtable__body` 出横向滚动条 —— 「字被压成一列」比「要左右滑」
+   * 糟糕得多：前者连读都读不了。
+   */
+  min-width: 620px;
 }
 
 /* 有讲话人编号时才多一列，位置固定在「结束」与「字幕文本」之间。
    宽度按称呼给（92px 大约放得下四个汉字），称呼长了就省略号 + 悬停看全称 */
 .subtable__head.has-spk,
 .row.has-spk {
-  grid-template-columns: 28px 44px 104px 104px 92px minmax(0, 1fr) 78px;
+  grid-template-columns: 28px 44px 104px 104px 92px minmax(240px, 1fr);
+  min-width: 720px;
 }
 
 /* 编辑操作栏 */
@@ -1178,12 +1198,52 @@ function onKeydown(event: KeyboardEvent): void {
   gap: var(--space-1);
   padding: var(--space-1) var(--space-3);
   border-bottom: 1px solid var(--color-border-subtle);
+  /*
+   * 窄窗口时整条工具栏左右滑动。
+   *
+   * 原来是不换行也不滚动：窗口一窄，右边那半截（显示方式、已选条数）
+   * 就被推到可视区外面 —— 不是被压窄，是干脆看不见，页面上也没有任何
+   * 迹象表明还有东西在右边。`overflow-x` 让它可滑，`flex: none` 让每个
+   * 控件保持原宽（中文按钮被压会变成竖排的一列字）。
+   */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.subtable__toolbar > * {
+  flex: none;
+}
+
+/* 把显示方式与计数推到右边；内容超宽时它缩到最小，让别的控件先保住宽度 */
+.subtable__toolbar > .spacer {
+  flex: 1 0 8px;
+}
+
+/* 编辑动作与撤销这一组之间的分隔 */
+.toolbar__sep {
+  flex: none;
+  width: 1px;
+  height: 14px;
+  margin: 0 2px;
+  background: var(--color-border);
+}
+
+/* 撤销 / 重做贴成一对 */
+.opgroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .op {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  /* 工具栏一切到底也得留完整标签：不给收缩、不给折行。
+     中文标签在 min-content 下会一个字一行，竖排的按钮看着像坏了 */
+  flex: none;
+  white-space: nowrap;
   height: 26px;
   padding: 0 var(--space-2);
   border-radius: var(--radius-sm);
@@ -1259,8 +1319,19 @@ function onKeydown(event: KeyboardEvent): void {
   place-items: center;
 }
 
-.subtable__head {
+/*
+ * 表头的外层：裁掉平移出界的部分。
+ *
+ * 表头不可能自己横向滚动（它和正文是两个容器，各滚各的会错位），
+ * 所以由正文的 scrollLeft 驱动它的 translateX。
+ */
+.subtable__headwrap {
   flex: none;
+  overflow: hidden;
+}
+
+.subtable__head {
+  width: 100%;
   padding: 0 var(--space-3);
   height: 32px;
   border-bottom: 1px solid var(--color-border);
@@ -1273,6 +1344,8 @@ function onKeydown(event: KeyboardEvent): void {
   flex: 1;
   min-height: 0;
   padding: var(--space-1) 0 var(--space-4);
+  /* 窗口窄到 620px 以下时，行不再压缩，改为左右滑动（表头跟着走） */
+  overflow-x: auto;
 }
 
 /* ---------- 子项目分界（只有一条细线） ---------- */
@@ -1281,6 +1354,8 @@ function onKeydown(event: KeyboardEvent): void {
   display: flex;
   align-items: center;
   height: 17px;
+  /* 与行同宽：窄窗口横向滚动时分界线也得铺满整条，不然滑过去就断了 */
+  min-width: 620px;
 }
 
 .subsep__line {
@@ -1510,71 +1585,13 @@ function onKeydown(event: KeyboardEvent): void {
   box-shadow: 0 0 0 2px var(--color-accent-subtle);
 }
 
-.cell--flag {
-  display: flex;
-  justify-content: flex-end;
-}
-
 /*
- * 「忽略告警」：平时低调（它是给强迫症的出口，不是主操作），
- * 但按告警级别上色，让用户一眼看出这一条是错误还是警告。
- * flex: none 是必须的 —— 中文标签在 flex 行里会被一路压到 min-content，
- * 也就是一个字宽，直接变成竖排。
+ * 已忽略的行：文字退一档，但仍完全可编辑。
+ *
+ * 目前唯一的「恢复」入口在右键菜单里 —— 这是有意的取舍：
+ * 忽略本来就是个低频动作，而它原来占着整整一列 78px，
+ * 让每一行正文都短了一截。
  */
-.row__ack {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  height: 20px;
-  padding: 0 5px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  font-size: 10px;
-  line-height: 1;
-  white-space: nowrap;
-  color: var(--color-text-tertiary);
-  opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease-out),
-    background var(--dur-fast) var(--ease-out);
-}
-
-/* 悬停那一行时才显形：整屏的红旗按钮会让表格看起来比实际更吓人 */
-.row:hover .row__ack,
-.row__ack:focus-visible {
-  opacity: 1;
-}
-
-.row__ack--error {
-  border-color: var(--color-danger-border);
-  background: var(--color-danger-subtle);
-  color: var(--color-danger);
-}
-
-.row__ack--warning {
-  border-color: var(--color-warning-border);
-  background: var(--color-warning-subtle);
-  color: var(--color-warning);
-}
-
-.row__ack--info {
-  border-color: var(--color-info-border);
-  background: var(--color-info-subtle);
-  color: var(--color-info);
-}
-
-.row__ack:hover {
-  border-color: var(--color-border-strong);
-}
-
-.row__ack--acked {
-  border-color: var(--color-border);
-  background: transparent;
-  color: var(--color-text-tertiary);
-  opacity: 0.65;
-}
-
-/* 已忽略：整行稍微退到后面去，但仍然完全可编辑 */
 .row.is-acked .row__text {
   color: var(--color-text-secondary);
 }

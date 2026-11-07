@@ -920,7 +920,7 @@ onBeforeUnmount(() => {
 
     <div class="assist__body scroll-y">
       <p v-if="!payload" class="empty">
-        未获取到字幕数据。请回到主窗口，在「预览与编辑」页重新打开本窗口。
+        未获取到字幕数据。请回到主窗口，在「字幕工作台」页重新打开本窗口。
       </p>
 
       <template v-else>

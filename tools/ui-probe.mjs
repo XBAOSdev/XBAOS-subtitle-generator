@@ -3376,7 +3376,7 @@ const scenarios = {
       const el = document.querySelector('.mergebar')
       return el ? el.textContent.replace(/\\s+/g, '') : ''
     })()`)
-    // 顶部那条「合并时间轴：N 段音频…」已经按用户要求删掉：页名「预览与编辑」
+    // 顶部那条「合并时间轴：N 段音频…」已经按用户要求删掉：页名「字幕工作台」
     // 加侧栏的子项目清单已经说清了，再顶一条说明只是噪音
     check('编辑器顶部不再有合并说明条', bar === '', bar.slice(0, 40))
 
@@ -3412,7 +3412,7 @@ const scenarios = {
     )
 
     const editorNav = await centerOf(
-      `[...document.querySelectorAll('.sidebar__item')].find((b) => b.textContent.includes('预览与编辑'))`,
+      `[...document.querySelectorAll('.sidebar__item')].find((b) => b.textContent.includes('字幕工作台'))`,
     )
     await cdp.click(editorNav.x, editorNav.y)
     await sleep(500)
@@ -3493,44 +3493,65 @@ const scenarios = {
     check('AI 校对 / AI 翻译在右侧栏「AI 功能」里', JSON.stringify(aiSide) === JSON.stringify(['AI校对', 'AI翻译']), JSON.stringify(aiSide))
     check('音频识别的条目、未导出过 → 不显示「保存」', !labels.includes('保存'), labels.join(' / '))
 
-    // ---- 撤销/重做这一行的排版 ----
-    //
-    // 侧栏内宽是固定的 231px。曾经把「每个文件最多保留 15 步」挤在按钮右侧，
-    // 两段文字抢宽度时 flex 默认会把按钮压到 min-content —— 中文的 min-content
-    // 只有**一个字宽**，「撤销」于是被压成竖排两行、按钮也跟着变高。
-    // 当时余量只有 2px，无头浏览器里恰好没换行，所以「量高度」这种断言根本抓不住；
-    // 真正要钉死的是「按钮不许收缩」这条属性本身。
+    /* ---- 撤销/重做这一组的排版 ----
+     *
+     * 它们从侧栏搬到了**表格工具栏**（`分割` 之后）。
+     *
+     * 原来钉的是「按钮不许收缩」：侧栏只有 231px，一旦把「最多保留 15 步」
+     * 挤在按钮右侧，flex 会把中文压到 min-content（一个字宽）→ 竖排两行。
+     * 现在住在工具栏里、说明文字进了 title，但「不许被压成竖排」这条仍然成立：
+     * 工具栏本身就允许横向溢出，任何一格被压缩都是回归。
+     */
     const histLayout = await cdp.evaluate(`(() => {
-      const btns = [...document.querySelectorAll('.history__btn')]
-      const row = document.querySelector('.history__row')
-      const note = document.querySelector('.history__note')
+      const btns = [...document.querySelectorAll('.opgroup .op')]
+      const group = document.querySelector('.opgroup')
       const box = (el) => el.getBoundingClientRect()
       return {
+        count: btns.length,
+        texts: btns.map((el) => el.textContent.replace(/\\s+/g, '')),
         shrink: btns.map((el) => getComputedStyle(el).flexShrink),
         nowrap: btns.map((el) => getComputedStyle(el).whiteSpace),
         overflow: btns.map((el) => el.scrollWidth - el.clientWidth),
         heights: btns.map((el) => Math.round(box(el).height)),
-        noteBelow: !!row && !!note && Math.round(box(note).top) >= Math.round(box(row).bottom),
+        gap: btns.length === 2 ? Math.round(box(btns[1]).left - box(btns[0]).right) : null,
+        titles: btns.map((el) => el.title),
+        inToolbar: !!group && !!group.closest('.subtable__toolbar'),
+        noteGone: !document.querySelector('.history__note'),
       }
     })()`)
     check(
+      '撤销 / 重做住在表格工具栏里',
+      histLayout.inToolbar === true &&
+        JSON.stringify(histLayout.texts) === JSON.stringify(['撤销', '重做']),
+      JSON.stringify(histLayout.texts),
+    )
+    check(
       '撤销/重做按钮禁止收缩（否则中文标签会被压成竖排）',
-      histLayout.shrink.length === 2 && histLayout.shrink.every((v) => v === '0'),
+      histLayout.count === 2 && histLayout.shrink.every((v) => v === '0'),
       `flex-shrink = ${histLayout.shrink.join(', ')}`,
     )
     check(
       '撤销/重做按钮单行显示、内容不溢出',
       histLayout.nowrap.every((v) => v === 'nowrap') &&
         histLayout.overflow.every((v) => v <= 1) &&
-        histLayout.heights.every((h) => h === 28),
+        histLayout.heights.every((h) => h === 26),
       `nowrap = ${histLayout.nowrap.join(', ')}  溢出 = ${histLayout.overflow.join(', ')}  高 = ${histLayout.heights.join(', ')}`,
     )
-    check('「最多保留 15 步」独占一行（不与按钮抢宽度）', histLayout.noteBelow, String(histLayout.noteBelow))
+    check(
+      '两个按钮贴得很近（同一组，间距 ≤ 4px）',
+      histLayout.gap !== null && histLayout.gap <= 4,
+      String(histLayout.gap),
+    )
+    check(
+      '「最多保留 15 步」只在悬停提示里，不再占一行',
+      histLayout.noteGone === true && histLayout.titles[0].includes('15 步'),
+      JSON.stringify(histLayout.titles),
+    )
 
-    // 留一张这一行的实拍：光看断言数字看不出「是不是竖排」
+    // 留一张这一组的实拍：光看断言数字看不出「是不是竖排」
     const histBox = await cdp.evaluate(`(() => {
-      const r = document.querySelector('.history').getBoundingClientRect()
-      return { x: Math.round(r.x), y: Math.round(r.y), width: Math.ceil(r.width), height: Math.ceil(r.height) }
+      const r = document.querySelector('.opgroup').getBoundingClientRect()
+      return { x: Math.round(r.x) - 6, y: Math.round(r.y) - 4, width: Math.ceil(r.width) + 12, height: Math.ceil(r.height) + 8 }
     })()`)
     await shot(cdp, 'probe-history-row.png', { ...histBox, scale: 2 })
 
@@ -3543,7 +3564,7 @@ const scenarios = {
     const afterOffset = await readCell('time')
     check('整体偏移改变了时间码', afterOffset !== before, `${before} -> ${afterOffset}`)
 
-    await clickByText('.history__btn', '撤销')
+    await clickByText('.opgroup .op', '撤销')
     const afterUndo = await readCell('time')
     check(
       '工具造成的改动可以撤销（以前这类工具根本不入撤回栈）',
@@ -3575,7 +3596,7 @@ const scenarios = {
       `${firstText} -> ${afterDict}`,
     )
 
-    await clickByText('.history__btn', '撤销')
+    await clickByText('.opgroup .op', '撤销')
     const afterDictUndo = await readCell('text')
     check('词表替换可以撤销', afterDictUndo === firstText, `${afterDict} -> ${afterDictUndo}`)
 
@@ -6180,6 +6201,19 @@ const scenarios = {
       })()`)
     await installDialogStub()
 
+    /** 按文字点一个元素（右键菜单项是 fixed 定位，必须点真实坐标而不是 el.click()） */
+    const clickByText = async (selector, text) => {
+      const pos = await cdp.evaluate(`(() => {
+        const el = [...document.querySelectorAll('${selector}')].find((b) => b.textContent.replace(/\\s+/g, '').includes('${text}'))
+        if (!el) return null
+        const r = el.getBoundingClientRect()
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      })()`)
+      if (!pos) throw new Error(`找不到「${text}」（${selector}）`)
+      await cdp.click(pos.x, pos.y)
+      await sleep(300)
+    }
+
     const mk = (id, start, end, text) => ({ id, start, end, text, origin: text, issues: [] })
 
     const seed = await store(`
@@ -6261,6 +6295,11 @@ const scenarios = {
 
     /* ------------------------------ 忽略告警 ------------------------------ */
 
+    /*
+     * 忽略告警不再是行尾那颗按钮，而是右键菜单里的一项。
+     * 理由很简单：它占着整整一列 78px，而点击频率远低于「扫一眼文本」。
+     * 所以这一段的取法从「找按钮」改成「右键这一行 → 点菜单项」。
+     */
     const beforeAck = await store(`
       const row = project.viewFile.segments.find((s) => s.id === 'b')
       return {
@@ -6271,21 +6310,40 @@ const scenarios = {
     `)
     const entryBefore = await cdp.evaluate(`(() => {
       const row = [...document.querySelectorAll('.subtable .row')].find((el) => el.dataset.segId === 'b')
-      const btn = row ? row.querySelector('.row__ack') : null
-      return { error: row.classList.contains('has-error'), label: btn ? btn.textContent.trim() : null }
+      return { error: row.classList.contains('has-error'), ackBtn: !!row.querySelector('.row__ack') }
     })()`)
     check(
-      '有告警的行给出「忽略告警」入口',
-      beforeAck.hasIssue === true && entryBefore.error === true && entryBefore.label === '忽略告警',
+      '行内不再有「忽略告警」按钮，告警仍按红色标出',
+      beforeAck.hasIssue === true && entryBefore.error === true && entryBefore.ackBtn === false,
       JSON.stringify([beforeAck, entryBefore]),
     )
 
-    await cdp.evaluate(`(() => {
-      const row = [...document.querySelectorAll('.subtable .row')].find((el) => el.dataset.segId === 'b')
-      row.querySelector('.row__ack').click()
-      return true
-    })()`)
-    await sleep(300)
+    /** 右键某一行并读出菜单里的文字（去空格，探针比对统一这么干） */
+    const openRowMenu = async (segId) => {
+      await cdp.evaluate(`(() => {
+        const row = [...document.querySelectorAll('.subtable .row')].find((el) => el.dataset.segId === ${JSON.stringify(segId)})
+        const r = row.getBoundingClientRect()
+        row.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true, cancelable: true,
+          clientX: Math.round(r.left + 40), clientY: Math.round(r.top + 10),
+        }))
+        return true
+      })()`)
+      await sleep(260)
+      return cdp.evaluate(
+        `[...document.querySelectorAll('.menu__item')].map((b) => b.textContent.replace(/\\s+/g, ''))`,
+      )
+    }
+
+    const menuItems = await openRowMenu('b')
+    check(
+      '右键菜单里有「忽略告警」',
+      menuItems.includes('忽略告警'),
+      JSON.stringify(menuItems),
+    )
+
+    await clickByText('.menu__item', '忽略告警')
+    await sleep(320)
     const afterAck = await store(`
       const row = project.viewFile.segments.find((s) => s.id === 'b')
       return { acked: !!row.acked, errors: project.errorCount, warnings: project.warningCount }
@@ -6297,23 +6355,21 @@ const scenarios = {
     )
     const entryAfter = await cdp.evaluate(`(() => {
       const row = [...document.querySelectorAll('.subtable .row')].find((el) => el.dataset.segId === 'b')
-      const btn = row.querySelector('.row__ack')
-      return { error: row.classList.contains('has-error'), label: btn ? btn.textContent.trim() : null }
+      return { error: row.classList.contains('has-error'), dim: getComputedStyle(row.querySelector('.row__text')).color }
     })()`)
+    check('忽略之后红色标记消失', entryAfter.error === false, JSON.stringify(entryAfter))
+
+    const menuAfter = await openRowMenu('b')
     check(
-      '忽略之后红色标记消失，入口变成「已忽略」',
-      entryAfter.error === false && entryAfter.label === '已忽略',
-      JSON.stringify(entryAfter),
+      '再右键时入口变成「恢复告警」',
+      menuAfter.includes('恢复告警'),
+      JSON.stringify(menuAfter),
     )
 
-    await cdp.evaluate(`(() => {
-      const row = [...document.querySelectorAll('.subtable .row')].find((el) => el.dataset.segId === 'b')
-      row.querySelector('.row__ack').click()
-      return true
-    })()`)
-    await sleep(300)
+    await clickByText('.menu__item', '恢复告警')
+    await sleep(320)
     check(
-      '再点一次可以恢复，计数也跟着回来',
+      '恢复之后计数也跟着回来',
       (await store(
         `return { acked: !!project.viewFile.segments.find((s) => s.id === 'b').acked, errors: project.errorCount }`,
       )).errors === beforeAck.errors,

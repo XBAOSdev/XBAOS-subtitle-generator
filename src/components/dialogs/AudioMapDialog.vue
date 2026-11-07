@@ -14,6 +14,7 @@
 import { computed, ref } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
+import { isSupported } from '@/utils/formats'
 import ModalDialog from './ModalDialog.vue'
 import Icon from '@/components/Icon.vue'
 
@@ -43,8 +44,20 @@ const stateText = computed(() => {
   }
 })
 
-const current = computed(() => file.value?.path ?? '')
-const subtitleOnly = computed(() => !!file.value?.subtitleFormat && !current.value)
+/**
+ * 这个子项目**现在挂着的音频**。
+ *
+ * 不能直接读 `file.path`：纯字幕子项目的 `path` 指向它自己那个 .srt
+ * （导入时的落点），于是「当前音频」会显示成 `…\音频\数据单位换算.srt` ——
+ * 一个字号看着像音频、实际是字幕文件的路径。判据是扩展名：`path`/`ext`
+ * 始终描述同一个文件，映射过音频之后 ext 就变成 wav/mp3 这一族了。
+ */
+const current = computed(() => {
+  const f = file.value
+  return f && isSupported(f.ext) ? f.path : ''
+})
+/** 还没有音频：纯字幕子项目，或者音频映射被清掉过 */
+const subtitleOnly = computed(() => !current.value)
 
 async function pick(): Promise<void> {
   const bridge = window.xbaos
@@ -80,7 +93,7 @@ function close(): void {
           <Icon name="file-audio" :size="12" />
           <span>{{ current }}</span>
         </p>
-        <p v-else class="audiomap__none">没有音频（纯字幕子项目）</p>
+        <p v-else class="audiomap__none">无</p>
       </div>
 
       <div class="audiomap__field">

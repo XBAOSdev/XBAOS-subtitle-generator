@@ -801,6 +801,57 @@ export const useProjectStore = defineStore('project', () => {
     () => files.value.filter((f) => f.status === 'pending').length,
   )
 
+  /* ------------------------------------------- 全工程合计（底部状态栏） */
+
+  /**
+   * 底部状态栏的口径是**整个工程**，不是当前项目。
+   *
+   * 它长在窗口最外一层、横跨全宽，位置本身就在说「这是总计」。早先它读的
+   * 是当前活动项目的 `files` —— 切项目时那一行数字整体跳变，而视觉上没有任何
+   * 东西提示「这只跟你选的那个项目有关」，很容易被当成「刚才那些字幕没了」。
+   *
+   * 上面的 `totalSegments` / `errorCount` 保持原样：它们服务的是「当前项目」
+   * 的界面（工作台底栏、导出、关闭确认），两个口径并存是有意的。
+   */
+  const allFiles = computed(() =>
+    drafts.value.reduce((n, d) => n + draftItems(d).length, 0),
+  )
+
+  const allSegments = computed(() =>
+    drafts.value.reduce(
+      (n, d) => n + draftItems(d).reduce((m, f) => m + f.segments.length, 0),
+      0,
+    ),
+  )
+
+  const allDuration = computed(() =>
+    drafts.value.reduce(
+      (n, d) => n + draftItems(d).reduce((m, f) => m + (f.durationSec ?? 0), 0),
+      0,
+    ),
+  )
+
+  const allErrors = computed(() =>
+    drafts.value.reduce(
+      (n, d) => n + draftItems(d).reduce((m, f) => m + countIssues(f.segments).errors, 0),
+      0,
+    ),
+  )
+
+  const allWarnings = computed(() =>
+    drafts.value.reduce(
+      (n, d) => n + draftItems(d).reduce((m, f) => m + countIssues(f.segments).warnings, 0),
+      0,
+    ),
+  )
+
+  const allPendingReview = computed(() =>
+    drafts.value.reduce(
+      (n, d) => n + draftItems(d).filter((f) => f.status === 'pending').length,
+      0,
+    ),
+  )
+
   /** 未支持的格式，按扩展名归并计数 */
   const unsupportedExts = computed(() => {
     const map = new Map<string, number>()
@@ -1245,21 +1296,13 @@ export const useProjectStore = defineStore('project', () => {
     }
   }
 
-  /** 把某条标记为「告警我已看过」/ 取消标记 */
-  function setAcked(segId: string, acked: boolean): void {
-    const target = locateSegment(segId)
-    if (!target) return
-    const at = target.item.segments.findIndex((s) => s.id === segId)
-    if (at < 0) return
-    const next = { ...target.item.segments[at] }
-    if (acked) next.acked = true
-    else delete next.acked
-    const arr = [...target.item.segments]
-    arr[at] = next
-    target.item.segments = arr
-  }
-
-  /** 用一条新的替换旧条（id 不变） */
+  /**
+   * 用一条新的替换旧条（id 不变）。
+   *
+   * 「忽略告警」以前也有一个同形态的 `setAcked`，随按钮一起挪进右键菜单之后
+   * 就没了调用者 —— 菜单那边是批量操作，一次 map 整份赋回更直接。
+   * 这里保留的是「单条改文字 / 改时间码」这条最常走的路。
+   */
   function replaceSegment(next: SubtitleSegment): void {
     const target = locateSegment(next.id)
     if (!target) return
@@ -3476,6 +3519,12 @@ const MIME_BY_EXT: Record<string, string> = {
     errorCount,
     warningCount,
     pendingReviewCount,
+    allFiles,
+    allSegments,
+    allDuration,
+    allErrors,
+    allWarnings,
+    allPendingReview,
     unsupportedExts,
     outputDirs,
     intake,
@@ -3507,7 +3556,6 @@ const MIME_BY_EXT: Record<string, string> = {
     collapseAll,
     expandAll,
     deleteDrafts,
-    setAcked,
     replaceSegment,
     insertSegmentAfter,
     clearAll,

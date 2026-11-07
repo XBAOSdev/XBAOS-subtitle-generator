@@ -3110,7 +3110,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     )
     check(
       '校验结果面板与底栏都按「可见问题」算',
-      /visibleIssues\(item\.seg\)/.test(editorViewSrc) && /hasHighlight/.test(subSrc),
+      /visibleIssues\(item\.seg\)/.test(editorViewSrc) && /visibleIssues\(seg\)/.test(subSrc),
       '只改一处的话，列表里还在、行首红条没了，看起来像半坏',
     )
   }
@@ -3120,9 +3120,9 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const statusBarSrc = readSource('src/components/AppStatusBar.vue')
   check(
     '底部状态栏报全工程、编辑器底栏报当前文件（两个口径）',
-    /project\.errorCount/.test(statusBarSrc) &&
+    /project\.allErrors/.test(statusBarSrc) &&
       /countIssues\(activeFile\.value/.test(editorViewSrc) &&
-      !/project\.errorCount/.test(editorViewSrc),
+      !/project\.allErrors/.test(editorViewSrc),
     '两处都读同一个数就会被当成重复渲染；分层之后多文件时才看得出区别',
   )
 
@@ -4623,8 +4623,10 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
 
   /*
    * 字幕表的说话人列是「随数据出现」的：没开分离就不占宽度。
-   * 列数与格子数必须一起变 —— 表头 7 个格子配 6 条轨道（或反过来），
+   * 列数与格子数必须一起变 —— 表头 5 个格子配 6 条轨道（或反过来），
    * 整张表会从「字幕文本」那一列开始错位，而且只在有说话人时才看得出来。
+   *
+   * 6 → 5 是因为「忽略告警」那一列撤掉了（按钮挪进了右键菜单）。
    */
   const tableSrc = readSource('src/components/SubtitleTable.vue')
   const tracks = (sel: string): number => {
@@ -4638,8 +4640,8 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const plainTracks = tracks('.subtable__head,\n.row {')
   const spkTracks = tracks('.subtable__head.has-spk,\n.row.has-spk {')
   const cells = (tableSrc.match(/v-if="hasSpeakers"/g) ?? []).length
-  check('说话人列默认不占宽度', plainTracks === 6, `轨道数 ${plainTracks}`)
-  check('有说话人时多一列', spkTracks === 7, `轨道数 ${spkTracks}`)
+  check('说话人列默认不占宽度', plainTracks === 5, `轨道数 ${plainTracks}`)
+  check('有说话人时多一列', spkTracks === 6, `轨道数 ${spkTracks}`)
   check(
     '表头与行同时切列',
     cells === 2,
@@ -5476,10 +5478,8 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   check('编辑目标统一经 targetOf', /function targetOf\(/.test(proj))
   check(
     '三处直接写下标改成 store 方法',
-    proj.includes('function setAcked(') &&
-      proj.includes('function replaceSegment(') &&
+    proj.includes('function replaceSegment(') &&
       proj.includes('function insertSegmentAfter(') &&
-      table.includes('project.setAcked(') &&
       table.includes('project.replaceSegment(') &&
       table.includes('project.insertSegmentAfter(') &&
       !table.includes('file.segments[at] = ') &&
@@ -5721,6 +5721,97 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     !/function segmentToDoc[\s\S]{0,900}issues/.test(xbsgpSrc) &&
       !/mediaState/.test(xbsgpSrc),
     '存下来的校验结论会变成「打开就看到去年的报错」',
+  )
+}
+
+/* ---------------------------------------------- 第 9 轮：工作台与表格结构 */
+
+{
+  const read = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+
+  const sideSrc = read('src/components/AppSidebar.vue')
+  check(
+    '侧栏入口任何时刻可点（不拿「有没有文件」当门槛）',
+    !/disabled:\s*project\.supportedFiles\.length === 0/.test(sideSrc) &&
+      /function go\(item: NavItem\): void \{\s*ui\.navigate\(item\.key\)/.test(sideSrc),
+    '识别中进不去工作台，等于「一边识别一边翻已完成的」这条路被堵死',
+  )
+
+  const tableSrc = read('src/components/SubtitleTable.vue')
+  const menuSrc = read('src/composables/useSegmentMenu.ts')
+  check(
+    '「忽略告警」只在右键菜单里，不再占表格一列',
+    !/row__ack/.test(tableSrc) && !/cell--flag/.test(tableSrc) && /key: 'ack'/.test(menuSrc),
+    '它挂在行尾占掉 78px，是整张表最贵的低频按钮',
+  )
+  check(
+    '撤销 / 重做搬到表格工具栏',
+    /class="opgroup"/.test(tableSrc) &&
+      /history\.undo\(/.test(tableSrc) &&
+      !/history__note/.test(read('src/components/ToolPanel.vue')),
+    '两个按钮住在改字幕的那张表上，不必横跨窗口去找',
+  )
+  check(
+    '历史步数只在悬停提示里说，且与实现同源',
+    /最多保留 \$\{MAX_STEPS\} 步/.test(tableSrc) &&
+      /export const MAX_STEPS/.test(read('src/stores/history.ts')),
+    '限制说明不该常驻占一行；数字写死在文案里也会跟实现脱钩',
+  )
+  check(
+    '窄窗口：工具栏与表格都可横滑，行有最小宽度',
+    /\.subtable__toolbar \{[^}]*overflow-x: auto/s.test(tableSrc) &&
+      /\.subtable__head,\s*\.row \{[^}]*min-width: 620px/s.test(tableSrc) &&
+      /\.subtable__body \{[^}]*overflow-x: auto/s.test(tableSrc),
+    '被压成竖排的字比「要滑一下」糟得多',
+  )
+  check(
+    '表头跟着正文横移',
+    /translateX\(\$\{-scrollLeft\}px\)/.test(tableSrc) &&
+      /scrollLeft\.value = body\.scrollLeft/.test(tableSrc),
+    '两个滚动容器各滚各的，列名会跟内容对不上',
+  )
+
+  const mapSrc = read('src/components/dialogs/AudioMapDialog.vue')
+  check(
+    '音频映射按扩展名判「有没有音频」',
+    /isSupported\(f\.ext\)/.test(mapSrc) &&
+      !/const current = computed\(\(\) => file\.value\?\.path/.test(mapSrc),
+    '纯字幕子项目的 path 是它自己的 .srt，直接显示会写成「当前音频：xxx.srt」',
+  )
+
+  const barSrc = read('src/components/AppStatusBar.vue')
+  check(
+    '状态栏三个数字都报全工程合计',
+    /project\.allFiles/.test(barSrc) &&
+      /project\.allSegments/.test(barSrc) &&
+      /project\.allDuration/.test(barSrc) &&
+      /project\.allPendingReview/.test(barSrc) &&
+      !/project\.files\.length/.test(barSrc),
+    '它在最外一层横跨全宽，说的就该是整个软件',
+  )
+
+  const workSrc = read('src/views/EditorView.vue')
+  check(
+    '侧栏落到底、底栏缩回右半边',
+    /\.editor \{[^}]*grid-template-columns: auto minmax\(0, 1fr\)/s.test(workSrc) &&
+      /:deep\(\.filetree\) \{[^}]*grid-row: 1 \/ span 2/s.test(workSrc) &&
+      /\.editor__foot \{[^}]*grid-column: 2/s.test(workSrc),
+    '一行「当前项目」的数字铺满全宽，会被读成全局',
+  )
+  check(
+    '中间区有最小宽度，窄窗口整体横滑',
+    /\.editor__center \{[^}]*min-width: 360px/s.test(workSrc) &&
+      /\.editor__body \{[^}]*overflow-x: auto/s.test(workSrc),
+    '780px 宽时中间只剩七十几个像素，表格里除复选框什么都放不下',
+  )
+
+  const tlSrc = read('src/components/TimelineTrack.vue')
+  check(
+    '时间轴滚轮走平滑（写目标值，不直接跳）',
+    /panGoalSec \+= pixels \/ pxPerSec\.value/.test(tlSrc) &&
+      !/viewStartSec\.value \+= pixels/.test(tlSrc) &&
+      /requestAnimationFrame\(stepAnim\)/.test(tlSrc),
+    '一格滚轮直接加进 viewStartSec，画面就是一跳一跳的',
   )
 }
 
