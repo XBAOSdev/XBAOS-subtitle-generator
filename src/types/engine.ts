@@ -478,6 +478,23 @@ export interface XbaosBridge {
       defaultId?: number
       cancelId?: number
     }) => Promise<number>
+    /**
+     * 带勾选项的确认框：返回按钮下标与勾选状态。
+     *
+     * 与 `confirm` 并存而不是替换它 —— 十几处调用只关心「点没点确定」，
+     * 多返回一个对象会让每一处都要跟着解构。
+     */
+    confirmOption: (options?: {
+      type?: 'none' | 'info' | 'error' | 'question' | 'warning'
+      title?: string
+      message?: string
+      detail?: string
+      buttons?: string[]
+      defaultId?: number
+      cancelId?: number
+      checkboxLabel?: string
+      checkboxChecked?: boolean
+    }) => Promise<{ index: number; checked: boolean }>
   }
 
   fs: {

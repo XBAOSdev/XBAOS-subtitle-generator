@@ -13,6 +13,7 @@ import { useEditorStore } from '@/stores/editor'
 import { useHistoryStore } from '@/stores/history'
 import { useUiStore } from '@/stores/ui'
 import { clearSpeaker, mergeSpeakerInto, setSpeakerFor, type SpeakerEntry } from '@/utils/speaker'
+import type { SubtitleSegment } from '@/types'
 import ModalDialog from '@/components/dialogs/ModalDialog.vue'
 import Icon from '@/components/Icon.vue'
 
@@ -77,6 +78,20 @@ function cancelRename(): void {
 
 /* ------------------------------------------------------------ 新增 / 删除 */
 
+/**
+ * 历史栈的键：整条项目视图（`__merged__`）。
+ *
+ * 编辑器里所有编辑都往这一桶里记，Ctrl+Z 也只撤这一桶。讲话人改动虽然落在
+ * 某个子项目上，但撤销要跟着视图走 —— 用子项目 id 记账等于记到一个永远
+ * 不会被翻开的抽屉里。
+ */
+function historyKey(): string {
+  return project.viewFileId ?? file.value?.id ?? ''
+}
+
+/** 快照来源：必须是 getter，视图的 `segments` 每次读都是新拷贝 */
+const viewSegments = (): SubtitleSegment[] => project.viewFile?.segments ?? []
+
 function addSpeaker(): void {
   const target = file.value
   if (!target) return
@@ -88,7 +103,12 @@ function addSpeaker(): void {
   if (ids.length > 0) {
     const result = setSpeakerFor(target.segments, ids, index)
     if (result.changed > 0) {
-      history.commit(target.id, target.segments, '更改讲话人', () => {
+      /*
+       * 历史栈按**项目视图**分桶（键是 `__merged__`），编辑器里的 Ctrl+Z
+       * 撤的也是这一桶。这里若拿子项目 id 当键，改动会在另一个桶里记一笔、
+       * 撤销时根本找不到 —— 面板上删了一位讲话人，按 Ctrl+Z 毫无反应。
+       */
+      history.commit(historyKey(), viewSegments, '更改讲话人', () => {
         target.segments = result.segments
       })
     }
@@ -215,7 +235,7 @@ function doDelete(): void {
   if (mode.value === 'merge' && mergeTo.value >= 0) {
     const result = mergeSpeakerInto(target.segments, entry.index, mergeTo.value)
     const toName = speakers.nameOf(fileId.value, mergeTo.value)
-    history.commit(target.id, target.segments, '并入讲话人', () => {
+    history.commit(historyKey(), viewSegments, '并入讲话人', () => {
       target.segments = result.segments
     })
     speakers.forget(fileId.value, entry.index)
@@ -225,7 +245,7 @@ function doDelete(): void {
   }
 
   const result = clearSpeaker(target.segments, entry.index)
-  history.commit(target.id, target.segments, '清除讲话人标识', () => {
+  history.commit(historyKey(), viewSegments, '清除讲话人标识', () => {
     target.segments = result.segments
   })
   speakers.forget(fileId.value, entry.index)

@@ -146,11 +146,12 @@ function applyOffset(): void {
   // 会改字幕条目的地方都必须走 history，撤回才完整。这几个工具以前是直接
   // 改数据，撤回栈里根本没有它们 —— 用户按 Ctrl+Z 会跳过这一步撤到更早的
   // 操作，看起来就像「撤销撤错了位置」。
-  const applied = history.commitIfChanged(file.id, file.segments, '整体偏移', () => {
-    for (const segment of file.segments) {
-      segment.start = Math.max(0, Number((segment.start + delta).toFixed(3)))
-      segment.end = Math.max(0, Number((segment.end + delta).toFixed(3)))
-    }
+  const applied = history.commitIfChanged(file.id, () => file.segments, '整体偏移', () => {
+    file.segments = file.segments.map((segment) => ({
+      ...segment,
+      start: Math.max(0, Number((segment.start + delta).toFixed(3))),
+      end: Math.max(0, Number((segment.end + delta).toFixed(3))),
+    }))
   })
 
   ui.notify(
@@ -271,19 +272,26 @@ function replaceOne(): void {
   const list = matches.value
   if (!needle || list.length === 0) return
   const match = list[Math.min(matchIndex.value, list.length - 1)]
-  const file = project.files.find((f) => f.id === match.fileId)
+  // 匹配是在 `scopeFiles` 上算的，找文件也必须回到同一个集合：项目视图的 id
+  // 是 `__merged__`，`project.files` 里根本没有这一条 —— 用 files 查会永远查不到，
+  // 「替换」按下去什么都不发生（而且不报错）
+  const file = scopeFiles.value.find((f) => f.id === match.fileId)
   const segment = file?.segments.find((s) => s.id === match.segId)
   if (!file || !segment) return
 
   const at = offsetsOf(segment.text, needle)[match.nth - 1]
   if (at === undefined) return
 
-  const applied = history.commitIfChanged(file.id, file.segments, '替换当前一处', () => {
-    const target = file.segments.find((s) => s.id === match.segId)
-    if (!target) return
-    target.text =
-      target.text.slice(0, at) + replaceText.value + target.text.slice(at + needle.length)
-    flagTranslations(target)
+  const applied = history.commitIfChanged(file.id, () => file.segments, '替换当前一处', () => {
+    file.segments = file.segments.map((s) => {
+      if (s.id !== match.segId) return s
+      const target = {
+        ...s,
+        text: s.text.slice(0, at) + replaceText.value + s.text.slice(at + needle.length),
+      }
+      flagTranslations(target)
+      return target
+    })
   })
 
   ui.notify(
@@ -312,14 +320,18 @@ function replaceAll(): void {
   let segmentsChanged = 0
   for (const file of targets) {
     // 每个文件各自入历史（history 按 fileId 分桶），撤回时互不影响
-    history.commitIfChanged(file.id, file.segments, '查找替换', () => {
-      for (const segment of file.segments) {
-        if (!segment.text.includes(needle)) continue
+    history.commitIfChanged(file.id, () => file.segments, '查找替换', () => {
+      file.segments = file.segments.map((segment) => {
+        if (!segment.text.includes(needle)) return segment
         hits += offsetsOf(segment.text, needle).length
-        segment.text = segment.text.split(needle).join(replaceText.value)
-        flagTranslations(segment)
+        const next = {
+          ...segment,
+          text: segment.text.split(needle).join(replaceText.value),
+        }
+        flagTranslations(next)
         segmentsChanged += 1
-      }
+        return next
+      })
     })
   }
 
@@ -354,14 +366,15 @@ function applyDictReplace(): void {
   }
 
   let changed = 0
-  history.commitIfChanged(file.id, file.segments, '词表替换', () => {
-    for (const segment of file.segments) {
+  history.commitIfChanged(file.id, () => file.segments, '词表替换', () => {
+    file.segments = file.segments.map((segment) => {
       const next = applyReplaceRules(segment.text, rules)
-      if (next === segment.text) continue
-      segment.text = next
-      flagTranslations(segment)
+      if (next === segment.text) return segment
       changed += 1
-    }
+      const patched = { ...segment, text: next }
+      flagTranslations(patched)
+      return patched
+    })
   })
 
   ui.notify(
@@ -378,9 +391,9 @@ function normalizePunctuation(): void {
   if (!file) return
 
   let changed = 0
-  history.commitIfChanged(file.id, file.segments, '标点规范', () => {
-    for (const segment of file.segments) {
-      if (!CJK.test(segment.text)) continue
+  history.commitIfChanged(file.id, () => file.segments, '标点规范', () => {
+    file.segments = file.segments.map((segment) => {
+      if (!CJK.test(segment.text)) return segment
       const before = segment.text
       let text = segment.text
         .replace(/\s+/g, ' ')
@@ -395,12 +408,12 @@ function normalizePunctuation(): void {
 
       if (text && !/[。！？，、；：）]$/.test(text)) text = `${text}。`
 
-      if (text !== before) {
-        segment.text = text
-        flagTranslations(segment)
-        changed += 1
-      }
-    }
+      if (text === before) return segment
+      changed += 1
+      const patched = { ...segment, text }
+      flagTranslations(patched)
+      return patched
+    })
   })
 
   ui.notify(
@@ -429,7 +442,7 @@ function rewrap(): void {
 
   let changed = 0
   let split = 0
-  history.commitIfChanged(file.id, file.segments, '重新断行', () => {
+  history.commitIfChanged(file.id, () => file.segments, '重新断行', () => {
     changed = result.rewrapped
     split = result.splitCount
     file.segments = result.segments

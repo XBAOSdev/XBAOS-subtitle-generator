@@ -1,6 +1,6 @@
 {
   "name": "xbaos-subtitle-generator",
-  "version": "1.1.0-beta",
+  "version": "1.2.0-beta",
   "private": true,
   "description": "把音频转成字幕的 Windows 桌面工具，支持 Whisper 与 SenseVoice 等多种识别模型",
   "author": "XBAOS",

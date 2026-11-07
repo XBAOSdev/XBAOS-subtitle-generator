@@ -13,7 +13,7 @@ import { ref } from 'vue'
 import { tidyMenu, type MenuItem, type MenuState } from '@/utils/menu'
 import { useProjectStore } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
-import { confirmDestructive } from '@/utils/confirm'
+import { confirmDestructive, confirmWithOption } from '@/utils/confirm'
 import { serializeSubtitle, applyLineEnding } from '@/utils/subtitle'
 import type { AudioFile, SubtitleFormat } from '@/types'
 
@@ -122,6 +122,20 @@ export function useSidebarMenu(options: SidebarMenuOptions) {
         {
           key: 'item:recognize',
           label: '重新识别',
+          /*
+           * 灰着不给理由，用户只会以为软件坏了。这里把「为什么不能点」直接写在
+           * 右边：没有音频（纯字幕条目）是唯一不可逆的情况 —— 重识别会清空字幕，
+           * 而它没有音频可以重新跑，等于把内容删掉。
+           */
+          hint: !items[0]
+            ? ''
+            : !one
+              ? '只能一条一条来'
+              : project.recognizing
+                ? '正在识别'
+                : !items[0].path && !items[0].demo
+                  ? '没有音频'
+                  : '',
           disabled: !one || !items[0] || (!items[0].path && !items[0].demo) || project.recognizing,
         },
         { key: 'item:map', label: '音频映射', disabled: !one },
@@ -214,16 +228,20 @@ export function useSidebarMenu(options: SidebarMenuOptions) {
         .map((id) => project.drafts.find((d) => d.id === id))
         .filter(Boolean)
         .map((d) => (d as { name?: string }).name || '未命名项目')
-      const ok = await confirmDestructive({
+      const res = await confirmWithOption({
         title: '删除项目',
         message:
           ids.length === 1
             ? `「${names[0]}」的项目文件会从磁盘上删除，找不回来。`
             : `这 ${ids.length} 个项目的文件会从磁盘上删除，找不回来。`,
-        detail: '只是不想在列表里看到的话，用「关闭项目」。',
+        detail: '勾上下面这一项就只把它从侧栏移出，磁盘上的 .xbsgp 会留着。',
         confirmLabel: '删除',
+        checkboxLabel: '只从列表移除（保留磁盘文件）',
       })
-      if (ok) await project.deleteDrafts(ids)
+      if (!res.ok) return
+      // 勾了就退化成「关闭项目」：同一件事的轻量版，不该让用户再走一次菜单
+      if (res.checked) for (const id of ids) project.closeDraft(id)
+      else await project.deleteDrafts(ids)
       return
     }
 

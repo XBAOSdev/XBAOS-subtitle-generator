@@ -31,6 +31,18 @@ export const PROJECT_NAME_MAX = 120
 const ILLEGAL_CHARS = /[\\/:*?"<>|\u0000-\u001f]/g
 
 /**
+ * 边打边替换：只处理非法字符，不动结尾的点 / 空格，也不截长度。
+ *
+ * 输入框里如果连结尾空格都实时吃掉，用户就没法在中间插空格了（打 `a b` 时
+ * 那个空格一出现就被删）。所以实时替换与落盘前的清洗要分开：这里只挡
+ * 「绝对不可能出现在文件名里」的那些字符。
+ */
+export function replaceIllegalChars(input: string): { value: string; replaced: boolean } {
+  const value = input.replace(ILLEGAL_CHARS, '_')
+  return { value, replaced: value !== input }
+}
+
+/**
  * 把名字里的非法字符替换成 `_`。
  *
  * 界面在输入时就要调它（边打边替换 + 轻提示），而不是等到保存才报错 ——

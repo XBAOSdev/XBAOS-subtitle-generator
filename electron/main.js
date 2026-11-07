@@ -1372,6 +1372,29 @@ function registerIpc() {
     return result.canceled ? [] : result.filePaths
   })
 
+  /**
+   * 带一个勾选项的确认框（「删除项目」要能顺手改成「只从列表移除」）。
+   *
+   * 与 `dialog:confirm` 分开而不是改它的返回结构：那个已经被十几处调用，
+   * 返回类型从 `number` 变成对象会让每一处都要跟着改。
+   */
+  ipcMain.handle('dialog:confirm-option', async (_event, options = {}) => {
+    if (!mainWindow) return { index: -1, checked: false }
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: options.type || 'question',
+      title: options.title || '确认',
+      message: options.message || '',
+      detail: options.detail,
+      buttons: options.buttons || ['取消', '确定'],
+      defaultId: options.defaultId ?? 1,
+      cancelId: options.cancelId ?? 0,
+      noLink: true,
+      checkboxLabel: options.checkboxLabel,
+      checkboxChecked: options.checkboxChecked === true,
+    })
+    return { index: result.response, checked: result.checkboxChecked === true }
+  })
+
   ipcMain.handle('dialog:confirm', async (_event, options = {}) => {
     if (!mainWindow) return false
     const result = await dialog.showMessageBox(mainWindow, {

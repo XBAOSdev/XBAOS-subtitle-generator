@@ -14,7 +14,7 @@ import { useProjectStore } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
 import type { AudioFile, FileStatus } from '@/types'
 import { formatDuration, toShortTimecode } from '@/utils/format'
-import { defaultProjectName } from '@/utils/projectName'
+import { defaultProjectName, replaceIllegalChars, sanitizeFileName } from '@/utils/projectName'
 import { useSidebarMenu } from '@/composables/useSidebarMenu'
 import Icon from '@/components/Icon.vue'
 import UiMenu from '@/components/UiMenu.vue'
@@ -67,6 +67,22 @@ const rows = computed<Row[]>(() =>
 )
 
 const totalItems = computed(() => rows.value.reduce((n, r) => n + r.items.length, 0))
+
+/**
+ * 点侧栏的空白处 = 取消选中。
+ *
+ * 多选之后想「不选了」以前无路可走：再点某一条只是把选中换成那一条。
+ * 只要按下的不是行、按钮或输入框，就当空白处理 —— 项目之间的间隙、
+ * 列表下方的空地都算。
+ */
+function onBlankClick(event: MouseEvent): void {
+  const el = event.target as HTMLElement | null
+  if (el?.closest('.filetree__sub, .filetree__proj, .filetree__search, button, input')) return
+  if (selDrafts.value.length === 0 && selItems.value.length === 0) return
+  selDrafts.value = []
+  selItems.value = []
+  lastPick.value = null
+}
 
 function iconOf(status: FileStatus): string {
   return STATUS_ICON[status]
@@ -186,13 +202,31 @@ function beginRename(kind: 'draft' | 'item', id: string): void {
     kind === 'draft'
       ? (rows.value.find((r) => r.id === id)?.name ?? '')
       : (rows.value.flatMap((r) => r.items).find((f) => f.id === id)?.name ?? '')
+  renameWarned = false
   void nextTick().then(() => renameInput.value?.select())
+}
+
+/**
+ * 边打边把非法字符换成 `_`。
+ *
+ * 等按回车才报错的话，用户打了十个字才发现整串不能用；实时替换 + 一次轻提示，
+ * 手指不用离开键盘。提示只弹一次，否则连打三个 `?` 会刷出三条通知。
+ */
+let renameWarned = false
+function onRenameInput(event: Event): void {
+  const el = event.target as HTMLInputElement
+  const { value, replaced } = replaceIllegalChars(el.value)
+  renameText.value = value
+  if (!replaced || renameWarned) return
+  renameWarned = true
+  ui.notify('info', '已替换不能用作文件名的字符', '\\ / : * ? " < > | 会换成下划线')
 }
 
 function commitRename(): void {
   const at = renaming.value
   if (!at) return
-  const text = renameText.value.trim()
+  // 落盘前再清一遍：结尾的点 / 空格、超长名字都在这里收敛
+  const text = sanitizeFileName(renameText.value.trim()).value
   renaming.value = null
   if (!text) return
   if (at.kind === 'draft') void project.renameProject(text)
@@ -430,7 +464,7 @@ function close(row: Row): void {
       <span class="filetree__count">{{ viewRows.length }}</span>
     </div>
 
-    <div class="filetree__body scroll-y" @dragend="cleanupDrag">
+    <div class="filetree__body scroll-y" @dragend="cleanupDrag" @click="onBlankClick">
       <section v-for="row in viewRows" :key="row.id" class="filetree__group">
         <!-- 项目条：箭头只管折叠，条本身是「切到这个项目」 -->
         <div
@@ -453,9 +487,10 @@ function close(row: Row): void {
           <input
             v-if="renaming?.kind === 'draft' && renaming.id === row.id"
             ref="renameInput"
-            v-model="renameText"
+            :value="renameText"
             class="filetree__rename"
             type="text"
+            @input="onRenameInput"
             @click.stop
             @dblclick.stop
             @keydown.enter="commitRename"
@@ -511,9 +546,10 @@ function close(row: Row): void {
                 <input
                   v-if="renaming?.kind === 'item' && renaming.id === entry.file.id"
                   ref="renameInput"
-                  v-model="renameText"
+                  :value="renameText"
                   class="filetree__rename"
                   type="text"
+                  @input="onRenameInput"
                   @click.stop
                   @dblclick.stop
                   @keydown.enter="commitRename"
@@ -694,12 +730,15 @@ function close(row: Row): void {
   background: var(--color-bg-raised);
   box-shadow:
     var(--shadow-sm),
-    inset 0 0 0 1px var(--color-accent-border);
+    inset 0 0 0 1px var(--color-text-tertiary);
 }
 
+/* 项目条的多选也用同一套描边，视线不用在两种「选中」之间换算 */
 .filetree__proj.is-selected:not(.is-active) {
-  background: var(--color-bg-hover);
-  box-shadow: inset 0 0 0 1px var(--color-border);
+  background: var(--color-bg-raised);
+  box-shadow:
+    var(--shadow-sm),
+    inset 0 0 0 1px var(--color-text-tertiary);
 }
 
 /* 拖到某条上 = 追加到这个项目末尾，落点提示就是整条描边 */
@@ -854,19 +893,27 @@ function close(row: Row): void {
   background: var(--color-bg-hover);
 }
 
-.filetree__item.is-active {
+/*
+ * 选中态：所有被选中的行**都**带描边。
+ *
+ * 以前只有「活动」那一条有白框，多选三条时只框了一条，看起来像只选了第一条 ——
+ * 描边才是「这几条会被一起动手」的唯一视觉承诺，必须一条不落。
+ * 用方案里统一的选中样式（raised + 1px 强调描边 + 阴影）。
+ */
+.filetree__item.is-selected {
+  background: var(--color-bg-raised);
+  border-color: var(--color-text-tertiary);
+  box-shadow: var(--shadow-sm);
+}
+
+.filetree__item.is-selected .filetree__name {
+  font-weight: var(--weight-semibold);
+}
+
+/* 只是「正在看」这一条、并没有被选中：浅底、不加框，与选中区分开 */
+.filetree__item.is-active:not(.is-selected) {
   background: var(--color-accent-subtle);
-  border-color: var(--color-accent-border);
-}
-
-/* 多选选中：与「当前活动」区分开 —— 活动是看哪一条，选中是对哪几条动手 */
-.filetree__item.is-selected:not(.is-active) {
-  background: var(--color-bg-hover);
-  border-color: var(--color-border);
-}
-
-.filetree__item.is-active.is-selected {
-  box-shadow: inset 0 0 0 1px var(--color-accent);
+  border-color: transparent;
 }
 
 .filetree__status {

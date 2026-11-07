@@ -932,7 +932,13 @@ export const useProjectStore = defineStore('project', () => {
    */
   function targetOf(fileId: string | null): AudioFile | null {
     if (!fileId) return null
-    if (fileId === MERGED_FILE_ID) return isMerge.value ? viewFile.value : null
+    /*
+     * 拼接视图**永远**在编辑器里呈现（`viewFile` 与批量模式无关），所以往它身上
+     * 写的时候不能再问「这一批是不是合并模式」—— 模式只决定这一批建几个项目。
+     * 以前这里多一个 `isMerge` 判断，结果是：把批量方式切成「每个文件各建一个
+     * 项目」之后，AI 校对 / AI 翻译的结果全都写不进去，界面上只看到「已取消」。
+     */
+    if (fileId === MERGED_FILE_ID) return viewFile.value
     return files.value.find((f) => f.id === fileId) ?? null
   }
 
@@ -1673,7 +1679,8 @@ export const useProjectStore = defineStore('project', () => {
 
   /** 改子项目的显示名（只改 `name`，不动音频路径与字幕源） */
   function renameItem(id: string, raw: string): boolean {
-    const clean = raw.trim()
+    // 子项目名会变成导出文件名，非法字符在这里再挡一道（界面上是边打边换）
+    const clean = sanitizeFileName(raw.trim()).value
     if (!clean) return false
     for (const d of drafts.value) {
       const item = draftItems(d).find((f) => f.id === id)

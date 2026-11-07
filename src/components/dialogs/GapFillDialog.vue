@@ -76,8 +76,12 @@ function apply(scope: 'current' | 'all'): void {
     // 每个文件各自入历史（history 按 fileId 分桶），撤回时互不影响。
     // 以前这里是直接改数据，撤回栈里根本没有这一步 —— 用户按 Ctrl+Z 会
     // 跳过它撤到更早的操作，等于「填充空隙」不可撤销。
-    history.commit(file.id, file.segments, '填充空隙', () => {
-      filled += applyGapFill(file.segments, options.value)
+    history.commit(file.id, () => file.segments, '填充空隙', () => {
+      // 先拷一份再填：`applyGapFill` 是就地改 `end`，而视图的 segments 是拷贝，
+      // 直接在原数组上填等于没改（也不会被 setter 收走）
+      const next = file.segments.map((s) => ({ ...s }))
+      filled += applyGapFill(next, options.value)
+      file.segments = next
     })
   }
 

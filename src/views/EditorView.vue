@@ -38,11 +38,6 @@ const speakerStore = useSpeakerStore()
  */
 const activeFile = computed(() => project.viewFile)
 
-/** 合并模式但还没有任何字幕：给出明确指引，而不是一片空白 */
-const mergePending = computed(
-  () => project.isMerge && (project.viewFile?.segments.length ?? 0) === 0,
-)
-
 /**
  * 音频对不上的子项目（缺失或被换过）。
  *
@@ -486,8 +481,21 @@ function openExport(): void {
 
 /* ---------------------------------------------------- 字幕文件的保存 */
 
+/**
+ * 只有一个子项目时，视图与那一份文件完全重合。
+ *
+ * 拼接视图本身不携带 `subtitleFormat` / 导出落点（那两样都属于具体文件），
+ * 但项目里只有一份的时候，「这条时间轴」和「那个文件」是同一件事 —— 不认这
+ * 一层，导出一个单文件项目之后底栏不会出现「保存」，用户只能再走一遍导出。
+ * 多子项目时刻意**不认**：那时底栏保存写的是整条拼接时间轴，往其中任意一份
+ * 的路径上写会把别人的内容盖掉。
+ */
+const soloFile = computed(() => (project.files.length === 1 ? project.files[0] : null))
+
 /** 来源是字幕文件（而非音频识别）的条目 */
-const isSubtitleSource = computed(() => !!activeFile.value?.subtitleFormat)
+const isSubtitleSource = computed(
+  () => !!(activeFile.value?.subtitleFormat ?? soloFile.value?.subtitleFormat),
+)
 
 /**
  * 当前条目上一次导出的文件（内存记录，清空队列即释放）。
@@ -495,7 +503,11 @@ const isSubtitleSource = computed(() => !!activeFile.value?.subtitleFormat)
  * 有了它，「导出完又改了几个字」就不必重走一遍导出对话框 —— 直接覆盖写回原位。
  * 可能是**多个**文件：「分别导出」会把原文与译文写成两个。
  */
-const exportedRecords = computed(() => project.exportRecordsOf(project.viewFileId))
+const exportedRecords = computed(() => {
+  const own = project.exportRecordsOf(project.viewFileId)
+  if (own.length > 0) return own
+  return soloFile.value ? project.exportRecordsOf(soloFile.value.id) : []
+})
 
 /**
  * 能否就地保存。
@@ -542,6 +554,9 @@ async function writeSubtitleTo(path: string, record?: ExportRecord): Promise<voi
     // 导出时带了讲话人标签，就地保存也必须带 —— 否则按一次保存就把标签抹掉了
     speakerPrefix: settings.speakerPrefixEffective,
     speakerNames: speakerStore.namesOf(file.id),
+    // 编号是子项目本地的：按条目自己的来源查称呼，别拿一张平表硬套
+    speakerNameOf: (seg) =>
+      speakerStore.nameOf(seg.originFileId ?? file.id, seg.speaker ?? -1),
   })
   const content = applyLineEnding(body, settings.exportLineEnding)
   await bridge.fs.writeSubtitle(path, content, file.sourceEncoding ?? settings.exportEncoding)
@@ -583,19 +598,6 @@ async function saveInPlace(): Promise<void> {
       <FileTree v-if="showFileTree" />
 
       <div class="editor__center">
-        <!-- 合并模式：明确说明正在编辑的是拼接产物，而不是某一个音频 -->
-        <div v-if="project.isMerge" class="mergebar">
-          <Icon name="layers" :size="13" />
-          <span v-if="mergePending" class="mergebar__text">
-            合并为一条时间轴：{{ project.supportedFiles.length }} 段音频已就绪，
-            <strong>识别完成后</strong>此处将显示完整的时间轴。导出只产生一个字幕文件。
-          </span>
-          <span v-else class="mergebar__text">
-            合并时间轴：{{ project.supportedFiles.length }} 段音频按导入顺序拼接，共
-            <strong>{{ activeFile?.segments.length ?? 0 }}</strong> 条字幕，导出只产生一个字幕文件。
-          </span>
-        </div>
-
         <!-- 音频对不上：路径失效或被换过。不给提示的话，用户先看到的是
              一片空波形，然后以为软件坏了 -->
         <div v-if="audioBad.length > 0" class="audbar">
@@ -615,6 +617,61 @@ async function saveInPlace(): Promise<void> {
         <AudioPlayer />
         <hr class="divider" />
         <ToolPanel />
+
+        <!-- AI 功能：与「讲话人」分开成组，两个入口都靠剪贴板中转 -->
+        <hr class="divider" />
+        <div class="aiside">
+          <div class="aiside__head">
+            <span class="aiside__title">AI 功能</span>
+          </div>
+          <div class="aiside__row">
+            <button
+              class="btn btn--ai"
+              type="button"
+              :disabled="!canAiReview"
+              :title="
+                canAiReview
+                  ? '交给网页版 AI 助手校对。经剪贴板中转，软件不代你发送'
+                  : '当前没有可校对的字幕'
+              "
+              @click="openAiReview"
+            >
+              <Icon name="spell-check" :size="14" />
+              <span>AI 校对</span>
+            </button>
+            <button
+              class="btn btn--ai"
+              type="button"
+              :disabled="!canAiTranslate"
+              :title="
+                canAiTranslate
+                  ? '交给网页版 AI 助手翻译成其他语言。经剪贴板中转，软件不代你发送'
+                  : '当前没有可翻译的字幕'
+              "
+              @click="openAiTranslate"
+            >
+              <Icon name="globe" :size="14" />
+              <span>AI 翻译</span>
+            </button>
+          </div>
+
+          <!-- 引导放在按钮下方、随内容走：侧栏只有 232px，浮层压不住也不该压住别的面板 -->
+          <div v-if="showAiTip" class="aitip" role="note">
+            <p class="aitip__text">AI 校对能减少识别里的小错误。</p>
+            <div class="aitip__acts">
+              <button class="aitip__never" type="button" @click="muteAiTip">不再提示</button>
+              <button
+                class="aitip__close"
+                type="button"
+                aria-label="关闭提示"
+                @click="closeAiTip"
+              >
+                <Icon name="x" :size="11" />
+              </button>
+            </div>
+          </div>
+        </div>
+
         <!-- 讲话人：只有当前文件真的有讲话人（或手动新增过）时才出现，自带上方分隔线 -->
         <SpeakerPanel />
         <hr class="divider" />
@@ -672,74 +729,30 @@ async function saveInPlace(): Promise<void> {
 
       <span class="spacer" />
 
-      <!-- AI 校对入口 + 引导气泡。气泡挂在按钮的正上方：它要指的就是这个按钮 -->
-      <span class="aitip">
+      <!-- 保存：主按钮 + 小三角拼成一组。三角单独立着像个走丢的方块，
+           合并之后一眼看出「更多保存方式」属于保存这一个动作 -->
+      <span class="btngroup">
         <button
-          class="btn btn--ai"
+          class="btn"
           type="button"
-          :disabled="!canAiReview"
-          :title="
-            canAiReview
-              ? '交给网页版 AI 助手校对。经剪贴板中转，软件不代你发送'
-              : '当前没有可校对的字幕'
-          "
-          @click="openAiReview"
+          :title="saveProjectHint"
+          :disabled="project.supportedFiles.length === 0"
+          @click="saveProjectFile"
         >
-          <Icon name="spell-check" :size="15" />
-          <span>AI 校对</span>
+          <Icon name="save" :size="14" />
+          <span>保存项目</span>
+          <span v-if="project.projectDirty" class="editor__dot" aria-hidden="true" />
         </button>
-
-        <div v-if="showAiTip" class="aitip__card" role="note">
-          <div class="aitip__head">
-            <button class="aitip__never" type="button" @click="muteAiTip">不再提示</button>
-            <button
-              class="aitip__close"
-              type="button"
-              aria-label="关闭提示"
-              @click="closeAiTip"
-            >
-              <Icon name="x" :size="11" />
-            </button>
-          </div>
-          <p class="aitip__text">使用 AI 校对功能可以大幅度优化识别过程中产生的小错误</p>
-          <span class="aitip__arrow" aria-hidden="true" />
-        </div>
+        <button
+          v-if="dirtyDrafts.length > 1"
+          class="btn"
+          type="button"
+          title="更多保存方式"
+          @click="openSaveMenu"
+        >
+          <Icon name="chevron-down" :size="12" />
+        </button>
       </span>
-      <button
-        class="btn btn--ai"
-        type="button"
-        :disabled="!canAiTranslate"
-        :title="
-          canAiTranslate
-            ? '交给网页版 AI 助手翻译成其他语言。经剪贴板中转，软件不代你发送'
-            : '当前没有可翻译的字幕'
-        "
-        @click="openAiTranslate"
-      >
-        <Icon name="globe" :size="15" />
-        <span>AI 翻译</span>
-      </button>
-      <button
-        class="btn"
-        type="button"
-        :title="saveProjectHint"
-        :disabled="project.supportedFiles.length === 0"
-        @click="saveProjectFile"
-      >
-        <Icon name="save" :size="14" />
-        <span>保存项目</span>
-        <span v-if="project.projectDirty" class="editor__dot" aria-hidden="true" />
-      </button>
-      <!-- 多个项目都有改动时才有这个小三角：展开「保存全部项目」 -->
-      <button
-        v-if="dirtyDrafts.length > 1"
-        class="btn editor__caret"
-        type="button"
-        title="更多保存方式"
-        @click="openSaveMenu"
-      >
-        <Icon name="chevron-down" :size="12" />
-      </button>
       <button
         v-if="canSaveInPlace"
         class="btn"
@@ -792,11 +805,6 @@ async function saveInPlace(): Promise<void> {
 }
 
 /* 「保存项目」右侧的小三角：只在多项目都有改动时出现 */
-.editor__caret {
-  padding: 0 var(--space-1);
-  margin-left: -1px;
-}
-
 .editor__body {
   flex: 1;
   min-height: 0;
@@ -811,29 +819,6 @@ async function saveInPlace(): Promise<void> {
 }
 
 /* 合并模式说明条 */
-.mergebar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--color-border-subtle);
-  background: var(--color-accent-subtle);
-  color: var(--color-accent-text);
-  font-size: 11px;
-}
-
-.mergebar__text {
-  flex: 1;
-  min-width: 0;
-  line-height: var(--line-base);
-}
-
-.mergebar__text strong {
-  font-variant-numeric: tabular-nums;
-  font-weight: var(--weight-semibold);
-}
-
 /* 音频对不上的提示条：用警告色，与合并说明区分开（那是常态，这是要处理的） */
 .audbar {
   flex: none;
@@ -924,40 +909,59 @@ async function saveInPlace(): Promise<void> {
 }
 
 /*
- * AI 校对引导气泡。
+ * AI 功能小节。
  *
- * 挂在按钮的正上方而不是页面角落：它要说的是「点这个按钮」，离开按钮就没有意义。
- * 用 absolute 而不是占位元素 —— 它是一次性提示，不该挤动底部那一排已经很满的控件。
- * 右对齐到按钮右缘，箭头指回按钮中心偏右。
+ * 两个入口从底栏搬到了侧栏：底栏那一排要留给「保存 / 导出」这类有先后顺序的
+ * 动作，AI 是随手可用的辅助能力，跟「讲话人」一样属于侧栏的加工工具。
  */
+.aiside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.aiside__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.aiside__title {
+  flex: none;
+  white-space: nowrap;
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.aiside__row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* 两个按钮等宽平分：并排的两个入口看不出主次，宽度不一致只会显得没对齐 */
+.aiside__row > .btn {
+  flex: 1;
+  min-width: 0;
+  padding: 0 var(--space-2);
+}
+
+/* 一次性提示：随内容走，不浮在别的面板上 */
 .aitip {
   position: relative;
-  display: inline-flex;
-  flex: none;
-}
-
-.aitip__card {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 10px);
-  z-index: var(--z-dropdown, 100);
-  width: 250px;
-  padding: var(--space-2) var(--space-3) var(--space-3);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-ai-border);
   border-radius: var(--radius-md);
-  background: var(--color-bg-surface);
-  box-shadow: var(--shadow-md);
+  background: var(--color-ai-subtle, var(--color-bg-subtle));
   font-size: var(--font-size-xs);
   line-height: var(--line-base);
-  /* 负外边距的那类「贴近按钮」写法在这里不适用，靠 padding 控制内呼吸 */
-  cursor: default;
 }
 
-.aitip__head {
+.aitip__acts {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 2px;
+  margin-top: var(--space-2);
 }
 
 .aitip__never {
@@ -986,19 +990,6 @@ async function saveInPlace(): Promise<void> {
 
 .aitip__text {
   color: var(--color-text-primary);
-}
-
-/* 指向按钮的小三角：两格边框拼出来的，不用图片也不用伪元素的多余层 */
-.aitip__arrow {
-  position: absolute;
-  right: 24px;
-  bottom: -5px;
-  width: 8px;
-  height: 8px;
-  transform: rotate(45deg);
-  background: var(--color-bg-surface);
-  border-right: 1px solid var(--color-ai-border);
-  border-bottom: 1px solid var(--color-ai-border);
 }
 
 /* 校验列表 */

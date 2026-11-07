@@ -1415,7 +1415,7 @@ onBeforeUnmount(() => {
           :disabled="busy || !canCopy"
           @click="copyPrompt"
         >
-          <Icon name="copy" :size="15" />
+          <Icon name="copy" :size="14" />
           <span>复制提示词</span>
         </button>
 
@@ -1427,7 +1427,7 @@ onBeforeUnmount(() => {
           </button>
           <button class="btn btn--primary" type="button" @click="step = 'apply'">
             <span>我已复制结果，去取回</span>
-            <Icon name="chevron-right" :size="15" />
+            <Icon name="chevron-right" :size="14" />
           </button>
         </template>
 
@@ -1439,7 +1439,7 @@ onBeforeUnmount(() => {
             :disabled="busy || submitted"
             @click="readClipboard"
           >
-            <Icon name="import" :size="15" />
+            <Icon name="import" :size="14" />
             <span>
               {{ results.length > 0 ? '重新读取剪贴板' : isTranslate ? '读取剪贴板并校验' : '读取剪贴板并应用' }}
             </span>
@@ -1450,7 +1450,7 @@ onBeforeUnmount(() => {
             type="button"
             @click="confirmApply"
           >
-            <Icon name="check" :size="15" />
+            <Icon name="check" :size="14" />
             <span>{{ isTranslate ? '载入译文（可撤回）' : '确认覆盖（可撤回）' }}</span>
           </button>
         </template>

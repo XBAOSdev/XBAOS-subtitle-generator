@@ -1720,7 +1720,7 @@ const scenarios = {
   async 'material-board'(cdp) {
     const names = `(() => {
       const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
-      return pinia.get('project').files.map((f) => f.name)
+      return pinia.get('project').intake.map((f) => f.name)
     })()`
 
     /*
@@ -1918,7 +1918,12 @@ const scenarios = {
     await sleep(400)
 
     const seed = await store(`
-      const f = project.viewFile
+      /*
+       * 种进**第一个子项目**而不是拼接视图：讲话人编号是子项目本地的，
+       * 面板挂的是活动子项目（方案 1.x 拍板），称呼也按子项目存。
+       */
+      for (const g of project.files) g.segments = []
+      const f = project.files[0]
       if (!f) return 'no-file'
       f.durationSec = 30
       const mk = (id, start, end, text, speaker) => ({ id, start, end, text, origin: text, issues: [], speaker })
@@ -1928,6 +1933,7 @@ const scenarios = {
         mk('c', 8, 12, '第三条', 0),
       ]
       editor.clearSelection()
+      project.setActiveFile(f.id)
       speakers.rename(f.id, 0, '张三')
       speakers.rename(f.id, 1, '李四')
       return [f.id, f.segments.length]
@@ -2217,7 +2223,9 @@ const scenarios = {
     const seed = await store(`
       // 浏览器 profile 的 localStorage 会留到下次运行：先把共用开关复位，
       // 否则这个场景的起点取决于上一个场景跑到哪了
-      settings.speakerNamesShared = false
+      // 共用开关现在是项目级、默认开：直接拨到关，别去动那个已废弃的设置项
+      speakers.shared = false
+      for (const g of project.files) g.segments = []
       const list = project.files.filter((f) => f.status !== 'unsupported').slice(0, 2)
       const mk = (id, start, end, text, speaker) => ({ id, start, end, text, origin: text, issues: [], speaker })
       list[0].segments = [
@@ -2341,8 +2349,10 @@ const scenarios = {
 
     const shared = await store(`
       const f = project.files.filter((x) => x.status !== 'unsupported')
+      // 共用开关是**项目级**状态（\`speakers.shared\`），settings.speakerNamesShared
+      // 只剩占位、运行时不读不写 —— 拿它断言等于永远读到 false
       return {
-        flag: settings.speakerNamesShared,
+        flag: speakers.shared,
         a: speakers.namesOf(f[0].id),
         b: speakers.namesOf(f[1].id),
       }
@@ -2362,7 +2372,7 @@ const scenarios = {
     // 独立处理下用户点这个按钮只是想整理关系，确认一次就被强行共用，
     // 就等于又出现「自己勾上的勾选框」。
     await store(`
-      settings.speakerNamesShared = false
+      speakers.shared = false
       speakers.pendingShareConfirm = false
     `)
     await sleep(200)
@@ -2379,7 +2389,7 @@ const scenarios = {
     await sleep(300)
     const afterManual = await store(`
       return {
-        shared: settings.speakerNamesShared,
+        shared: speakers.shared,
         box: document.querySelector('.speakers__share-check input')?.checked ?? null,
       }
     `)
@@ -3246,7 +3256,7 @@ const scenarios = {
   },
 
   /**
-   * 合并为一条时间轴。
+   * 合并为一个项目。
    *
    * 这一整套断言对应三个真实反馈：
    *   1. 合并模式下编辑器里必须是「一条拼接产物」，不能点队列里的音频就把
@@ -3276,11 +3286,11 @@ const scenarios = {
     const modeCards = await cdp.evaluate(`document.querySelectorAll('.modes .mode').length`)
     check('批量处理方式渲染两张模式卡', modeCards === 2, `实际 ${modeCards}`)
 
-    // 选「合并为一条时间轴」（真实鼠标点击）
+    // 选「合并为一个项目」（真实鼠标点击）
     const mergeCard = await centerOf(
-      `[...document.querySelectorAll('.mode')].find((b) => b.textContent.includes('合并为一条时间轴'))`,
+      `[...document.querySelectorAll('.mode')].find((b) => b.textContent.includes('合并为一个项目'))`,
     )
-    if (!mergeCard) throw new Error('找不到「合并为一条时间轴」卡片')
+    if (!mergeCard) throw new Error('找不到「合并为一个项目」卡片')
     await cdp.click(mergeCard.x, mergeCard.y)
     await sleep(300)
 
@@ -3290,36 +3300,36 @@ const scenarios = {
 
     const activeIsMerge = await cdp.evaluate(`(() => {
       const el = document.querySelector('.mode.is-active')
-      return el ? el.textContent.includes('合并为一条时间轴') : false
+      return el ? el.textContent.includes('合并为一个项目') : false
     })()`)
     check('选中合并卡后进入合并模式', activeIsMerge === true, String(activeIsMerge))
 
-    // 合并模式下队列条目应被标记为不可切换（点了不换预览）
+    // 素材卡只是材料，不再承担「点一下切换预览」的职责（那套选中态已随批量模式一起删掉）
     const rowsInfo = await cdp.evaluate(`({
       total: document.querySelectorAll('.tile:not(.tile--add)').length,
-      statics: document.querySelectorAll('.tile:not(.tile--add).is-static').length,
+      statics: document.querySelectorAll('.tile:not(.tile--add).is-active').length,
     })`)
     check(
-      '合并模式下队列条目全部标记为不可切换',
-      rowsInfo.total > 0 && rowsInfo.statics === rowsInfo.total,
+      '素材卡不承担「切换预览」的选中态',
+      rowsInfo.total > 0 && rowsInfo.statics === 0,
       `${rowsInfo.statics}/${rowsInfo.total}`,
     )
 
     // 未锁定时点另一张卡：应真实切换模式
     const sepCard = await centerOf(
-      `[...document.querySelectorAll('.mode')].find((b) => b.textContent.includes('各自独立处理'))`,
+      `[...document.querySelectorAll('.mode')].find((b) => b.textContent.includes('每个文件各建一个项目'))`,
     )
     await cdp.click(sepCard.x, sepCard.y)
     await sleep(300)
     const nowSeparate = await cdp.evaluate(`(() => {
       const el = document.querySelector('.mode.is-active')
-      return el ? el.textContent.includes('各自独立处理') : false
+      return el ? el.textContent.includes('每个文件各建一个项目') : false
     })()`)
     check('未锁定时点另一张卡可以切换模式', nowSeparate === true, String(nowSeparate))
 
     // 切回合并，准备走识别流程
     const backMerge = await centerOf(
-      `[...document.querySelectorAll('.mode')].find((b) => b.textContent.includes('合并为一条时间轴'))`,
+      `[...document.querySelectorAll('.mode')].find((b) => b.textContent.includes('合并为一个项目'))`,
     )
     await cdp.click(backMerge.x, backMerge.y)
     await sleep(300)
@@ -3327,7 +3337,7 @@ const scenarios = {
       '切回合并模式',
       await cdp.evaluate(`(() => {
         const el = document.querySelector('.mode.is-active')
-        return el ? el.textContent.includes('合并为一条时间轴') : false
+        return el ? el.textContent.includes('合并为一个项目') : false
       })()`),
     )
 
@@ -3340,9 +3350,17 @@ const scenarios = {
     await cdp.click(startBtn.x, startBtn.y)
     await sleep(300)
 
-    // 「开始识别」这一刻起队列与产物归属定死，模式随之锁死
-    const lockedAfterStart = await cdp.evaluate(`document.querySelectorAll('.mode.is-locked').length`)
-    check('点击开始识别后才锁定模式', lockedAfterStart === 2, `实际 ${lockedAfterStart}`)
+    // 「开始识别」之后这一批的合成方式就定了：两张卡片一起进锁定外观（禁用 + 变灰），
+    // 连当前选中的那张也灰，免得用户以为还能点。
+    const lockedAfterStart = await cdp.evaluate(`(() => ({
+      locked: document.querySelectorAll('.mode.is-locked').length,
+      disabled: [...document.querySelectorAll('.mode')].every((b) => b.disabled),
+    }))()`)
+    check(
+      '识别中两张模式卡片都锁定（禁用且变灰）',
+      lockedAfterStart.locked === 2 && lockedAfterStart.disabled === true,
+      JSON.stringify(lockedAfterStart),
+    )
 
     // 演示识别的耗时按文件数估，但机器忙时会明显更慢 —— 固定 sleep 在全量跑时
     // 曾把这条判成假失败，还一路把后面的断言带走。改成轮询等待。
@@ -3358,41 +3376,50 @@ const scenarios = {
       const el = document.querySelector('.mergebar')
       return el ? el.textContent.replace(/\\s+/g, '') : ''
     })()`)
-    check('编辑器给出合并模式说明', bar.includes('合并时间轴'), bar.slice(0, 40))
+    // 顶部那条「合并时间轴：N 段音频…」已经按用户要求删掉：页名「预览与编辑」
+    // 加侧栏的子项目清单已经说清了，再顶一条说明只是噪音
+    check('编辑器顶部不再有合并说明条', bar === '', bar.slice(0, 40))
 
-    // 左侧应只有一条产物 + 分段清单，且都不可点（点不开、换不掉预览）
+    // 侧栏每个子项目都能点（点了只滚动、不换内容），这里确认点了之后条数不变
     const clickableInTree = await cdp.evaluate(
-      `document.querySelectorAll('.filetree__item button, .filetree__item[type=button]').length`,
+      `document.querySelectorAll('.filetree__item').length`,
     )
-    check('合并模式下文件树没有可点的条目', clickableInTree === 0, `实际 ${clickableInTree}`)
+    check('侧栏列出了子项目行', clickableInTree > 0, `实际 ${clickableInTree}`)
 
     await shot(cdp, 'probe-editor-merge.png')
 
-    // 回导入页，点一个队列音频再进预览：内容必须还是那条合并时间轴
+    /*
+     * 回导入页：这一批素材已经收进项目，队列按理是空的。
+     *
+     * 以前这里点一张素材卡看「会不会把预览换成某一个子项目」—— 而那套
+     * 「点一下素材就切换预览」的交互随批量模式一起删掉了（素材卡只剩材料
+     * 属性），所以改成直接盯「队列有没有被收走」+「切回来内容还是那条合并
+     * 时间轴」。
+     */
     const homeNav = await centerOf(
       `[...document.querySelectorAll('.sidebar__item')].find((b) => b.textContent.includes('导入'))`,
     )
     await cdp.click(homeNav.x, homeNav.y)
     await sleep(400)
-
-    const thirdRow = await centerOf(`document.querySelectorAll('.tile:not(.tile--add)')[2]`)
-    await cdp.click(thirdRow.x, thirdRow.y)
-    await sleep(300)
-
-    const previewBtn = await centerOf(
-      `[...document.querySelectorAll('.view__foot .btn')].find((b) => b.textContent.includes('去预览'))`,
-    )
-    await cdp.click(previewBtn.x, previewBtn.y)
-    await sleep(400)
-
-    const rowsAfter = await cdp.evaluate(`document.querySelectorAll('.subtable__body .row').length`)
-    const barAfter = await cdp.evaluate(`(() => {
-      const el = document.querySelector('.mergebar')
-      return el ? el.textContent.replace(/\\s+/g, '') : ''
-    })()`)
+    const queueAfter = await cdp.evaluate(`({
+      left: document.querySelectorAll('.tile:not(.tile--add)').length,
+      recognized: document.querySelectorAll('.tile:not(.tile--add):not(.is-unsupported)').length,
+    })`)
     check(
-      '点队列里的音频不会换掉合并预览',
-      rowsAfter === mergedRows && barAfter.includes('合并时间轴'),
+      '识别完成后这一批从队列里收走了（只留下不支持的那份）',
+      queueAfter.recognized === 0,
+      JSON.stringify(queueAfter),
+    )
+
+    const editorNav = await centerOf(
+      `[...document.querySelectorAll('.sidebar__item')].find((b) => b.textContent.includes('预览与编辑'))`,
+    )
+    await cdp.click(editorNav.x, editorNav.y)
+    await sleep(500)
+    const rowsAfter = await cdp.evaluate(`document.querySelectorAll('.subtable__body .row').length`)
+    check(
+      '来回切页面不会动到合并时间轴',
+      rowsAfter === mergedRows && rowsAfter > 0,
       `${mergedRows} -> ${rowsAfter}`,
     )
 
@@ -3452,9 +3479,18 @@ const scenarios = {
       !labels.some((t) => t.includes('另存为')),
       labels.join(' / '),
     )
-    const aiAt = labels.findIndex((t) => t.includes('AI校对'))
+    const aiInFoot = labels.findIndex((t) => t.includes('AI校对'))
     const exportAt = labels.findIndex((t) => t.includes('导出字幕'))
-    check('「AI 校对」排在「导出字幕」之前（保存按钮的位置留给它）', aiAt >= 0 && aiAt < exportAt, labels.join(' / '))
+    // AI 两个入口已搬到右侧栏「AI 功能」小节：底栏只留有先后顺序的「保存 / 导出」
+    check(
+      '底栏不再出现 AI 按钮，导出在最后',
+      aiInFoot === -1 && exportAt === labels.length - 1,
+      labels.join(' / '),
+    )
+    const aiSide = await cdp.evaluate(
+      `[...document.querySelectorAll('.aiside__row .btn')].map((b) => b.textContent.replace(/\\s+/g, ''))`,
+    )
+    check('AI 校对 / AI 翻译在右侧栏「AI 功能」里', JSON.stringify(aiSide) === JSON.stringify(['AI校对', 'AI翻译']), JSON.stringify(aiSide))
     check('音频识别的条目、未导出过 → 不显示「保存」', !labels.includes('保存'), labels.join(' / '))
 
     // ---- 撤销/重做这一行的排版 ----
@@ -3571,12 +3607,21 @@ const scenarios = {
     )
     await cdp.click(navHome.x, navHome.y)
     await sleep(400)
-    await clickByText('.mode', '合并为一条时间轴')
+    // 前面走过一遍编辑器，那份演示素材已经被收进项目了：导入页此刻是空的，
+    // 而「批量处理方式」只在有待识别文件时渲染 —— 先补一批素材再选模式
+    if ((await cdp.evaluate(`document.querySelectorAll('.tile:not(.tile--add)').length`)) === 0) {
+      const dev = await centerOf(`document.querySelector('.board__dev')`)
+      if (dev) {
+        await cdp.click(dev.x, dev.y)
+        await sleep(500)
+      }
+    }
+    await clickByText('.mode', '合并为一个项目')
     const selected = await cdp.evaluate(`(() => {
       const el = document.querySelector('.mode.is-active')
       return el ? el.textContent.replace(/\\s+/g, '') : ''
     })()`)
-    check('能选中「合并为一条时间轴」', selected.includes('合并为一条时间轴'), selected)
+    check('能选中「合并为一个项目」', selected.includes('合并为一个项目'), selected)
 
     // 无桥环境下清空走 window.confirm，先让它自动通过
     await cdp.evaluate(`(() => { window.confirm = () => true; return true })()`)
@@ -3604,11 +3649,11 @@ const scenarios = {
     })`)
     check('重新载入演示数据后队列恢复', afterReload.rows > 0, String(afterReload.rows))
     check(
-      '清空队列后模式复位为「各自独立处理」',
-      afterReload.active.includes('独立处理'),
+      '清空队列不会把模式复位（会话内记住上次选的）',
+      afterReload.active.includes('合并为一个项目'),
       `mode=${afterReload.active}`,
     )
-    check('清空后模式锁定也一并解除', afterReload.locked === 0, String(afterReload.locked))
+    check('模式卡片不再有「已锁定」样式（识别中只禁用不禁改）', afterReload.locked === 0, String(afterReload.locked))
 
     await cdp.evaluate(`(() => {
       Object.keys(localStorage).filter((k) => k.startsWith('xbaos.settings')).forEach((k) => localStorage.removeItem(k))
@@ -3777,18 +3822,24 @@ const scenarios = {
     check('初始批量模式是「合并为一个项目」', (await useStore(`return s.batchMode`)) === 'merge')
     check('能切到「每个文件各建一个项目」', (await useStore(`return s.setBatchMode('separate')`)) === true)
 
-    await useStore(`s.clearAll(); return true`)
+    // `clearAll` 现在只清**待识别队列**（已识别的内容在项目里，不受影响）：
+    // 想从空白开始，得把项目里的子项目也一并移除
+    await useStore(`
+      s.clearAll()
+      for (const f of [...s.files]) s.removeItem(f.id)
+      return true
+    `)
     const cleared = await useStore(`return {
       mode: s.batchMode,
+      queue: s.intake.length,
       files: s.files.length,
-      merged: !!s.mergedFile,
     }`)
     check(
       '清空队列后批量模式保持不变（不再复位成独立处理）',
       cleared.mode === 'separate',
       JSON.stringify(cleared),
     )
-    check('清空队列后合并产物一并释放', cleared.merged === false && cleared.files === 0)
+    check('清空之后队列与项目都空了', cleared.queue === 0 && cleared.files === 0, JSON.stringify(cleared))
 
     const imported = await useStore(`return await s.addSubtitleFromPath(${JSON.stringify(SRT_PATH)})`)
     check('清空队列后能导入字幕文件', imported === true)
@@ -3827,7 +3878,7 @@ const scenarios = {
     // ---- 反例：还没有译文时点「AI 翻译」不该被预警拦下来 ----
     // （预警只针对「会覆盖已有内容」，没有内容可覆盖就不该多一步）
     await cdp.evaluate(`(window.__confirms = [], true)`)
-    await clickByText('.editor__foot button', 'AI 翻译')
+    await clickByText('.aiside__row button', 'AI翻译')
     await sleep(300)
     check(
       '没有译文时不弹预警，直接开窗',
@@ -3935,7 +3986,11 @@ const scenarios = {
     )
 
     const remembered = await useStore(`return {
-      ofActive: s.exportRecordsOf(s.viewFileId)[0]?.path ?? null,
+      // 落点挂在具体文件上；只有一个子项目时视图与那份文件重合，两处都认
+      ofActive:
+        s.exportRecordsOf(s.viewFileId)[0]?.path ??
+        s.exportRecordsOf(s.files[0]?.id)[0]?.path ??
+        null,
       size: s.exportRecords.size,
     }`)
     check('导出后记住了字幕落点', !!remembered.ofActive, String(remembered.ofActive))
@@ -3965,21 +4020,33 @@ const scenarios = {
 
     /* ---- 关窗闸门（P0-1）
      *
-     * 刚刚「保存」过，当前内容与落盘的一致 —— 这时关窗**不该**打扰用户。
-     * 桩只提供「主进程问了」这个入口，该不该拦由业务代码判断。
+     * 「保存字幕」写的是字幕文件，不是工程（`.xbsgp`）。工程只活在内存里，
+     * 关窗就没了 —— 所以刚刚覆盖保存过字幕，关窗**仍然要问一句**。
+     * 桩回答「取消」，于是流程停在这里、不关窗。
      */
-    const closeClean = await cdp.evaluate(`(async () => {
+    const closeExported = await cdp.evaluate(`(async () => {
       window.__confirms = []; window.__forceClose = 0; window.__closeAcks = 0
       window.__closeRequest()
       await new Promise((r) => setTimeout(r, 300))
-      return { confirms: window.__confirms.length, forced: window.__forceClose, acks: window.__closeAcks }
+      return {
+        confirms: window.__confirms.length,
+        forced: window.__forceClose,
+        acks: window.__closeAcks,
+        title: window.__confirms[0]?.title ?? '',
+        buttons: window.__confirms[0]?.buttons ?? [],
+      }
     })()`)
     check(
-      '内容已是最新保存版本 → 关窗直接放行，不打扰',
-      closeClean.confirms === 0 && closeClean.forced === 1,
-      JSON.stringify(closeClean),
+      '导出字幕 ≠ 保存工程：关窗仍要问一句（桩点了取消，不关）',
+      closeExported.confirms === 1 && closeExported.forced === 0,
+      JSON.stringify(closeExported),
     )
-    check('裁决前先回执（撤掉主进程的看门狗）', closeClean.acks === 1, String(closeClean.acks))
+    check('裁决前先回执（撤掉主进程的看门狗）', closeExported.acks === 1, String(closeExported.acks))
+    check(
+      '确认框标题与选项说得清（取消排第一，默认不关）',
+      closeExported.title === '关闭前确认' && closeExported.buttons[0] === '取消',
+      JSON.stringify({ title: closeExported.title, buttons: closeExported.buttons }),
+    )
 
     // ---- 识别进度推进任务栏 ----
     await usePinia('project', `s.recognizing = true; s.progress = 42; return true`)
@@ -4007,8 +4074,12 @@ const scenarios = {
      */
     const closeDirty = await cdp.evaluate(`(async () => {
       window.__confirms = []; window.__forceClose = 0
+      const real = window.xbaos.dialog.confirm
+      // 选项顺序是 [取消, 仍要关闭]，桩点第 2 个才算「仍要关闭」
+      window.xbaos.dialog.confirm = async (o) => { window.__confirms.push(o); return 1 }
       window.__closeRequest()
       await new Promise((r) => setTimeout(r, 300))
+      window.xbaos.dialog.confirm = real
       return {
         title: window.__confirms[0]?.title ?? '',
         msg: window.__confirms[0]?.message ?? '',
@@ -4017,16 +4088,20 @@ const scenarios = {
     })()`)
     check(
       '有未保存内容时关窗先弹确认框',
-      closeDirty.title === '还有未保存的内容',
+      closeDirty.title === '关闭前确认' && /未保存/.test(closeDirty.msg),
       JSON.stringify(closeDirty),
     )
-    check('确认框说清了「关闭后不会保留」', /不会保留/.test(closeDirty.msg), closeDirty.msg)
+    check(
+      '确认框点名了是哪个项目没保存（用户要知道丢的是什么）',
+      /项目「/.test(closeDirty.msg),
+      closeDirty.msg,
+    )
     check('桩点了「仍要关闭」→ 才真的放行', closeDirty.forced === 1, String(closeDirty.forced))
 
     const closeCancel = await cdp.evaluate(`(async () => {
       window.__confirms = []; window.__forceClose = 0
       const real = window.xbaos.dialog.confirm
-      window.xbaos.dialog.confirm = async (o) => { window.__confirms.push(o); return 1 }
+      window.xbaos.dialog.confirm = async (o) => { window.__confirms.push(o); return 0 }
       window.__closeRequest()
       await new Promise((r) => setTimeout(r, 300))
       window.xbaos.dialog.confirm = real
@@ -4041,7 +4116,7 @@ const scenarios = {
     // 走的是系统原生对话框（用户注意力此刻可能在 AI 助手的网页上，应用内浮层会被
     // 整个盖住）。桩只回答「用户点了哪个按钮」，该不该拦一行都不替代。
     await cdp.evaluate(`(window.__confirms = [], true)`)
-    await clickByText('.editor__foot button', 'AI 翻译')
+    await clickByText('.aiside__row button', 'AI翻译')
     await sleep(320)
     const trWarns = await cdp.evaluate(
       `window.__confirms.map((c) => ({ title: c.title, message: c.message, detail: c.detail }))`,
@@ -4095,7 +4170,7 @@ const scenarios = {
 
     await shot(cdp, 'probe-assist-lock.png')
 
-    await clickByText('.assistlock button', '回到 AI 窗口')
+    await clickByText('.assistlock button', '回到AI窗口')
     await sleep(260)
     const focusCalls = await cdp.evaluate(`window.__focusCalls`)
     check('点「回到 AI 窗口」会把辅助窗口拉回最前', focusCalls === 1, `focus ${focusCalls} 次`)
@@ -4109,7 +4184,7 @@ const scenarios = {
     )
 
     await cdp.evaluate(`(window.__confirms = [], true)`)
-    await clickByText('.editor__foot button', 'AI 校对')
+    await clickByText('.aiside__row button', 'AI校对')
     await sleep(320)
     const rvWarns = await cdp.evaluate(`window.__confirms.map((c) => ({ title: c.title, detail: c.detail }))`)
     check(
@@ -4199,8 +4274,12 @@ const scenarios = {
       !!zhFile && !!enFile && zhFile.content.includes('00:00:00,000 --> 00:00:02,000') && enFile.content.includes('00:00:00,000 --> 00:00:02,000'),
     )
 
+    // 落点挂在具体文件上；只有一个子项目时视图与那份文件重合
     const recs = await useStore(
-      `return s.exportRecordsOf(s.viewFileId).map((r) => ({ bundle: r.bundle, lang: r.lang, name: r.path.split('\\\\').pop() }))`,
+      `return (s.exportRecordsOf(s.viewFileId).length
+        ? s.exportRecordsOf(s.viewFileId)
+        : s.exportRecordsOf(s.files[0]?.id)
+      ).map((r) => ({ bundle: r.bundle, lang: r.lang, name: r.path.split('\\\\').pop() }))`,
     )
     check(
       '落点记录记住了两个文件及各自的语言',
@@ -4210,7 +4289,8 @@ const scenarios = {
 
     // 保存必须把**两个**文件都照原样重写，不能把英文那份改成中文
     await cdp.evaluate(`(window.__writes = [], true)`)
-    await clickByText('.editor__foot button', '保存')
+    // 精确匹配「保存」：底栏还有「保存项目」，模糊匹配会点到它
+    await clickByText('.editor__foot button', '保存', true)
     await sleep(600)
     const writes4 = await cdp.evaluate(`window.__writes`)
     check('「保存」把两个文件都写回去了', writes4.length === 2, `写入 ${writes4.length} 次`)
@@ -4222,11 +4302,23 @@ const scenarios = {
     )
 
     // ---- 清空队列 → 落点释放、保存按钮隐藏 ----
+    /*
+     * 清空队列只清「待识别」的那一边：已经收进项目的内容不受影响，
+     * 所以落点与「保存」都还在。要释放落点，得把子项目移除。
+     */
     await useStore(`s.clearAll(); return true`)
     await sleep(500)
-    check('清空队列后落点记录被释放', (await useStore(`return s.exportRecords.size`)) === 0)
+    check(
+      '清空待识别队列不动项目里的导出落点',
+      (await useStore(`return s.exportRecords.size`)) === 1,
+      String(await useStore(`return s.exportRecords.size`)),
+    )
+
+    await useStore(`for (const f of [...s.files]) s.removeItem(f.id); return true`)
+    await sleep(500)
+    check('移除子项目后落点记录释放', (await useStore(`return s.exportRecords.size`)) === 0)
     const labels2 = await footLabels()
-    check('清空队列后「保存」按钮隐藏', !labels2.includes('保存'), labels2.join(' / '))
+    check('项目空了之后「保存」按钮隐藏', !labels2.includes('保存'), labels2.join(' / '))
 
     await cdp.evaluate(`(() => {
       Object.keys(localStorage).filter((k) => k.startsWith('xbaos.settings')).forEach((k) => localStorage.removeItem(k))
@@ -4243,7 +4335,7 @@ const scenarios = {
   async 'ai-entry'(cdp) {
     const readButton = () =>
       cdp.evaluate(`(() => {
-        const btn = [...document.querySelectorAll('.editor__foot button')].find((b) =>
+        const btn = [...document.querySelectorAll('.aiside__row button')].find((b) =>
           b.textContent.includes('AI 校对'),
         )
         if (!btn) return null
@@ -4265,7 +4357,7 @@ const scenarios = {
 
     await goto(cdp, BASE + '/?demo=1&view=editor&theme=light')
     const light = await readButton()
-    check('编辑器底部有「AI 校对」入口', !!light)
+    check('右侧栏「AI 功能」里有「AI 校对」入口', !!light)
     if (!light) return
 
     check(
@@ -4361,11 +4453,11 @@ const scenarios = {
      */
     const tip = () =>
       cdp.evaluate(`(() => {
-        const card = document.querySelector('.aitip__card')
+        const card = document.querySelector('.aitip')
         if (!card) return { present: false }
-        const btn = card.closest('.aitip')?.querySelector('.btn--ai')
+        const row = card.closest('.aiside')?.querySelector('.aiside__row')
         const cr = card.getBoundingClientRect()
-        const br = btn ? btn.getBoundingClientRect() : null
+        const br = row ? row.getBoundingClientRect() : null
         return {
           present: true,
           text: (card.querySelector('.aitip__text')?.textContent ?? '').trim(),
@@ -4373,8 +4465,8 @@ const scenarios = {
           hasClose: !!card.querySelector('.aitip__close'),
           width: Math.round(cr.width),
           height: Math.round(cr.height),
-          above: br ? Math.round(cr.bottom) <= Math.round(br.top) : false,
-          rightGap: br ? Math.round(cr.right - br.right) : 999,
+          below: br ? Math.round(cr.top) >= Math.round(br.bottom) : false,
+          widthGap: br ? Math.round(cr.width - br.width) : 999,
         }
       })()`)
 
@@ -4388,20 +4480,20 @@ const scenarios = {
 
     await goto(cdp, BASE + '/?demo=1&view=editor&theme=light')
     const tip1 = await tip()
-    check('识别完成后「AI 校对」按钮上方出现引导气泡', tip1.present === true)
+    check('识别完成后「AI 功能」下方出现引导提示', tip1.present === true)
     if (!tip1.present) return
 
     check(
-      '气泡文案与产品要求一字不差',
-      tip1.text === '使用 AI 校对功能可以大幅度优化识别过程中产生的小错误',
+      '提示文案一句话说清（不铺一段解释）',
+      tip1.text === 'AI 校对能减少识别里的小错误。',
       tip1.text,
     )
-    check('气泡右上角有「×」、左上角有「不再提示」', tip1.hasClose && tip1.never === '不再提示',
+    check('提示右上角有「×」、左下角有「不再提示」', tip1.hasClose && tip1.never === '不再提示',
       `close=${tip1.hasClose} never="${tip1.never}"`)
     check(
-      '气泡贴在按钮正上方且右缘对齐（不是在页面某个角落）',
-      tip1.above && Math.abs(tip1.rightGap) <= 1,
-      `above=${tip1.above} rightGap=${tip1.rightGap}px`,
+      '提示紧贴在两个按钮下方、与按钮排等宽（不是浮在页面某个角落）',
+      tip1.below && Math.abs(tip1.widthGap) <= 1,
+      `below=${tip1.below} widthGap=${tip1.widthGap}px`,
     )
     check(
       '气泡尺寸克制，不铺满半屏',
@@ -5432,6 +5524,12 @@ const scenarios = {
         mk('e', 20, 26, '靠后的一条'),
         mk('f', 14, 15.2, '这是一条特别特别特别长的字幕文本，用来验证放不下时会不会被省略号截断'),
       ]
+      // 项目视图是**所有子项目拼起来**的一条时间轴：其它文件不清空的话，
+      // 时间轴总长就不是 30 秒，下面所有按「30 秒窗口」算坐标的断言全部会偏
+      for (const g of project.files.slice(1)) {
+        g.durationSec = 0
+        g.segments = []
+      }
       editor.clearSelection()
       editor.setPlayhead(0)
       return [f.id, f.segments.length]
@@ -6307,26 +6405,23 @@ const scenarios = {
     /* ---------------- 底部告警分层：当前文件 vs 整个工程 ---------------- */
 
     await store(`
+      // 视图的 segments 是「所有子项目拼起来」的：直接给它赋值只会改到
+      // 带对应 id 的那几条，别的文件原样留着。所以先逐个清空再写。
+      for (const g of project.supportedFiles) g.segments = []
       const f = project.viewFile
-      f.durationSec = 10
+      f.durationSec = 20
       f.segments = [
         ${JSON.stringify(mk('v1', 0, 2, '干净的第一条'))},
         ${JSON.stringify(mk('v2', 3, 5, '干净的第二条'))},
       ]
-      // 只留另一个文件带一处重叠，保证「当前文件」与「全工程」的数一定不同
-      let other = null
-      for (const g of project.supportedFiles) {
-        if (g.id === f.id) continue
-        if (!other) {
-          other = g
-          g.durationSec = 10
-          g.segments = [
-            ${JSON.stringify(mk('o1', 0, 4, '别人的第一条'))},
-            ${JSON.stringify(mk('o2', 2, 6, '别人的第二条'))},
-          ]
-        } else {
-          g.segments = []
-        }
+      // 再往第二个子项目里塞一对重叠条目：整条时间轴上因此有 1 处错误
+      const second = project.supportedFiles[1]
+      if (second) {
+        second.durationSec = 10
+        second.segments = [
+          ${JSON.stringify(mk('o1', 0, 4, '别人的第一条'))},
+          ${JSON.stringify(mk('o2', 2, 6, '别人的第二条'))},
+        ]
       }
       return true
     `)
@@ -6347,15 +6442,16 @@ const scenarios = {
     const barText = (
       await cdp.evaluate(`(document.querySelector('.statusbar__issue') || {}).textContent || ''`)
     ).trim()
+    /*
+     * 视图统一之后，「当前文件」就是整个项目 —— 底栏与状态栏报的是同一个数。
+     * 这一点必须写死：曾经底栏按子项目算、状态栏按全工程算，两个数字不一样，
+     * 用户没法判断该信哪个。
+     */
     check(
-      '编辑器底栏报的是**当前文件**的告警数',
-      counts.files > 1 && counts.file === 0 && footText.indexOf('0 条错误') === 0,
-      JSON.stringify([counts, footText]),
-    )
-    check(
-      '底部状态栏报的是**整个工程**的告警数（两者口径不同）',
-      counts.all === 1 && barText.indexOf('1 条错误') === 0,
-      JSON.stringify([counts, barText]),
+      '编辑器底栏与状态栏报同一个数（都是整个项目）',
+      counts.files > 1 && counts.all === 1 && footText.indexOf('1 条错误') === 0 &&
+        barText.indexOf('1 条错误') === 0,
+      JSON.stringify([counts, footText, barText]),
     )
 
     /* --------------------------- 文本选中策略 --------------------------- */
@@ -6622,7 +6718,7 @@ const scenarios = {
     )
     check('独立处理时共用称呼默认关着', initial === false && boxOff === false, `${initial} / ${boxOff}`)
 
-    // ---- 2. 合并为一条时间轴：默认打开 ----
+    // ---- 2. 合并为一个项目：默认打开 ----
     const merged = await run(`
       project.batchModeLocked = false
       const ok = project.setBatchMode('merge')
@@ -6839,7 +6935,7 @@ const scenarios = {
     const mergedBefore = await run(`
       return project.mergedParts.map((p) => ({ id: p.fileId, offset: Math.round(p.offsetSec) }))
     `)
-    const draggedMerge = await dragFirstToLast('.filetree__segment')
+    const draggedMerge = await dragFirstToLast('.filetree__list > li')
     await sleep(500)
     const mergedAfter = await run(`
       return project.mergedParts.map((p) => ({ id: p.fileId, offset: Math.round(p.offsetSec) }))

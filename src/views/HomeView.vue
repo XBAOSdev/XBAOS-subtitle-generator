@@ -411,7 +411,7 @@ async function start(event?: MouseEvent): Promise<void> {
 
         <button
           v-if="project.files.length > 0"
-          class="btn"
+          class="btn btn--lg"
           type="button"
           @click="ui.navigate('editor')"
         >
@@ -436,7 +436,7 @@ async function start(event?: MouseEvent): Promise<void> {
           :disabled="!canStart"
           @click="start"
         >
-          <Icon name="zap" :size="15" />
+          <Icon name="zap" :size="14" />
           <span>开始识别</span>
         </button>
       </div>

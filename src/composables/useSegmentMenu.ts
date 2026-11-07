@@ -38,9 +38,40 @@ export function useSegmentMenu(options: SegmentMenuOptions = {}) {
 
   const segments = computed(() => project.viewFile?.segments ?? [])
   const selectedSet = computed(() => new Set(editor.selectedIds))
-  const speakerList = computed(() =>
-    speakers.speakersOf(project.viewFileId ?? '', segments.value),
-  )
+  const viewId = computed(() => project.viewFileId ?? '')
+
+  /**
+   * 一条字幕属于哪个子项目。
+   *
+   * 讲话人编号是**子项目本地**的（每个文件都从 0 起），称呼也按子项目存。
+   * 拼接视图的 id 是 `__merged__`，拿它查称呼永远查不到东西 —— 菜单里就会
+   * 一律退回「讲话人 1 / 讲话人 2」这种系统默认名，看着像用户改的名字被吃了。
+   * 所以这里跟表格、侧栏面板一样，认 `originFileId`。
+   */
+  function fileIdOf(seg: SubtitleSegment): string {
+    return seg.originFileId ?? viewId.value
+  }
+
+  /** 同一个子项目里的条目（统计条数要按子项目算，不然每个文件都显示全量） */
+  function segmentsOfFile(fileId: string): SubtitleSegment[] {
+    return segments.value.filter((s) => fileIdOf(s) === fileId)
+  }
+
+  /** 某一条所属子项目的讲话人列表 */
+  function speakerListFor(seg: SubtitleSegment): ReturnType<typeof speakers.speakersOf> {
+    const id = fileIdOf(seg)
+    return speakers.speakersOf(id, segmentsOfFile(id))
+  }
+
+  /**
+   * 选中的这几条是不是跨了子项目。
+   *
+   * 跨了就不能改讲话人：「改成 2 号」在 A 文件是李四、在 B 文件可能是王五。
+   * 与其猜，不如灰掉。
+   */
+  function spansFiles(ids: string[]): boolean {
+    return new Set(targetSegments(ids).map(fileIdOf)).size > 1
+  }
 
   /**
    * 这次操作作用在哪些条目上。
@@ -58,12 +89,13 @@ export function useSegmentMenu(options: SegmentMenuOptions = {}) {
     return segments.value.filter((s) => wanted.has(s.id))
   }
 
-  function applySpeaker(ids: string[], index: number | undefined): void {
+  function applySpeaker(ids: string[], index: number | undefined, anchor: SubtitleSegment): void {
     const file = project.viewFile
     if (!file || ids.length === 0) return
     const result = setSpeakerFor(file.segments, ids, index)
     if (result.changed === 0) return
-    const name = index === undefined ? '' : speakers.nameOf(file.id, index)
+    // 提示里报的称呼要跟菜单里看到的一致：按**这一条所属的子项目**取
+    const name = index === undefined ? '' : speakers.nameOf(fileIdOf(anchor), index)
     history.commit(
       file.id,
       file.segments,
@@ -80,9 +112,9 @@ export function useSegmentMenu(options: SegmentMenuOptions = {}) {
   }
 
   /** 讲话人选项：已经是同一个人的灰掉（点了也不会有任何变化） */
-  function speakerItems(ids: string[]): MenuItem[] {
+  function speakerItems(ids: string[], anchor: SubtitleSegment): MenuItem[] {
     const targets = targetSegments(ids)
-    const items: MenuItem[] = speakerList.value.map((entry) => ({
+    const items: MenuItem[] = speakerListFor(anchor).map((entry) => ({
       key: `speaker:${entry.index}`,
       label: entry.name,
       hint: entry.count > 0 ? `${entry.count} 条` : '未使用',
@@ -106,7 +138,7 @@ export function useSegmentMenu(options: SegmentMenuOptions = {}) {
       editor.select(seg.id, 'replace', segments.value.map((s) => s.id))
     }
     const ids = targetIds(seg)
-    menu.value = { x, y, items: buildItems(ids), ids, anchorId: seg.id }
+    menu.value = { x, y, items: buildItems(ids, seg), ids, anchorId: seg.id }
   }
 
   /** 点讲话人那一格：只出换人这一组，别把整份菜单摊出来 */
@@ -115,10 +147,10 @@ export function useSegmentMenu(options: SegmentMenuOptions = {}) {
       editor.select(seg.id, 'replace', segments.value.map((s) => s.id))
     }
     const ids = targetIds(seg)
-    menu.value = { x, y, items: speakerItems(ids), ids, anchorId: seg.id }
+    menu.value = { x, y, items: speakerItems(ids, seg), ids, anchorId: seg.id }
   }
 
-  function buildItems(ids: string[]): MenuItem[] {
+  function buildItems(ids: string[], anchor: SubtitleSegment): MenuItem[] {
     const targets = targetSegments(ids)
     const multi = ids.length > 1
     const hasAudio = (project.viewFile?.durationSec ?? 0) > 0
@@ -127,6 +159,8 @@ export function useSegmentMenu(options: SegmentMenuOptions = {}) {
       (s) => s.issues.length > 0 || (s.staleSlots?.length ?? 0) > 0,
     )
     const allAcked = targets.length > 0 && targets.every((s) => s.acked)
+    const mixed = spansFiles(ids)
+    const speakerList = speakerListFor(anchor)
 
     return tidyMenu([
       {
@@ -154,8 +188,9 @@ export function useSegmentMenu(options: SegmentMenuOptions = {}) {
         key: 'speaker',
         label: '更改讲话人',
         icon: 'user',
-        disabled: speakerList.value.length === 0,
-        children: speakerItems(ids),
+        hint: mixed ? '跨子项目' : '',
+        disabled: speakerList.length === 0 || mixed,
+        children: mixed ? [] : speakerItems(ids, anchor),
       },
       { key: 'd2', label: '', divider: true },
       {
@@ -178,9 +213,15 @@ export function useSegmentMenu(options: SegmentMenuOptions = {}) {
     const file = project.viewFile
     if (!state || !file) return
 
+    // 菜单是围绕右键/点击的那一条展开的，称呼也按那一条所属的子项目取
+    const anchor =
+      segments.value.find((s) => s.id === state.anchorId) ??
+      segments.value.find((s) => state.ids.includes(s.id))
+
     if (key.startsWith('speaker:')) {
+      if (!anchor) return
       const raw = key.slice('speaker:'.length)
-      applySpeaker(state.ids, raw === 'none' ? undefined : Number(raw))
+      applySpeaker(state.ids, raw === 'none' ? undefined : Number(raw), anchor)
       return
     }
 
@@ -232,14 +273,15 @@ export function useSegmentMenu(options: SegmentMenuOptions = {}) {
         const next = !targets.every((s) => s.acked)
         history.commitIfChanged(
           file.id,
-          file.segments,
+          () => file.segments,
           next ? '忽略告警' : '恢复告警',
           () => {
-            for (const seg of file.segments) {
-              if (!state.ids.includes(seg.id)) continue
-              if (next) seg.acked = true
-              else delete seg.acked
-            }
+            // 视图的 `segments` 是拷贝：逐条改字段改的是临时对象，整份换掉才生效
+            file.segments = file.segments.map((seg) => {
+              if (!state.ids.includes(seg.id)) return seg
+              const { acked: _drop, ...rest } = seg
+              return next ? { ...rest, acked: true } : rest
+            })
           },
         )
         break
@@ -261,7 +303,6 @@ export function useSegmentMenu(options: SegmentMenuOptions = {}) {
   return {
     menu,
     segments,
-    speakerList,
     openAt,
     openSpeakerAt,
     onPick,

@@ -5310,10 +5310,25 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   }
   check(
     '删除项目先二次确认，确认里写着会删磁盘文件',
-    /confirmDestructive\(\{[\s\S]{0,400}项目文件会从磁盘上删除[\s\S]{0,200}\}\)[\s\S]{0,200}deleteDrafts/.test(
-      sideMenuSrc,
-    ) && /async function deleteDrafts[\s\S]{0,600}bridge\.project\.delete/.test(projectSrc),
+    /confirmWithOption\(\{[\s\S]{0,400}项目文件会从磁盘上删除[\s\S]{0,400}checkboxLabel: '只从列表移除/
+      .test(sideMenuSrc) &&
+      /res\.checked[\s\S]{0,120}closeDraft[\s\S]{0,80}else await project\.deleteDrafts/.test(
+        sideMenuSrc,
+      ) &&
+      /async function deleteDrafts[\s\S]{0,600}bridge\.project\.delete/.test(projectSrc),
     '「删除项目」和「关闭项目」长得太像，不拦一下就有人把工程文件删了',
+  )
+  check(
+    '子项目改名清非法字符：边打边替换 + 落盘前再清一遍',
+    treeSrc.includes('@input="onRenameInput"') &&
+      /replaceIllegalChars\(el\.value\)/.test(treeSrc) &&
+      /function renameItem[\s\S]{0,200}sanitizeFileName/.test(projectSrc),
+    '名字会变成导出文件名，带着 `*?` 存盘时会被系统吞掉或直接失败',
+  )
+  check(
+    '重识别灰掉时右侧写明原因（没有音频 / 正在识别）',
+    /key: 'item:recognize'[\s\S]{0,700}'没有音频'/.test(sideMenuSrc),
+    '灰着不给理由，用户只会以为软件坏了',
   )
   check(
     '侧栏搜索：项目名命中出整组，只有子项目命中就只留那一行',
@@ -5326,7 +5341,8 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '「保存项目」只存当前项目，「保存全部项目」走小三角',
     /function saveProjectFile\(\): void \{[\s\S]{0,200}?\}/.test(editorSrc) &&
       !/function saveProjectFile[\s\S]{0,200}saveAllProjects/.test(editorSrc) &&
-      /editor__caret/.test(editorSrc) &&
+      // 小三角与主按钮拼成一组（`.btngroup`），点它才知道还有「保存全部」
+      /class="btngroup"[\s\S]{0,800}openSaveMenu[\s\S]{0,300}chevron-down/.test(editorSrc) &&
       /key: 'save-all'/.test(editorSrc),
     '主按钮一下存了别的项目，属于意料之外的副作用',
   )

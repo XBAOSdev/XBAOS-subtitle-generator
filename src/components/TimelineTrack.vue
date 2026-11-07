@@ -783,6 +783,26 @@ watch(
   { immediate: true },
 )
 
+/**
+ * 演示峰值必须跟着时长走。
+ *
+ * 上面那个 watcher 只在 `viewFileId` 变化时造峰值，而现在项目视图恒为那条
+ * 拼接视图（id 永远是 `__merged__`）—— 时长变了（重新识别、换演示数据），
+ * 峰值还是按**旧总长**铺的，于是「像素 → 秒」的换算全偏：点 72% 处会落到
+ * 120 秒、拖到 24 秒停在 134 秒。真实音频不受影响（时长来自解码结果），
+ * 所以只在演示数据上重建，别去动播放器的记忆。
+ */
+watch(
+  () => [project.viewFileId, project.viewFile?.durationSec ?? 0, project.viewFile?.demo === true] as const,
+  ([fileId, sec, demo]) => {
+    if (!demo || sec <= 0) return
+    if (project.peaksOf(fileId)) return
+    if (mockPeaks.value?.durationSec === sec) return
+    mockPeaks.value = makeMockPeaks(sec, 50)
+    scheduleDraw()
+  },
+)
+
 watch([zoom, viewStartSec, stageW], () => {
   clampView()
   scheduleDraw()

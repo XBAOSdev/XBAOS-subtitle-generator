@@ -91,12 +91,29 @@ export const useHistoryStore = defineStore('history', () => {
   }
 
   /**
+   * 取「当前内容」的两种写法。
+   *
+   * 项目视图的 `segments` 是 getter，**每次读到的都是一份新拷贝**（写回要靠
+   * setter 整份赋）。所以两件事必须按「读一次算一次」来做：
+   *  - 快照要读一次；
+   *  - 改动之后要比对，也**必须重新读一次**。
+   *
+   * 传数组进来时只读一次就固定了，`mutate` 里改了视图（`file.segments = …`）
+   * 那个旧数组也不会变，于是比对永远认为「没改」、把刚压进去的快照又弹掉 ——
+   * 表现是这次改动撤不回来。因此改视图的地方一律传 getter。
+   */
+  type SegSource = SubtitleSegment[] | (() => SubtitleSegment[])
+
+  const readSource = (src: SegSource): SubtitleSegment[] =>
+    typeof src === 'function' ? src() : src
+
+  /**
    * 记录一次操作：先把当前状态压入过去栈，再执行 mutate。
    * 所有会改动字幕条目的地方都必须走这个入口，撤回才完整。
    */
-  function commit(fileId: string, segments: SubtitleSegment[], label: string, mutate: () => void): void {
+  function commit(fileId: string, segments: SegSource, label: string, mutate: () => void): void {
     const bucket = bucketOf(fileId)
-    bucket.past.push(cloneAll(segments))
+    bucket.past.push(cloneAll(readSource(segments)))
     if (bucket.past.length > MAX_STEPS) bucket.past.shift()
     bucket.future = []
     bucket.lastLabel = label
@@ -107,11 +124,11 @@ export const useHistoryStore = defineStore('history', () => {
   /** 当前状态与最近一次快照之间是否有差异。没有就不算一步，避免空占历史 */
   function commitIfChanged(
     fileId: string,
-    segments: SubtitleSegment[],
+    segments: SegSource,
     label: string,
     mutate: () => void,
   ): boolean {
-    const before = JSON.stringify(segments)
+    const before = JSON.stringify(readSource(segments))
     const bucket = bucketOf(fileId)
     /*
      * 先把这一次「假提交」会破坏掉的东西**全部**留底。
@@ -130,7 +147,7 @@ export const useHistoryStore = defineStore('history', () => {
 
     commit(fileId, segments, label, mutate)
 
-    if (JSON.stringify(segments) === before) {
+    if (JSON.stringify(readSource(segments)) === before) {
       bucket.past.pop()
       if (dropped) bucket.past.unshift(dropped)
       bucket.future = futureBackup

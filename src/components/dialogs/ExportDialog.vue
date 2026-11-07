@@ -186,30 +186,55 @@ const speakerPrefixOn = computed({
  *
  * 键是「来源文件 + 编号」而不是光一个编号：分别导出多个文件时，A 里的 0 号
  * 和 B 里的 0 号未必是同一个人，只按编号勾会把两个人一起勾上。
+ *
+ * 合并导出时更绕一层：那一条来源是拼接视图（`__merged__`），里面的条目来自
+ * 各个子项目，而**编号是子项目本地的** —— 直接在拼接视图上统计，两个文件的
+ * 0 号会被并成一位，称呼也查不到（拼接视图没有自己的称呼表，一律退回
+ * 「讲话人 1」）。所以先按 `originFileId` 分组，再逐组取称呼与条数。
  */
 interface SpeakerOption {
   key: string
   index: number
   name: string
   count: number
+  /** 这一栏归属于哪条导出产物（合并的时候就是那条拼接视图） */
   sourceId: string
+  /** 这些条目真正存放在哪个子项目里 */
+  originId: string
   sourceName: string
 }
 
+/** 一条字幕的讲话人在导出选项里的键：所属子项目 + 本地编号 */
+function speakerKey(seg: SubtitleSegment, sourceId: string): string {
+  return `${seg.originFileId ?? sourceId}:${seg.speaker}`
+}
+
 const speakerOptions = computed<SpeakerOption[]>(() =>
-  baseSources.value.flatMap((source) =>
-    speakerStore
-      .speakersOf(source.id, source.segments)
-      .filter((entry) => entry.count > 0)
-      .map((entry) => ({
-        key: `${source.id}:${entry.index}`,
-        index: entry.index,
-        name: entry.name,
-        count: entry.count,
-        sourceId: source.id,
-        sourceName: source.name,
-      })),
-  ),
+  baseSources.value.flatMap((source) => {
+    const groups = new Map<string, SubtitleSegment[]>()
+    for (const seg of source.segments) {
+      const id = seg.originFileId ?? source.id
+      const list = groups.get(id)
+      if (list) list.push(seg)
+      else groups.set(id, [seg])
+    }
+    const out: SpeakerOption[] = []
+    for (const [originId, segs] of groups) {
+      for (const entry of speakerStore.speakersOf(originId, segs)) {
+        if (entry.count === 0) continue
+        out.push({
+          key: `${originId}:${entry.index}`,
+          index: entry.index,
+          name: entry.name,
+          count: entry.count,
+          sourceId: source.id,
+          originId,
+          sourceName: source.name,
+        })
+      }
+    }
+    return out
+  }),
 )
 
 /** 勾了谁。缺省即「全选」—— 关掉对话框再打开不该丢掉上一次的选择也没意义，默认重新全选 */
@@ -259,7 +284,7 @@ const filteredSummary = computed(() => {
       kept += source.segments.length
       continue
     }
-    const allowed = new Set(options.filter(isPicked).map((o) => o.index))
+    const allowed = new Set(options.filter(isPicked).map((o) => `${o.originId}:${o.index}`))
     const all = allowed.size === options.length
     for (const seg of source.segments) {
       if (typeof seg.speaker !== 'number') {
@@ -267,7 +292,7 @@ const filteredSummary = computed(() => {
         else unlabeled += 1
         continue
       }
-      if (allowed.has(seg.speaker)) kept += 1
+      if (allowed.has(speakerKey(seg, source.id))) kept += 1
       else dropped += 1
     }
   }
@@ -285,11 +310,12 @@ const sources = computed<PlanSource[]>(() => {
   return baseSources.value.map((source) => {
     const options = speakerOptions.value.filter((o) => o.sourceId === source.id)
     if (options.length === 0) return source
-    const allowed = new Set(options.filter(isPicked).map((o) => o.index))
+    const allowed = new Set(options.filter(isPicked).map((o) => `${o.originId}:${o.index}`))
     return {
       ...source,
       segments: source.segments.filter(
-        (seg) => typeof seg.speaker === 'number' && allowed.has(seg.speaker),
+        (seg) =>
+          typeof seg.speaker === 'number' && allowed.has(speakerKey(seg, source.id)),
       ),
     }
   })
@@ -458,6 +484,9 @@ async function doExport(): Promise<void> {
         sourceFirst: sourceFirst.value,
         speakerPrefix: hasSpeakers.value && speakerPrefixOn.value,
         speakerNames: namesOf.get(entry.fileId) ?? {},
+        // 合并导出时一条时间轴上混着多个子项目，称呼必须按条目来源查
+        speakerNameOf: (seg) =>
+          speakerStore.nameOf(seg.originFileId ?? entry.fileId, seg.speaker ?? -1),
       })
       const content = applyLineEnding(body, lineEnding.value)
 

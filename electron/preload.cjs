@@ -123,6 +123,7 @@ contextBridge.exposeInMainWorld('xbaos', {
     pickDirectory: (options) => ipcRenderer.invoke('dialog:pickDirectory', options),
     saveSubtitle: (options) => ipcRenderer.invoke('dialog:saveSubtitle', options),
     confirm: (options) => ipcRenderer.invoke('dialog:confirm', options),
+    confirmOption: (options) => ipcRenderer.invoke('dialog:confirm-option', options),
   },
 
   // ---- 文件系统（受限：只暴露这几个操作）

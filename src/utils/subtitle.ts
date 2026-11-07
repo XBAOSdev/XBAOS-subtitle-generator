@@ -80,6 +80,14 @@ export interface SerializeOptions {
   speakerPrefix?: boolean
   /** 讲话人称呼表（编号 → 称呼）。缺省时用「讲话人 N」 */
   speakerNames?: Record<string, string>
+  /**
+   * 按条目解析称呼（优先于 `speakerNames`）。
+   *
+   * 一个项目里每个子项目自己从 0 开始编号，所以「编号 → 称呼」这一张平表在
+   * 拼接视图上不成立：两个子项目各有一位 0 号，是两个不同的人。调用方拿着
+   * 条目的 `originFileId` 去查对应的那张表，才能取对人名。
+   */
+  speakerNameOf?: (seg: SubtitleSegment) => string
 }
 
 /** 导出时的一条字幕：文本已按语言维度合好 */
@@ -151,7 +159,9 @@ export function composeForExport(
     // 讲话人只在这条字幕上记一次：双语两行属于同一条，重复标注没有意义
     const speaker =
       opts.speakerPrefix && typeof seg.speaker === 'number'
-        ? speakerName(seg.speaker, opts.speakerNames)
+        ? opts.speakerNameOf
+          ? opts.speakerNameOf(seg)
+          : speakerName(seg.speaker, opts.speakerNames)
         : undefined
     lines.push(speaker ? { start: seg.start, end: seg.end, text, speaker } : { start: seg.start, end: seg.end, text })
   }

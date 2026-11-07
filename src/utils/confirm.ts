@@ -37,6 +37,45 @@ export async function confirmDestructive(options: DestructiveConfirm): Promise<b
   return window.confirm(text)
 }
 
+export interface CheckboxConfirm extends DestructiveConfirm {
+  /** 勾选项文案，例如「只从列表移除（保留磁盘上的 .xbsgp）」 */
+  checkboxLabel: string
+  /** 默认是否勾上 */
+  checkboxChecked?: boolean
+}
+
+/**
+ * 带勾选项的确认。
+ *
+ * 用在「同一个按钮有两种后果，其中一种更轻」的地方 —— 例如删项目时可以改成
+ * 只把它从列表里移出。**勾选项不改主文案**：主按钮仍描述它默认会做的事，
+ * 勾上之后由调用方按 `checked` 走另一条路。
+ */
+export async function confirmWithOption(
+  options: CheckboxConfirm,
+): Promise<{ ok: boolean; checked: boolean }> {
+  const bridge = window.xbaos
+  if (bridge?.dialog?.confirmOption) {
+    const res = await bridge.dialog.confirmOption({
+      type: 'warning',
+      title: options.title,
+      message: options.message,
+      detail: options.detail,
+      buttons: [options.confirmLabel, '取消'],
+      defaultId: 1,
+      cancelId: 1,
+      checkboxLabel: options.checkboxLabel,
+      checkboxChecked: options.checkboxChecked === true,
+    })
+    return { ok: res.index === 0, checked: res.checked }
+  }
+
+  // 浏览器预览没有原生勾选框：先问做不做，再问是不是只移出列表（仅预览路径）
+  const text = [options.message, options.detail].filter(Boolean).join('\n\n')
+  if (!window.confirm(text)) return { ok: false, checked: false }
+  return { ok: true, checked: window.confirm(`${options.checkboxLabel}？` + '\n（取消 = 按默认方式处理）') }
+}
+
 export interface BlockedNotice {
   /** 标题，一句话说清「为什么不行」 */
   title: string

@@ -161,7 +161,7 @@ function toggleAck(seg: SubtitleSegment, event: MouseEvent): void {
   const next = !seg.acked
   const applied = history.commitIfChanged(
     file.id,
-    file.segments,
+    () => file.segments,
     next ? '忽略告警' : '恢复告警',
     () => {
       // 必须走 store：项目视图的 `segments` 是 getter 返回的拷贝，
@@ -180,10 +180,17 @@ function onRowClick(event: MouseEvent, id: string): void {
 
 /* ------------------------------------------------------------ 讲话人 */
 
-/** 这一条该显示什么称呼（未标记时返回空串） */
+/**
+ * 这一条该显示什么称呼（未标记时返回空串）。
+ *
+ * 编号是**子项目本地**的，称呼也按子项目存（`byFile[子项目 id]`）—— 所以要用
+ * 条目自己的 `originFileId` 去查，不能一律按 `__merged__` 查。按后者查的话，
+ * 侧栏面板（挂活动子项目）改完名字，表格里还是「讲话人 N」，两处对不上。
+ */
 function speakerText(seg: SubtitleSegment): string {
   if (typeof seg.speaker !== 'number') return ''
-  return speakerStore.nameOf(project.viewFileId ?? '', seg.speaker)
+  const id = seg.originFileId ?? project.viewFileId ?? ''
+  return speakerStore.nameOf(id, seg.speaker)
 }
 
 /**
@@ -254,12 +261,14 @@ function setTimecode(seg: SubtitleSegment, edge: 'start' | 'end', value: number)
 
   history.commitIfChanged(
     file.id,
-    file.segments,
+    () => file.segments,
     edge === 'start' ? '修改开始时间' : '修改结束时间',
     () => {
-      const target = file.segments.find((s) => s.id === seg.id)
-      if (!target) return
-      target[edge] = value
+      // 视图的 `segments` 是 getter，读到的每条都是拷贝 —— 找到再改字段等于
+      // 改了一份临时对象。整份换掉才会走 setter 拆回各子项目。
+      file.segments = file.segments.map((s) =>
+        s.id === seg.id ? { ...s, [edge]: value } : s,
+      )
     },
   )
 }
@@ -427,8 +436,28 @@ function isStale(seg: SubtitleSegment, slot: string): boolean {
 function onTrInput(seg: SubtitleSegment, event: Event): void {
   const lang = trLang.value
   if (!lang) return
-  if (!seg.translations) seg.translations = {}
-  seg.translations[lang] = (event.target as HTMLTextAreaElement).value
+  /*
+   * 不能对着 `seg` 直接写：它是 `concatSegments()` 拷出来的行对象，
+   * `seg.translations = {}` 只落在那一份临时拷贝上（有内容时改的是共享的
+   * 那个对象，才碰巧生效）。走 store 换一整条，两种情形都对。
+   */
+  project.replaceSegment({
+    ...seg,
+    translations: { ...(seg.translations ?? {}), [lang]: (event.target as HTMLTextAreaElement).value },
+  })
+}
+
+/**
+ * 原文编辑。
+ *
+ * 表格里的 `seg` 是项目拼接视图拷出来的一行，`v-model="seg.text"` 写的是
+ * **那份拷贝**：屏幕上字变了，存储层一个字都没动，失焦时比对「快照 vs 现状」
+ * 还会得出「没改过」，于是改动连撤销记录都没有。必须每次输入都换一整条。
+ */
+function onSrcInput(seg: SubtitleSegment, event: Event): void {
+  const text = (event.target as HTMLTextAreaElement).value
+  if (text === seg.text) return
+  project.replaceSegment({ ...seg, text })
 }
 
 const VIEW_OPTIONS: { value: SubtitleViewMode; label: string; title: string }[] = [
@@ -1012,9 +1041,10 @@ function onKeydown(event: KeyboardEvent): void {
             >
               <textarea
                 v-if="editor.editingId === editKey(seg.id, SOURCE_SLOT)"
-                v-model="seg.text"
+                :value="seg.text"
                 class="row__editor"
                 rows="2"
+                @input="onSrcInput(seg, $event)"
                 @blur="endEdit(seg.id, SOURCE_SLOT)"
                 @keydown.enter.exact.prevent="endEdit(seg.id, SOURCE_SLOT)"
                 @keydown.esc.prevent="editor.endEdit()"

@@ -170,6 +170,23 @@ body.is-dragging {
 
 /* ==========================================================================
    按钮
+   --------------------------------------------------------------------------
+   规范（改按钮前先读这一段，不要再就地加宽度/高度）：
+
+   1. 高度只有三档 —— 同一行里的按钮**必须同档**：
+        `--control-height-sm` 26px  表格行内、工具条、密集区
+        `--control-height`    32px  页脚、对话框底部、面板里的常规动作
+        `--control-height-lg` 38px  整页只有一两个动作的主流程页
+   2. 变体按重要度，一屏最多一个实心主按钮：
+        `.btn`          常规动作（描边 + 面板底色）
+        `.btn--primary` 主操作（实心 accent）
+        `.btn--ghost`   第三级（工具栏、列表行内）
+        `.btn--danger`  破坏性动作
+        `.btn--ai`      AI 相关（唯一的彩色系）
+   3. 图标：常规/大号 14px，小号 13px；纯文字的次操作不加图标。
+      同一行里允许「有图标」和「没图标」并存（它表示动作性质不同），
+      但高度、圆角、内边距、字号必须一致。
+   4. 主次关系靠底色与边框表达，不靠改高度。想强调就换变体，别把按钮做大。
    ========================================================================== */
 
 .btn {
@@ -295,6 +312,35 @@ body.is-dragging {
 
 .btn--icon.btn--sm {
   width: var(--control-height-sm);
+}
+
+/*
+ * 主按钮 + 小三角：拼成一组（分割按钮）。
+ *
+ * 三角要是单独一个按钮，看起来就像「一个走丢的方块」—— 它表达的是「同一件事
+ * 的更多做法」，必须和主按钮粘在一起：左圆角+右圆角各留一个、中间只留 1px 缝。
+ */
+.btngroup {
+  display: inline-flex;
+  flex: none;
+  align-items: stretch;
+}
+
+.btngroup > .btn:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.btngroup > .btn:last-child {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  margin-left: -1px;
+  padding: 0 var(--space-1);
+}
+
+/* 主按钮禁用时三角仍然可用：它救的是「别的项目还没存」，与这一条无关 */
+.btngroup > .btn:not(:last-child):disabled + .btn {
+  border-left-color: var(--color-border);
 }
 
 /* ==========================================================================
