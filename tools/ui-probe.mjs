@@ -7082,6 +7082,46 @@ const scenarios = {
     await run(`project.recognizing = false; logs.clear()`)
   },
 
+  'marks-dbg': async (cdp) => {
+    await goto(cdp, `${BASE}/?demo=1&view=editor&theme=light`)
+    await sleep(1200)
+    const run = (body) =>
+      cdp.evaluate(`(() => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        const editor = pinia.get('editor')
+        ${body}
+      })()`)
+    const dump = () =>
+      cdp.evaluate(`(() => {
+        const body = document.querySelector('.subtable__body')
+        const layer = body ? body.querySelector('.subtable__marks') : null
+        const all = body ? [...body.querySelectorAll('.subtable__mark')] : []
+        return {
+          n: all.length,
+          layerTop: layer ? Math.round(layer.getBoundingClientRect().top) : null,
+          m: all.map((x) => ({
+            id: x.dataset.markId,
+            y: x.dataset.y,
+            cls: x.className,
+            inline: x.style.transform,
+            computed: getComputedStyle(x).transform,
+            trans: getComputedStyle(x).transitionProperty + ' ' + getComputedStyle(x).transitionDuration,
+            top: Math.round(x.getBoundingClientRect().top),
+          })),
+        }
+      })()`)
+    check('DBG 初始', false, JSON.stringify(await dump()))
+    const segs = await run(`const f = project.viewFile; return f ? f.segments.slice(0, 8).map((s) => [s.id, s.start, s.end]) : []`)
+    for (const [id, start, end] of segs) {
+      await run(`editor.setPlayhead(${(start + end) / 2}); return true`)
+      await sleep(260)
+      check(`DBG ${id}`, false, JSON.stringify(await dump()))
+    }
+    await sleep(1500)
+    check('DBG 稳定后', false, JSON.stringify(await dump()))
+  },
+
   'editor-order': async (cdp) => {
     const run = (body) =>
       cdp.evaluate(`(() => {

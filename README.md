@@ -1,7 +1,5 @@
 # 小包听幕
 
-（原名 XBAOS 字幕生成器。改的是产品名，软件、数据目录与 `.xbsgp` 项目格式都没有变化。）
-
 把音频转成字幕的 Windows 桌面软件。识别引擎同时支持 **whisper.cpp（GGML）** 与
 **sherpa-onnx（ONNX Runtime）** 两套架构，可换用 Whisper 系列、Belle 中文微调版与
 SenseVoice 等多种模型，用哪个由你决定。**解码、识别、编辑、导出全部在本机完成，音频与字幕不上传。**
