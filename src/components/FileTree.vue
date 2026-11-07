@@ -14,7 +14,7 @@ import { useProjectStore } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
 import type { AudioFile, FileStatus } from '@/types'
 import { formatDuration, toShortTimecode } from '@/utils/format'
-import { defaultProjectName, replaceIllegalChars, sanitizeFileName } from '@/utils/projectName'
+import { replaceIllegalChars, sanitizeFileName } from '@/utils/projectName'
 import { useSidebarMenu } from '@/composables/useSidebarMenu'
 import Icon from '@/components/Icon.vue'
 import UiMenu from '@/components/UiMenu.vue'
@@ -56,7 +56,7 @@ const rows = computed<Row[]>(() =>
     const items = active ? project.supportedFiles : d.files.filter((f) => f.status !== 'unsupported')
     return {
       id: d.id,
-      name: active ? project.displayProjectName : d.name || defaultProjectName(items.map((f) => f.name)),
+      name: project.draftDisplayName(d),
       active,
       collapsed: d.collapsed,
       dirty: active ? project.projectDirty : d.dirty,
@@ -681,9 +681,8 @@ function close(row: Row): void {
         <span>打开项目</span>
       </button>
 
-      <p v-if="totalItems > 0" class="filetree__hint">
-        <template v-if="query.trim()">匹配 {{ matchedItems }} / {{ totalItems }} 个子项目</template>
-        <template v-else>共 {{ totalItems }} 个子项目，按顺序首尾相接</template>
+      <p v-if="query.trim() && totalItems > 0" class="filetree__hint">
+        匹配 {{ matchedItems }} / {{ totalItems }} 个子项目
       </p>
     </div>
 

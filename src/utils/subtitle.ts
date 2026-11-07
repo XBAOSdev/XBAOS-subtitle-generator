@@ -12,6 +12,7 @@ import type {
   SubtitleFormat,
 } from '@/types'
 import { speakerName } from '@/utils/speaker'
+import { stripInvisible } from '@/utils/segmentOps'
 
 function pad(n: number, len = 2): string {
   return String(Math.floor(n)).padStart(len, '0')
@@ -114,8 +115,10 @@ function segTexts(
   seg: SubtitleSegment,
   translationLang: string,
 ): { src: string; tr: string } {
-  const src = seg.text.trim()
-  const tr = translationLang ? (seg.translations?.[translationLang] ?? '').trim() : ''
+  // 导出前清掉不可见字符：写进文件的东西不该带 U+200B 这类东西，
+  // 播放器里看不见、下一家工具里却会当成字符算进行宽
+  const src = stripInvisible(seg.text).trim()
+  const tr = translationLang ? stripInvisible(seg.translations?.[translationLang] ?? '').trim() : ''
   return { src, tr }
 }
 

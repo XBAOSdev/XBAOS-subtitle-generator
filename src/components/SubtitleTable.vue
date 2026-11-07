@@ -17,6 +17,7 @@ import {
   removeIds,
   slotText,
   splitSegment,
+  stripInvisible,
 } from '@/utils/segmentOps'
 import { MAX_LANES, exceedsLaneLimit } from '@/utils/timelineLayout'
 import { visibleIssues } from '@/utils/validate'
@@ -141,30 +142,130 @@ function rowCenterY(id: string): number | null {
   return el ? el.offsetTop + el.offsetHeight / 2 : null
 }
 
-/** 每个三角的目标位置（相对滚动区内容顶部，px） */
+/** 每个活三角的目标位置（相对滚动区内容顶部，px） */
 const markYs = ref<number[]>([])
 
 /**
- * 把量到的位置刷到三角上。
+ * 三角的渲染列表：活着的 + 正在合体的。
  *
- * 模板里**不绑** `:style="translateY(…)"`：新增的三角插入那一刻 `markYs` 还是上一轮的值，
- * 绑上去会先写 0 再写目标 —— 「从第一个分出去」就变成了「从顶上掉下来」。
- * 统一在这里刷，入场动画才能确定地从锚点起步。
+ * **不用 `TransitionGroup`**。它的 FLIP（`-move` 类）会在每一轮比对里量子元素的
+ * `getBoundingClientRect`、写一行内联 `transform` 再清空 —— 而三角的位置**正是**
+ * 靠内联 transform 表达的，两者抢同一份样式：合体的那个被 FLIP 清成 0 之后既不动、
+ * 也等不到 `transitionend`，只能等 700ms 兜底超时才消失。表现就是「同时有两个三角」。
+ *
+ * 自己管列表反而更短：`key` 恒为 id，元素不会重建，改 `y` 就是一次普通的 CSS 过渡；
+ * 合体完成后从列表里删掉，此时它已经与幸存者重叠，移除看不出来。
  */
-function paintMarks(): void {
-  const body = bodyRef.value
-  if (!body) return
-  for (const node of body.querySelectorAll<HTMLElement>('.subtable__mark')) {
-    const idx = markIds.value.indexOf(node.dataset.markId ?? '')
-    if (idx < 0) continue // 正在收场的那个由 leave 钩子自己管
-    node.style.transition = ''
-    node.style.transform = `translateY(${markYs.value[idx] ?? 0}px)`
+interface PlayMark {
+  id: string
+  /** 当前画在哪个高度 */
+  y: number
+  /** 正在合体：已经不在 `markIds` 里，滑回幸存者之后移除 */
+  ghost: boolean
+}
+
+const marks = ref<PlayMark[]>([])
+const marksRef = ref<HTMLElement | null>(null)
+
+/** 合体动画的兜底时长，比 CSS 里的 460ms 略长一点 */
+const MERGE_MS = 520
+
+/** 合体计时器：同一 id 重复触发时以后一次为准 */
+const mergeTimers = new Map<string, number>()
+
+/** 本轮机渲染出来的新三角：等 DOM 落定后从锚点滑到目标 */
+const pendingGrow = new Set<string>()
+
+/** 触发一次过渡要有一帧的间隔，否则浏览器会把两次赋值合并成一次 */
+function reflow(el: HTMLElement): void {
+  void el.offsetHeight
+}
+
+/** 新出现的三角：先按锚点插进去，再滑到目标行 —— 「分身」是长出去的，不是浮出来的 */
+function growNewMarks(): void {
+  const ids = markIds.value
+  for (const node of marksRef.value?.querySelectorAll<HTMLElement>('.subtable__mark') ?? []) {
+    const id = node.dataset.markId ?? ''
+    if (!pendingGrow.has(id)) continue
+    pendingGrow.delete(id)
+    const i = ids.indexOf(id)
+    if (i < 0) continue
+    // 把「锚点这一帧」真正提交下去，过渡才有起点
+    reflow(node)
+    for (const m of marks.value) if (m.id === id) m.y = markYs.value[i] ?? m.y
   }
+}
+
+function scheduleDrop(id: string): void {
+  const old = mergeTimers.get(id)
+  if (old !== undefined) window.clearTimeout(old)
+  mergeTimers.set(
+    id,
+    window.setTimeout(() => {
+      mergeTimers.delete(id)
+      // 期间若又被指到（markIds 里又有它），syncMarks 已经把 ghost 改回 false
+      marks.value = marks.value.filter((m) => !(m.id === id && m.ghost))
+    }, MERGE_MS),
+  )
+}
+
+/**
+ * 把「这一轮该指哪几条」落成渲染列表。
+ *
+ * 三种迁移逐条对应：
+ *   新增   → 从锚点长出去（`growNewMarks` 下一帧滑到目标）
+ *   仍在   → 只改 `y`，CSS 过渡自己滑过去
+ *   消失   → 转成 ghost，滑到幸存者位置，滑完移除
+ */
+function syncMarks(): void {
+  const ids = markIds.value
+  const prev = marks.value
+  const byId = new Map(prev.map((m) => [m.id, m]))
+  const anchor = prev.find((m) => !m.ghost)?.y ?? 0
+  const survivorY = markYs.value[0] ?? anchor
+  const clearAll = ids.length === 0
+
+  const next: PlayMark[] = []
+  const seen = new Set<string>()
+
+  ids.forEach((id, i) => {
+    const y = markYs.value[i] ?? 0
+    const old = byId.get(id)
+    if (old) {
+      // 合体途中又被指到：复活，别让它滑走
+      old.ghost = false
+      old.y = y
+      next.push(old)
+    } else {
+      // 首个三角直接落在目标行：从 0 长出来会像「从顶上掉下来」
+      const fromTop = prev.length === 0
+      next.push({ id, y: fromTop ? y : anchor, ghost: false })
+      if (!fromTop) pendingGrow.add(id)
+    }
+    seen.add(id)
+  })
+
+  for (const m of prev) {
+    if (seen.has(m.id)) continue
+    if (clearAll) continue // 换文件 / 清空：不留合体动画
+    if (m.ghost) {
+      // 已经在合体：目标位置跟着新的幸存者走，别停在旧地方
+      m.y = survivorY
+    } else {
+      m.ghost = true
+      m.y = survivorY
+      scheduleDrop(m.id)
+    }
+    next.push(m)
+  }
+
+  marks.value = next
+  if (pendingGrow.size > 0) void nextTick().then(growNewMarks)
 }
 
 function measureMarks(): void {
   markYs.value = markIds.value.map((id) => rowCenterY(id) ?? 0)
-  paintMarks()
+  syncMarks()
 }
 
 watch(
@@ -206,59 +307,9 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize)
+  for (const timer of mergeTimers.values()) window.clearTimeout(timer)
+  mergeTimers.clear()
 })
-
-/**
- * 入场：从**已经在的那个三角**的位置滑到自己的行。
- * 只写位置、不碰 opacity —— 分身是「长出去」的，不是「浮出来」的。
- */
-function onMarkEnter(el: Element): void {
-  const node = el as HTMLElement
-  const to = rowCenterY(node.dataset.markId ?? '') ?? 0
-  const from = markYs.value[0] ?? to
-  node.style.transition = 'none'
-  node.style.transform = `translateY(${from}px)`
-  // 先让「起点」这一帧落定，否则浏览器会把两次赋值合并成一次，直接出现在终点
-  void node.offsetHeight
-  node.style.transition = ''
-  node.style.transform = `translateY(${to}px)`
-}
-
-/**
- * 收场：多余的三角滑回**留下的那一个**，合体之后才移除 —— 与入场对称。
- * 没有留下来的（切文件、清空）直接收掉，不做无意义的滑动。
- */
-function onMarkLeave(el: Element, done: () => void): void {
-  const node = el as HTMLElement
-  const survivor = markIds.value[0]
-  const to = survivor ? rowCenterY(survivor) : null
-  if (to === null) {
-    done()
-    return
-  }
-  const from = Number(node.dataset.y ?? '0')
-  node.style.transition = 'none'
-  node.style.transform = `translateY(${from}px)`
-  void node.offsetHeight
-  // 过渡交给 .mark-leave-active（CSS 里只有 transform 一条），不在这里写 var() 简写
-  node.style.transition = ''
-  node.style.transform = `translateY(${to}px)`
-
-  let settled = false
-  function onEnd(ev: Event): void {
-    if ((ev as TransitionEvent).propertyName !== 'transform') return
-    finish()
-  }
-  const finish = (): void => {
-    if (settled) return
-    settled = true
-    node.removeEventListener('transitionend', onEnd)
-    done()
-  }
-  node.addEventListener('transitionend', onEnd)
-  // 兜底：过渡被取消（元素被复用等）时也要收掉，别留一个幽灵三角
-  window.setTimeout(finish, 700)
-}
 
 const allChecked = computed(
   () => segments.value.length > 0 && editor.selectedIds.length === segments.value.length,
@@ -503,7 +554,7 @@ function onReorderDrop(event: DragEvent, index: number): void {
   ui.notify(
     'success',
     `已把第 ${from + 1} 条的内容移到第 ${index + 1} 条的时间码上`,
-    '时间码没有改动，换的是每个时间格子里的内容',
+    '时间码未改动，移动的是各时间格内的内容',
   )
 }
 
@@ -583,6 +634,16 @@ const trLang = computed(() => pickViewLang(segments.value, settings.translationL
 function trTextOf(seg: SubtitleSegment): string {
   const lang = trLang.value
   return lang ? (seg.translations?.[lang] ?? '') : ''
+}
+
+/**
+ * 单元格里显示的文本。
+ *
+ * 先清掉零宽字符再判空：`text || '（空）'` 遇到「只有 U+200B」的条目会通过判空，
+ * 单元格于是显示成一片空白 —— 看起来是条没有内容又删不掉的行，实际只是字符不可见。
+ */
+function displayText(raw: string | null | undefined): string {
+  return stripInvisible(raw).trim() || '（空）'
 }
 
 /**
@@ -1168,22 +1229,16 @@ function onKeydown(event: KeyboardEvent): void {
         尖头朝右指着字幕条；同时有多条（时间码重叠）时分身成多个，
         指向都不命中时吸到时间上最靠近的那一条。
       -->
-      <TransitionGroup
-        tag="div"
-        name="mark"
-        class="subtable__marks"
-        aria-hidden="true"
-        @enter="onMarkEnter"
-        @leave="onMarkLeave"
-      >
+      <div ref="marksRef" class="subtable__marks" aria-hidden="true">
         <span
-          v-for="(id, i) in markIds"
-          :key="id"
+          v-for="m in marks"
+          :key="m.id"
           class="subtable__mark"
-          :data-mark-id="id"
-          :data-y="markYs[i] ?? 0"
+          :class="{ 'is-ghost': m.ghost }"
+          :data-mark-id="m.id"
+          :style="{ transform: `translateY(${m.y}px)` }"
         />
-      </TransitionGroup>
+      </div>
 
       <template v-for="(seg, index) in segments" :key="seg.id">
         <!--
@@ -1297,7 +1352,7 @@ function onKeydown(event: KeyboardEvent): void {
                 @keyup="trackCaret"
                 @select="trackCaret"
               />
-              <span v-else class="row__text">{{ seg.text || '（空）' }}</span>
+              <span v-else class="row__text">{{ displayText(seg.text) }}</span>
             </span>
 
             <!-- 译文行：挂在上面那条原文上，靠左侧竖线区分 -->
@@ -1326,7 +1381,7 @@ function onKeydown(event: KeyboardEvent): void {
                 @keyup="trackCaret"
                 @select="trackCaret"
               />
-              <span v-else class="row__text">{{ trTextOf(seg) || '（空）' }}</span>
+              <span v-else class="row__text">{{ displayText(trTextOf(seg)) }}</span>
             </span>
           </span>
       </div>
@@ -1584,18 +1639,13 @@ function onKeydown(event: KeyboardEvent): void {
   border-style: solid;
   border-width: 4px 0 4px 6px;
   border-color: transparent transparent transparent var(--color-playmark, #e0a51a);
-  /* 460ms + --ease-out：跨行的空间指引，与「开始识别飞向进度条」同一档 */
+  /*
+   * 换行、分身、合体都只是把 `y` 改一下，由这条过渡滑过去 —— 不碰透明度，
+   * 因为要看的正是「一个分成好几个、再合回一个」，淡入淡出会像闪烁。
+   * 460ms + --ease-out：跨行的空间指引，与「开始识别飞向进度条」同一档。
+   */
   transition: transform var(--dur-slow) var(--ease-out);
   will-change: transform;
-}
-
-/*
- * 收场（分身合体）：多余的三角滑回「留下的那一个」再移除，与入场对称。
- * 过渡写在类上而不是 JS 里 —— 行内写 `transition: transform var(--dur-slow)`
- * 会被当成待替换值，拿不到稳定的过渡；类里的这条是实打实的计算值。
- */
-.mark-leave-active {
-  transition: transform var(--dur-slow) var(--ease-in);
 }
 
 /* ---------- 子项目分界（只有一条细线） ---------- */

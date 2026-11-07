@@ -40,7 +40,7 @@ async function goDownload(): Promise<void> {
   const target = update.downloadUrl || update.targetUrl
   const ok = await update.openTarget(target)
   if (!ok) {
-    ui.notify('error', '打不开下载页', '请手动在浏览器里访问 ' + target)
+    ui.notify('error', '无法打开下载页', '请手动在浏览器里访问 ' + target)
     return
   }
   update.dismiss()
@@ -72,20 +72,20 @@ async function goDownload(): Promise<void> {
       <p v-if="update.highlight" class="update__lead">{{ update.highlight }}</p>
 
       <section v-if="update.notes.length > 0" class="update__block">
-        <p class="update__block-title">这次更新了什么</p>
+        <p class="update__block-title">本版更新内容</p>
         <ul class="update__list">
           <li v-for="(line, index) in update.notes" :key="index">{{ line }}</li>
         </ul>
       </section>
 
       <p v-else class="update__lead">
-        这一版没有附更新说明。可以到官网查看完整更新日志。
+        本版未附更新说明，完整更新日志见官网。
       </p>
 
       <div class="update__note">
         <Icon name="info" :size="14" />
         <span>
-          {{ update.upgradeHint || '直接运行新版安装包覆盖安装即可，设置与已下载的模型都会保留。' }}
+          {{ update.upgradeHint || '运行新版安装包覆盖安装即可，设置与已下载的模型均会保留。' }}
         </span>
       </div>
 
@@ -97,7 +97,7 @@ async function goDownload(): Promise<void> {
     </div>
 
     <template #footer>
-      <button class="btn" type="button" @click="later">稍后再说</button>
+      <button class="btn" type="button" @click="later">稍后</button>
       <button class="btn btn--primary" type="button" @click="goDownload">
         <Icon name="external" :size="13" />
         <span>前往官网更新</span>

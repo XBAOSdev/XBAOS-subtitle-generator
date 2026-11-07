@@ -22,15 +22,45 @@ import { uid } from '@/utils/id'
 export const SOURCE_SLOT = 'source'
 
 /**
+ * 零宽与格式控制字符。
+ *
+ * **`trim()` 不认它们**：U+200B 零宽空格、U+200C/U+200D 连接符、U+2060 word-joiner、
+ * U+FEFF、U+00AD 软连字符都原样留在字符串里，于是 `trim() !== ''` 说「有内容」，
+ * 屏幕上却一个字也没有。从网页、PDF 复制来的文本与部分 AI 输出常带这些东西。
+ *
+ * 后果不只是「显示成空白」：时间轴上会画出一个**只剩边框的空条** —— 看着像渲染
+ * 出错，实际是一条用户既认不出、也点不准去删的字幕。
+ */
+const INVISIBLE_CHARS = /[\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/g
+
+/**
+ * 去掉不可见字符，保留正常空白。
+ *
+ * 用于**显示**与**判空**，不回头改用户数据 —— 除非在入库那一步（识别结果、AI 结果）
+ * 顺手清掉，从源头不让它们进来（见 `project.ts` 的 `toSegment`）。
+ */
+export function stripInvisible(raw: string | null | undefined): string {
+  return (raw ?? '').replace(INVISIBLE_CHARS, '')
+}
+
+/** 有没有「看得见的字符」。判空一律走这里。 */
+export function hasVisibleText(raw: string | null | undefined): boolean {
+  return stripInvisible(raw).trim() !== ''
+}
+
+/**
  * 条目有没有实际文本。
  *
  * 空条目**不进 AI 提示词**（塞进去只会浪费 token 并诱导模型凭空填空），所以它也
  * **不该占一个译文序号**。这三处必须用同一个判定，否则会出静默错位：
  *   ① 拼提示词的 `usable()`；② 辅助窗口算「期望译文条数」；③ 译文按序号贴回条目。
  * 三者只要有一处把空条目算进去，后面所有译文就整体错一格 —— 读起来通顺，极难发现。
+ *
+ * 判据是「有没有看得见的字符」而不是 `trim() !== ''`：只有零宽字符的条目在界面上
+ * 与空条目无从区分，任何「跳过空条目」的规则都必须把它算成空。
  */
 export function hasText(seg: SubtitleSegment): boolean {
-  return seg.text.trim() !== ''
+  return hasVisibleText(seg.text)
 }
 
 /** 一条字幕上所有「有内容的槽位」：原文 + 有译文的语言 */

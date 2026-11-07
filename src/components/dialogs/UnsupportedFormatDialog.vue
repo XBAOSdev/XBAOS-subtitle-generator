@@ -26,14 +26,14 @@ const mainFormat = computed(() =>
 )
 
 const mainReason = computed(
-  () => items.value[0]?.reason ?? '本软件没有为它内置解码器',
+  () => items.value[0]?.reason ?? '本软件未内置该格式的解码器',
 )
 
 const suppress = ref(false)
 
 function close(): void {
   if (suppress.value) {
-    ui.notify('info', '已关闭该格式的提示', '下次拖入相同格式将静默标记')
+    ui.notify('info', '已关闭该格式的提示', '此后相同格式不再提示')
   }
   ui.closeDialog()
 }
@@ -90,7 +90,7 @@ function openLocation(): void {
             <span class="unsupported__row-ext">{{ unsupportedLabel(item.ext) }}</span>
           </li>
           <li v-if="restCount > 0" class="unsupported__row unsupported__row--muted">
-            等另外 {{ restCount }} 个文件
+            另有 {{ restCount }} 个文件
           </li>
         </ul>
       </div>
@@ -103,7 +103,7 @@ function openLocation(): void {
       </label>
       <span class="unsupported__spacer" />
       <button class="btn" type="button" @click="openLocation">打开文件所在位置</button>
-      <button class="btn btn--primary" type="button" @click="close">知道了</button>
+      <button class="btn btn--primary" type="button" @click="close">关闭</button>
     </template>
   </ModalDialog>
 </template>

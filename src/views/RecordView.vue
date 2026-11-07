@@ -133,7 +133,7 @@ async function refreshDevices(): Promise<void> {
     const target = remembered ?? fallback
     micDeviceId.value = target?.deviceId ?? ''
     if (target && !remembered && micLabel.value) {
-      micNote.value = `上次用的「${micLabel.value}」这次没找到，已改用「${target.label}」`
+      micNote.value = `上次使用的「${micLabel.value}」本次未找到，已改为「${target.label}」`
     }
   } catch (err) {
     deviceError.value = err instanceof Error ? err.message : String(err)
@@ -268,10 +268,10 @@ async function startRecording(): Promise<void> {
 
 function describeError(err: unknown): string {
   const name = err instanceof DOMException ? err.name : ''
-  if (name === 'NotAllowedError') return '权限被拒绝。请在系统设置里允许本应用访问麦克风或屏幕录制'
+  if (name === 'NotAllowedError') return '权限被拒绝。请在系统设置中允许本应用访问麦克风或屏幕录制'
   if (name === 'NotFoundError') return '找不到可用的音频设备'
-  if (name === 'NotReadableError') return '设备被其他程序占用了'
-  if (name === 'AbortError') return '采集被中断了'
+  if (name === 'NotReadableError') return '设备已被其他程序占用'
+  if (name === 'AbortError') return '采集已中断'
   return err instanceof Error ? err.message : String(err)
 }
 
@@ -318,7 +318,7 @@ async function stopRecording(): Promise<void> {
 
   if (l.length === 0) {
     phase.value = 'idle'
-    errorText.value = '没有采到任何音频'
+    errorText.value = '未采集到音频'
     return
   }
 
@@ -486,7 +486,7 @@ function splitAtPlayhead(): void {
   const source = sourceOf(playhead.value)
   const index = clips.value.findIndex((c) => source > c.start + 1e-6 && source < c.end - 1e-6)
   if (index < 0) {
-    ui.notify('info', '游标不在任何片段内部', '把它拖到片段中间再切')
+    ui.notify('info', '游标不在任何片段内部', '请将游标移至片段内部后再分割')
     return
   }
   const target = clips.value[index]
@@ -510,7 +510,7 @@ function deleteSelected(): void {
   if (selection.value.length === 0) return
   const kill = new Set(selection.value)
   if (kill.size >= clips.value.length) {
-    ui.notify('warning', '不能删掉全部片段', '至少保留一段')
+    ui.notify('warning', '不能删掉全部片段', '至少保留一个片段')
     return
   }
   snapshot(`删除 ${kill.size} 段`)
@@ -953,10 +953,10 @@ async function requestClose(): Promise<void> {
   const ok = await api.confirmDiscard({
     message:
       phase.value === 'recording'
-        ? '正在录制，关闭会丢弃已录的内容'
+        ? '正在录制，关闭将丢弃已录制内容'
         : isDirty.value
-          ? '对录音的裁剪还没有保存'
-          : '录音还没有保存',
+          ? '录音裁剪尚未保存'
+          : '录音尚未保存',
     detail: '关闭后这些内容无法恢复。',
   })
   if (ok) api.forceClose()

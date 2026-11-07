@@ -37,7 +37,7 @@ function windowControl(action: 'minimize' | 'maximize' | 'close'): void {
     api.window.control(action)
     return
   }
-  ui.notify('info', '浏览器预览模式下不可用', '窗口控制需要以桌面应用方式运行')
+  ui.notify('info', '浏览器预览模式下不可用', '窗口控制仅在桌面应用中可用')
 }
 
 /**

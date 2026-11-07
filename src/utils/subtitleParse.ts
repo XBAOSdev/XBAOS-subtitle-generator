@@ -12,6 +12,7 @@
  */
 
 import type { SubtitleFormat, SubtitleSegment } from '@/types'
+import { hasVisibleText, stripInvisible } from '@/utils/segmentOps'
 
 export interface ParsedSubtitle {
   format: SubtitleFormat
@@ -41,12 +42,14 @@ function newSegment(start: number, end: number, text: string, index: number): Su
 
 function sortAndClean(segments: SubtitleSegment[]): SubtitleSegment[] {
   return segments
-    .filter((s) => s.text.trim() !== '' && Number.isFinite(s.start) && Number.isFinite(s.end))
+    // 判空按「有没有看得见的字符」：只有零宽字符的条目与空条目没有区别，
+    // 留在列表里就是一条界面上找不出内容、也点不准去删的空字幕
+    .filter((s) => hasVisibleText(s.text) && Number.isFinite(s.start) && Number.isFinite(s.end))
     .sort((a, b) => a.start - b.start)
-    .map((s) => ({
-      ...s,
-      text: s.text.replace(/\s+$/, '').replace(/^\s+/, ''),
-    }))
+    .map((s) => {
+      const text = stripInvisible(s.text).replace(/^\s+/, '').replace(/\s+$/, '')
+      return { ...s, text, origin: text }
+    })
 }
 
 // ---------------------------------------------------------------- SRT / VTT

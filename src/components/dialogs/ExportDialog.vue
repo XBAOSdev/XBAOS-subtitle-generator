@@ -329,7 +329,7 @@ const speakerStyleHint = computed(() => {
     case 'vtt':
       return 'VTT 用 <v 称呼> 语音标签，符合 WebVTT 规范'
     default:
-      return '这个格式没有讲话人字段，写成「称呼：字幕」'
+      return '该格式没有讲话人字段，写作「称呼：字幕」'
   }
 })
 
@@ -380,7 +380,7 @@ const LANG_MODES: ExportLangMode[] = ['source', 'both', 'translation', 'separate
 const LANG_MODE_LABEL: Record<ExportLangMode, { label: string; hint: string }> = {
   source: { label: '仅原文', hint: '每个文件只写原文' },
   both: { label: '双语', hint: '同一个字幕块里两行，共用一个时间码' },
-  translation: { label: '仅译文', hint: '只写译文，缺译文的条目用原文顶上' },
+  translation: { label: '仅译文', hint: '只写译文，缺译文的条目以原文补齐' },
   separate: {
     label: '分别导出',
     hint: '原文与译文各一个文件，按 xxx.zh.srt / xxx.en.srt 命名',
@@ -521,7 +521,7 @@ async function doExport(): Promise<void> {
 
   ui.closeDialog()
   const detail = [dirs.size > 1 ? `分布在 ${dirs.size} 个目录` : written[0]]
-  if (missing > 0) detail.push(`${missing} 条缺译文，已用原文顶上`)
+  if (missing > 0) detail.push(`${missing} 条缺译文，已以原文补齐`)
   ui.notify('success', `已导出 ${written.length} 个字幕文件`, detail.join('；'))
 }
 

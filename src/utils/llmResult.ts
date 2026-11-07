@@ -12,7 +12,7 @@
 
 import type { SubtitleSegment } from '@/types'
 import { uid } from '@/utils/id'
-import { MIN_CUE_SEC, clearStale, hasText } from '@/utils/segmentOps'
+import { MIN_CUE_SEC, clearStale, hasText, stripInvisible } from '@/utils/segmentOps'
 
 export interface ParsedCue {
   start: number
@@ -233,8 +233,10 @@ export function cuesToSegments(
     id: prev[i]?.id ?? uid('seg'),
     start: Number(cue.start.toFixed(3)),
     end: Number(cue.end.toFixed(3)),
-    text: cue.text,
-    origin: cue.text,
+    // 从网页复制的文本常带零宽字符：入库前清掉，否则界面上是一条「看不见内容、
+    // 也不符合空条目判据」的字幕，后续所有判空都拿它没辙
+    text: stripInvisible(cue.text).trim(),
+    origin: stripInvisible(cue.text).trim(),
     issues: [],
   }))
 }
@@ -267,8 +269,8 @@ export function mergeCuesIntoSelection(
     id: reuse ? picked[i].id : uid('seg'),
     start: Number(cue.start.toFixed(3)),
     end: Number(cue.end.toFixed(3)),
-    text: cue.text,
-    origin: cue.text,
+    text: stripInvisible(cue.text).trim(),
+    origin: stripInvisible(cue.text).trim(),
     issues: [],
   }))
   const builtIds = new Set(built.map((s) => s.id))
@@ -549,10 +551,13 @@ export function applyTranslation(
   lines: string[],
   ids?: string[],
 ): SubtitleSegment[] {
+  // 译文同样来自「从网页复制」，一样会带零宽字符。入口统一清一遍，
+  // 后面两个分支都用它 —— 只清一边会让分段翻译与整份翻译表现不一致。
+  const clean = lines.map((l) => stripInvisible(l))
   // 指定了 id 就只给这些条目写译文（分段翻译），其余条目的译文原样留着。
   // 按位置贴回只适用于「整份翻译」—— 位置在分段场景下毫无意义。
   if (ids && ids.length > 0) {
-    const byId = new Map(ids.map((id, i) => [id, lines[i] ?? '']))
+    const byId = new Map(ids.map((id, i) => [id, clean[i] ?? '']))
     return segments.map((s) => {
       if (!byId.has(s.id)) return s
       const next: SubtitleSegment = {
@@ -568,7 +573,7 @@ export function applyTranslation(
     if (!hasText(s)) return s
     const next: SubtitleSegment = {
       ...s,
-      translations: { ...(s.translations ?? {}), [lang]: lines[cursor] ?? '' },
+      translations: { ...(s.translations ?? {}), [lang]: clean[cursor] ?? '' },
     }
     cursor += 1
     return clearStale(next, lang)
@@ -597,8 +602,10 @@ export function summarizeReview(
   const previews: CuePreview[] = []
 
   for (let i = 0; i < count; i += 1) {
-    const before = prev[i]?.text.trim() ?? ''
-    const after = cues[i]?.text.trim() ?? ''
+    // 比对前清掉不可见字符：只多了个 U+200B 的两条不该出现在「有变化」清单里，
+    // 用户点开对比看到的会是两段一模一样的文字
+    const before = stripInvisible(prev[i]?.text).trim()
+    const after = stripInvisible(cues[i]?.text).trim()
     const isChanged = before !== after
     if (isChanged) changed += 1
     if (previews.length < previewLimit && isChanged) {

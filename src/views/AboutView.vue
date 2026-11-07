@@ -17,21 +17,21 @@ async function checkNow(): Promise<void> {
 
 async function openSite(): Promise<void> {
   const ok = await update.openTarget()
-  if (!ok) ui.notify('error', '打不开官网', `请手动访问 ${update.targetUrl}`)
+  if (!ok) ui.notify('error', '无法打开官网', `请手动访问 ${update.targetUrl}`)
 }
 
 /** 打开随包的许可原文目录。副本本来就在，只是没人会去安装目录里翻 */
 async function openLicenses(): Promise<void> {
   const api = window.xbaos?.app
   if (!api?.openLicenses) {
-    ui.notify('info', '浏览器预览打不开许可目录', '请在桌面应用中使用')
+    ui.notify('info', '浏览器预览无法打开许可目录', '请在桌面应用中使用')
     return
   }
   try {
     const res = await api.openLicenses()
-    if (!res.ok && res.message) ui.notify('error', '打不开许可目录', res.message)
+    if (!res.ok && res.message) ui.notify('error', '无法打开许可目录', res.message)
   } catch (err) {
-    ui.notify('error', '打不开许可目录', err instanceof Error ? err.message : String(err))
+    ui.notify('error', '无法打开许可目录', err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -263,7 +263,7 @@ const LIBS = [
                 <strong>下载可选模型</strong>（访问模型仓库）。不下载模型时，关掉自动检查即可完全离线使用。
               </li>
               <li>软件不收集任何使用数据，不包含统计与埋点组件。</li>
-              <li>AI 校对与 AI 翻译走系统剪贴板中继，由你自己粘贴到所选的在线服务，我们不接收也不存储这些内容。</li>
+              <li>AI 校对与 AI 翻译经系统剪贴板中继，由用户自行粘贴至所选在线服务，本软件不接收、不存储相关内容。</li>
             </ul>
           </div>
         </section>

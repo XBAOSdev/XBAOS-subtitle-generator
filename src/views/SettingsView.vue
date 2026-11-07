@@ -74,7 +74,7 @@ const BACKEND_OPTIONS = [
   {
     value: 'auto',
     label: '自动',
-    hint: '检测到支持 Vulkan 的显卡时启用加速；显卡后端出问题会自动改用 CPU 重试',
+    hint: '检测到支持 Vulkan 的显卡时启用加速；显卡后端异常时自动回退 CPU 重试',
   },
   {
     value: 'cpu',
@@ -307,7 +307,7 @@ async function changeModelsDir(): Promise<void> {
     }
     settings.modelsDir = dir
     effectiveModelsDir.value = res.dir ?? dir
-    ui.notify('success', '模型存储位置已更改', '记得把原来的模型复制到新位置')
+    ui.notify('success', '模型存储位置已更改', '请将原位置的模型文件复制到新位置')
   } catch (err) {
     ui.notify('error', '更改失败', err instanceof Error ? err.message : String(err))
   } finally {
@@ -333,7 +333,7 @@ async function resetModelsDir(): Promise<void> {
 async function openModelsDir(): Promise<void> {
   if (!bridge?.models) return
   const res = await bridge.models.openDir()
-  if (!res.ok && res.message) ui.notify('error', '打不开模型文件夹', res.message)
+  if (!res.ok && res.message) ui.notify('error', '无法打开模型文件夹', res.message)
 }
 
 function reset(): void {

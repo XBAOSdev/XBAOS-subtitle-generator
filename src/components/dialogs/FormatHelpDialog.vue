@@ -77,7 +77,7 @@ function close(): void {
       </section>
 
       <p class="formats__note">
-        本软件的硬性原则是完全免费可商用，因此不内置任何<strong>需要付费授权</strong>的解码实现。
+        本软件仅采用免费可商用的实现，因此不内置任何<strong>需要付费授权</strong>的解码器。
         支持的格式在上表里逐项写明了专利状态；不支持的格式中，AC3 与 EAC3 属于专利已到期、
         但本软件尚未内置解码器的情况，与专利风险无关。
         遇到不支持的格式，请先转换成上表中的任一格式。
@@ -85,7 +85,7 @@ function close(): void {
     </div>
 
     <template #footer>
-      <button class="btn btn--primary" type="button" @click="close">知道了</button>
+      <button class="btn btn--primary" type="button" @click="close">关闭</button>
     </template>
   </ModalDialog>
 </template>

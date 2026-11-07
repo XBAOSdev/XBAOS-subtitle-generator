@@ -19,7 +19,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useHistoryStore } from '@/stores/history'
 import { makeMockPeaks } from '@/mock/mockData'
 import { assignLanes, exceedsLaneLimit, laneNeighbours, MAX_LANES } from '@/utils/timelineLayout'
-import { MIN_SEGMENT_SEC } from '@/utils/segmentOps'
+import { MIN_SEGMENT_SEC, stripInvisible } from '@/utils/segmentOps'
 import { noticeBlocked } from '@/utils/confirm'
 import { toTimecode } from '@/utils/format'
 import { useSegmentMenu } from '@/composables/useSegmentMenu'
@@ -984,9 +984,15 @@ const dragBubble = computed(() => {
   return { x: xOf(t), text: toTimecode(t), escaped: state.escaped }
 })
 
-/** 字幕条上显示的文字：只取一小段，靠 CSS 截断补省略号 */
+/**
+ * 字幕条上显示的文字：只取一小段，靠 CSS 截断补省略号。
+ *
+ * 判空走 `stripInvisible` 而不是 `text || '（空）'`：只有零宽字符的条目在原写法下
+ * 会被当成「有内容」，条上于是只剩一个边框，看着像一个悬空的空条 —— 既不像字幕，
+ * 也无从知道该删哪一条。清掉不可见字符后它就和真正的空条目一样显示「（空）」。
+ */
 function clipText(seg: SubtitleSegment): string {
-  const text = seg.text.trim()
+  const text = stripInvisible(seg.text).trim()
   return text || '（空）'
 }
 
@@ -1077,7 +1083,7 @@ const playedWidth = computed(() => Math.max(0, Math.min(stageW.value, playheadX.
           :title="
             bar.overflow
               ? '这一条超出了同一时刻的字幕条数上限，请调整时间码或删除'
-              : `${bar.seg.text || '（空）'}\n拖动条身可整体平移，拖两侧可改边界`
+              : `${stripInvisible(bar.seg.text).trim() || '（空）'}\n拖动条身可整体平移，拖两侧可改边界`
           "
           @pointerdown="startMove($event, bar.seg)"
           @click="onBarClick($event, bar.seg)"

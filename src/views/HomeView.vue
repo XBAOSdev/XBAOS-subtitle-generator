@@ -84,7 +84,7 @@ const depthHint = computed(() => {
  */
 function pickMode(mode: BatchMode): void {
   if (!project.setBatchMode(mode)) {
-    ui.notify('warning', '识别进行中', '等这一批跑完再切换，已经导入的内容不受影响')
+    ui.notify('warning', '识别进行中', '当前批次完成后再切换，已导入的内容不受影响')
   }
 }
 
@@ -115,7 +115,7 @@ async function start(event?: MouseEvent): Promise<void> {
   ui.notify(
     failed > 0 ? 'warning' : 'success',
     failed > 0 ? `识别完成，${failed} 个文件失败` : '识别完成',
-    failed > 0 ? '失败的那些仍留在队列里，可以重试' : '已切换到字幕工作台',
+    failed > 0 ? '失败的文件仍留在队列中，可重试' : '已切换到字幕工作台',
   )
   // 还有失败项就留在导入页：用户得看着原因决定重试还是换文件（2.4）
   if (failed === 0) ui.navigate('editor')

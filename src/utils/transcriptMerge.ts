@@ -19,6 +19,7 @@
 
 import type { SubtitleSegment } from '@/types'
 import { toSimplified } from '@/utils/punctuation'
+import { stripInvisible } from '@/utils/segmentOps'
 
 export interface RunStats {
   /** 分段平均对数概率（引擎 done 返回，越接近 0 越好） */
@@ -98,7 +99,12 @@ export function repetitionPenalty(text: string): number {
 }
 
 export function runText(run: RecognitionRun): string {
-  return run.segments.map((s) => s.text.trim()).filter(Boolean).join('')
+  // 多遍结果的比较要看不见的字符排除在外：只差一个 U+200B 的两遍，
+  // 相似度会被算低，白跑一遍深度推理
+  return run.segments
+    .map((s) => stripInvisible(s.text).trim())
+    .filter(Boolean)
+    .join('')
 }
 
 /**

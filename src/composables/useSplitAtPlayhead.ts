@@ -49,7 +49,7 @@ export function useSplitAtPlayhead() {
     if (hits.length === 0) {
       ui.notify(
         'info',
-        '播放头不在任何一条字幕里',
+        '播放头不在任何字幕范围内',
         editor.selectedIds.length > 0
           ? '选中的字幕没有盖住播放头，把它挪到要切开的位置上'
           : '把播放头放到要切开的位置上，或先选中要切的那几条',

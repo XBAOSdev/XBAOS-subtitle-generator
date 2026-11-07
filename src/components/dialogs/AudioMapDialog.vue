@@ -104,7 +104,7 @@ function close(): void {
             class="input audiomap__input"
             type="text"
             spellcheck="false"
-            :placeholder="subtitleOnly ? '选择一份音频，之后就能重新识别' : '选择音频文件'"
+            :placeholder="subtitleOnly ? '选择音频文件，之后可重新识别' : '选择音频文件'"
           />
           <button class="btn audiomap__pick" type="button" @click="pick">选择文件</button>
         </div>
@@ -117,7 +117,7 @@ function close(): void {
       </div>
 
       <p class="audiomap__hint">
-        换音频不会改字幕，也不会自动重新识别。
+        更换音频不影响字幕，也不会自动重新识别。
       </p>
     </div>
 

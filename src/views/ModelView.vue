@@ -130,7 +130,7 @@ async function useModel(id: string, label: string): Promise<void> {
   settings.modelFile = id
   await refresh()
   const next = model.entry?.id === id ? model.archLabel : ''
-  ui.notify('success', `已切换到 ${label}`, next ? `架构 ${next}` : '下一次识别开始生效')
+  ui.notify('success', `已切换到 ${label}`, next ? `架构 ${next}` : '下次识别时生效')
 }
 
 function isActiveId(id: string): boolean {
@@ -152,7 +152,7 @@ async function removeModel(id: string, label: string, kind: ModelKind): Promise<
   const ok = await bridge.dialog.confirm({
     title: '删除模型',
     message: `确定删除 ${label} 吗？`,
-    detail: '删除后可以重新下载，或把模型文件放回模型文件夹。',
+    detail: '删除后可重新下载，或将模型文件放回模型文件夹。',
     buttons: ['取消', '删除'],
     defaultId: 0,
     cancelId: 0,
@@ -195,9 +195,9 @@ async function openModelsDir(): Promise<void> {
   if (!bridge) return
   try {
     const res = await bridge.models.openDir()
-    if (!res.ok && res.message) ui.notify('error', '打不开模型文件夹', res.message)
+    if (!res.ok && res.message) ui.notify('error', '无法打开模型文件夹', res.message)
   } catch (err) {
-    ui.notify('error', '打不开模型文件夹', err instanceof Error ? err.message : String(err))
+    ui.notify('error', '无法打开模型文件夹', err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -351,7 +351,7 @@ function goModelsDirSetting(): void {
             <span class="own__title">自己的模型</span>
           </div>
           <p class="own__text">
-            把模型放进模型文件夹后点「重新扫描」。支持单个
+            将模型放入模型文件夹后点击「重新扫描」。支持单个
             <span class="mono">.bin</span> 文件，或含
             <span class="mono">model.int8.onnx</span> 与
             <span class="mono">tokens.txt</span> 的文件夹，架构按内容自动判定。

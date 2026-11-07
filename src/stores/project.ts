@@ -30,7 +30,13 @@ import {
   type ParsedCue,
 } from '@/utils/llmResult'
 import { validateSegment, countIssues } from '@/utils/validate'
-import { alignOrigin, enforceMonotonicCues, segmentsSignature } from '@/utils/segmentOps'
+import {
+  alignOrigin,
+  enforceMonotonicCues,
+  hasVisibleText,
+  segmentsSignature,
+  stripInvisible,
+} from '@/utils/segmentOps'
 import { confirmDestructive } from '@/utils/confirm'
 import { applyTermFix, collectFixTerms } from '@/utils/termFix'
 import { assignSpeakers } from '@/utils/speaker'
@@ -431,6 +437,20 @@ export const useProjectStore = defineStore('project', () => {
     if (projectName.value.trim()) return projectName.value.trim()
     return defaultProjectName(supportedFiles.value.map((f) => f.name))
   })
+
+  /**
+   * 任意一个项目的**显示名**。
+   *
+   * `draft.name` 为空是常态：识别落盘时还没有「用户起过的名字」，建项目那一刻
+   * 也可能拿不到子项目名。这时侧栏按子项目名现算（`defaultProjectName`），
+   * 所以**凡是给人看的项目名都必须走这里** —— 各处自己写 `d.name || '未命名项目'`，
+   * 就会出现「侧栏明明有名字，右键菜单里却是未命名项目」。
+   */
+  function draftDisplayName(d: ProjectDraft): string {
+    if (d.id === activeDraftId.value) return displayProjectName.value
+    const items = d.files.filter((f) => f.status !== 'unsupported')
+    return d.name.trim() || defaultProjectName(items.map((f) => f.name))
+  }
 
   /* ------------------------------------------------------ 项目视图（拼接） */
 
@@ -1570,7 +1590,7 @@ export const useProjectStore = defineStore('project', () => {
     const target = draftOf(id)
     if (!target) return false
     if (recognizing.value) {
-      useUiStore().notify('warning', '识别进行中', '等这一批跑完再切换项目')
+      useUiStore().notify('warning', '识别进行中', '当前批次完成后再切换项目')
       return false
     }
     if (projectDirty.value && projectPath.value && supportedFiles.value.length > 0) {
@@ -1652,7 +1672,7 @@ export const useProjectStore = defineStore('project', () => {
 
     const dirtyList = list.filter(dirtyOf)
     if (dirtyList.length > 0) {
-      const names = dirtyList.map((d) => d.name || '未命名项目')
+      const names = dirtyList.map((d) => draftDisplayName(d))
       const message =
         dirtyList.length === 1
           ? `「${names[0]}」有未保存的改动，关闭后这些改动将无法找回。`
@@ -1904,7 +1924,7 @@ export const useProjectStore = defineStore('project', () => {
       if (target && bridge) {
         const res = await bridge.project.delete(target)
         if (!res.ok) {
-          useUiStore().notify('error', '项目文件没能删掉', res.message ?? target)
+          useUiStore().notify('error', '项目文件删除失败', res.message ?? target)
         }
       }
       n += 1
@@ -2023,9 +2043,9 @@ export const useProjectStore = defineStore('project', () => {
       else skipped.push(name)
     }
     if (origin) await switchDraft(origin)
-    if (saved > 0) ui.notify('success', `已保存 ${saved} 个项目`, skipped.length > 0 ? `${skipped.length} 个没保存` : '')
+    if (saved > 0) ui.notify('success', `已保存 ${saved} 个项目`, skipped.length > 0 ? `${skipped.length} 个未保存` : '')
     else if (skipped.length > 0) {
-      ui.notify('warning', '这些项目还没保存过', `${skipped.join('、')} 需要先指定保存位置`)
+      ui.notify('warning', '这些项目尚未保存', `${skipped.join('、')} 需先指定保存位置`)
     }
     return { saved, skipped }
   }
@@ -2179,12 +2199,12 @@ export const useProjectStore = defineStore('project', () => {
 
     const ext = extOfPath(nextPath)
     if (!isSupported(ext)) {
-      ui.notify('error', '不能用作音频', '请选择 wav / mp3 / flac / ogg 这类音频文件')
+      ui.notify('error', '不能用作音频', '请选择 wav、mp3、flac、ogg 等音频文件')
       return false
     }
     const st = await bridge.fs.stat(nextPath)
     if (!st.ok || !st.isFile) {
-      ui.notify('error', '读不到这个文件', nextPath)
+      ui.notify('error', '无法读取该文件', nextPath)
       return false
     }
 
@@ -2224,7 +2244,7 @@ export const useProjectStore = defineStore('project', () => {
     const file = files.value.find((f) => f.id === fileId)
     if (!file || !bridge) return false
     if (!file.subtitleFormat) {
-      ui.notify('warning', '这个子项目没有字幕源文件', '它是由音频识别出来的')
+      ui.notify('warning', '该子项目没有字幕源文件', '其字幕由音频识别生成')
       return false
     }
     /*
@@ -2645,12 +2665,15 @@ const MIME_BY_EXT: Record<string, string> = {
         // 每一遍的结果都留下来，跑完统一整合（见 utils/transcriptMerge.ts）
         const runs: RecognitionRun[] = []
         // 引擎段 → 界面段。主识别与低置信复核都用它，id 里的下标按各自批次算
+        // 引擎给的是原始串，可能带零宽字符（U+200B 等）：`trim()` 不认它们，
+        // 入库后就是一条「看着空白、却是有效条目」的字幕 —— 时间轴上只剩个空边框。
+        // 在入口清掉，别让它有机会进到数据里再往各处漏。
         const toSegment = (msg: EngineSegment, i: number): SubtitleSegment => ({
           id: `seg_${Date.now().toString(36)}_${i.toString(36)}`,
           start: msg.start,
           end: msg.end,
-          text: msg.text.trim(),
-          origin: msg.text.trim(),
+          text: stripInvisible(msg.text).trim(),
+          origin: stripInvisible(msg.text).trim(),
           issues: [],
           avgLogprob: msg.avgLogprob,
         })
@@ -2754,7 +2777,7 @@ const MIME_BY_EXT: Record<string, string> = {
           const authoritative = Array.isArray(result.segments) ? result.segments : null
           const picked: SubtitleSegment[] = authoritative
             ? authoritative
-                .filter((m) => typeof m.text === 'string' && m.text.trim() !== '')
+                .filter((m) => typeof m.text === 'string' && hasVisibleText(m.text))
                 .map((m, i) => toSegment(m, i))
             : collected
 
@@ -2867,7 +2890,7 @@ const MIME_BY_EXT: Record<string, string> = {
             // 与主识别同一条规矩：段数以返回值为准，流式的只兜底
             const rescuedFinal = Array.isArray(rescueResult?.segments)
               ? rescueResult.segments
-                  .filter((m) => typeof m.text === 'string' && m.text.trim() !== '')
+                  .filter((m) => typeof m.text === 'string' && hasVisibleText(m.text))
                   .map((m, i) => toSegment(m, i))
               : rescued
 
@@ -3707,6 +3730,7 @@ const MIME_BY_EXT: Record<string, string> = {
     batchMode,
     projectName,
     displayProjectName,
+    draftDisplayName,
     projectPath,
     projectDirty,
     lastProjectDir,

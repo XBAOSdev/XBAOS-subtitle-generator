@@ -269,9 +269,17 @@ function closeAiTip(): void {
   ui.aiTipClosed = true
 }
 
-/** 气泡左上角的「不再提示」：写进设置，之后永远不出现 */
+/**
+ * 气泡左上角的「不再提示」：写进设置，之后永远不出现。
+ *
+ * 同时把设置里的总开关一起关掉。两个字段分开存是为了表达「这次不想看」与
+ * 「永远不想看」的差别，但对用户来说「不再提示」只有一个意思：这个提示我关了。
+ * 只写 `dismissed` 的话，设置页那个开关还亮着 —— 用户去设置里看到的与自己
+ * 刚做的选择相反，会直接判定「这个按钮没生效」。
+ */
 function muteAiTip(): void {
   settings.aiReviewTipDismissed = true
+  settings.aiReviewTipEnabled = false
   ui.aiTipClosed = true
 }
 
@@ -339,7 +347,7 @@ async function openAiReview(): Promise<void> {
       }),
     })
   } catch (err) {
-    ui.notify('error', '打不开 AI 校对窗口', String((err as Error)?.message ?? err))
+    ui.notify('error', '无法打开 AI 校对窗口', String((err as Error)?.message ?? err))
     return
   }
   // 窗口开起来了就把主界面锁上，直到它关闭
@@ -417,7 +425,7 @@ async function openAiTranslate(): Promise<void> {
       }),
     })
   } catch (err) {
-    ui.notify('error', '打不开 AI 翻译窗口', String((err as Error)?.message ?? err))
+    ui.notify('error', '无法打开 AI 翻译窗口', String((err as Error)?.message ?? err))
     return
   }
   ui.setAssistActive(true)
@@ -655,7 +663,7 @@ async function saveInPlace(): Promise<void> {
                 :disabled="!canAiReview"
                 :title="
                   canAiReview
-                    ? '交给网页版 AI 助手校对。经剪贴板中转，软件不代你发送'
+                    ? '交由网页版 AI 助手校对。内容经剪贴板中转，本软件不代为发送'
                     : '当前没有可校对的字幕'
                 "
                 @click="openAiReview"
@@ -669,7 +677,7 @@ async function saveInPlace(): Promise<void> {
                 :disabled="!canAiTranslate"
                 :title="
                   canAiTranslate
-                    ? '交给网页版 AI 助手翻译成其他语言。经剪贴板中转，软件不代你发送'
+                    ? '交由网页版 AI 助手翻译为其他语言。内容经剪贴板中转，本软件不代为发送'
                     : '当前没有可翻译的字幕'
                 "
                 @click="openAiTranslate"

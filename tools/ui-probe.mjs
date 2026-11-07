@@ -4578,14 +4578,16 @@ const scenarios = {
       return el.checked
     })()`)
     check('设置里能看到「AI 校对」引导提示的开关', swOn !== null)
-    check('默认是开着的（不打扰老用户的前提下默认引导）', swOn === true, String(swOn))
+    /*
+     * 「不再提示」必须把开关一起关掉。
+     *
+     * 两个字段分开存（`enabled` 管功能、`dismissed` 管「永远不看」）是为了让
+     * 「打开开关 → 复位 dismissed」这条路走得通，但用户点的是同一个按钮：
+     * 只写 dismissed 的话，设置页那个开关还亮着，与用户刚做的选择相反。
+     */
+    check('「不再提示」把设置里的开关一起关掉', swOn === false, String(swOn))
 
-    await clickIn(sw)
-    await sleep(250)
-    await goto(cdp, BASE + '/?demo=1&view=editor&theme=light')
-    check('设置里关掉开关后编辑器不再出现气泡', (await tip()).present === false)
-
-    await goto(cdp, BASE + '/?demo=1&view=settings')
+    // 重新打开开关 → 连「不再提示」一起复位，气泡要回来
     await clickIn(sw)
     await sleep(250)
     await goto(cdp, BASE + '/?demo=1&view=editor&theme=light')
@@ -4593,6 +4595,13 @@ const scenarios = {
       '把开关重新打开会连「不再提示」一起复位（气泡回来了）',
       (await tip()).present === true,
     )
+
+    // 再把开关关掉 → 编辑器不再出现气泡
+    await goto(cdp, BASE + '/?demo=1&view=settings')
+    await clickIn(sw)
+    await sleep(250)
+    await goto(cdp, BASE + '/?demo=1&view=editor&theme=light')
+    check('设置里关掉开关后编辑器不再出现气泡', (await tip()).present === false)
 
     // 复位：localStorage 在同一浏览器会话里共享，别把「不再提示」留给后面的场景
     await cdp.evaluate(`(() => {
@@ -5042,19 +5051,19 @@ const scenarios = {
         check(
           '弹窗有两个操作按钮且文案正确',
           d1.buttons.length === 2 &&
-            d1.buttons.some((t) => t.includes('稍后再说')) &&
+            d1.buttons.some((t) => t.includes('稍后')) &&
             d1.buttons.some((t) => t.includes('前往官网更新')),
           d1.buttons.join(' / '),
         )
       }
       await shot(cdp, 'probe-update-dialog.png')
 
-      // ---- 「稍后再说」：关弹窗，并把左下角提示一起撤下
-      check('点得到「稍后再说」', await clickOf('.modal__foot .btn', '稍后再说'))
-      check('「稍后再说」关掉了弹窗', (await cdp.evaluate(`!document.querySelector('.update')`)) === true)
+      // ---- 「稍后」：关弹窗，并把左下角提示一起撤下
+      check('点得到「稍后」', await clickOf('.modal__foot .btn', '稍后'))
+      check('「稍后」关掉了弹窗', (await cdp.evaluate(`!document.querySelector('.update')`)) === true)
       const hAfter = await hint()
       check(
-        '「稍后再说」之后左下角提示也撤下（本次运行不再打扰）',
+        '「稍后」之后左下角提示也撤下（本次运行不再打扰）',
         hAfter === null,
         JSON.stringify(hAfter),
       )
@@ -6481,15 +6490,15 @@ const scenarios = {
 
     /* ---------------- 播放指示三角 & 右栏两段式 ---------------- */
 
-    // 收场的三角还挂在 DOM 里（等合体动画走完），先等它落定再量
-    await waitFor(cdp, `document.querySelectorAll('.subtable__mark.mark-leave-active').length === 0`, 3000)
+    // 合体的三角还挂在 DOM 里（等它滑回幸存者），先等它落定再量
+    await waitFor(cdp, `document.querySelectorAll('.subtable__mark.is-ghost').length === 0`, 3000)
     await sleep(200)
 
     // 三角是 6×8 的 border 三角，定位给的是行中心 —— 不补 4px 就整体偏下半格
     const markInfo = await cdp.evaluate(`(() => {
       const body = document.querySelector('.subtable__body')
       if (!body) return null
-      const m = body.querySelector('.subtable__mark:not(.mark-leave-active)')
+      const m = body.querySelector('.subtable__mark:not(.is-ghost)')
       if (!m) return null
       const id = m.dataset.markId
       const row = id ? body.querySelector('[data-seg-id="' + id + '"]') : null
@@ -6569,11 +6578,11 @@ const scenarios = {
       editor.setPlayhead(2)
     `)
     await sleep(600)
-    // 上一轮的三角可能还在合体（460ms 过渡 / 700ms 兜底），等它落定再数
-    await waitFor(cdp, `document.querySelectorAll('.subtable__mark.mark-leave-active').length === 0`, 2000)
+    // 上一轮的三角可能还在合体，等它落定再数
+    await waitFor(cdp, `document.querySelectorAll('.subtable__mark.is-ghost').length === 0`, 2000)
     const splitMarks = await cdp.evaluate(`(() => {
       const body = document.querySelector('.subtable__body')
-      const all = [...body.querySelectorAll('.subtable__mark:not(.mark-leave-active)')]
+      const all = [...body.querySelectorAll('.subtable__mark:not(.is-ghost)')]
       return {
         n: all.length,
         props: [...new Set(all.map((m) => getComputedStyle(m).transitionProperty))],
@@ -6594,19 +6603,38 @@ const scenarios = {
     `)
     const sawLeaving = await waitFor(
       cdp,
-      `document.querySelectorAll('.subtable__mark.mark-leave-active').length > 0`,
+      `document.querySelectorAll('.subtable__mark.is-ghost').length > 0`,
       1200,
       20,
     )
     const mergeInfo = await cdp.evaluate(`(() => {
-      const m = document.querySelector('.subtable__mark.mark-leave-active')
-      if (!m) return null
-      return { opacity: getComputedStyle(m).opacity, transform: m.style.transform }
+      const ghost = document.querySelector('.subtable__mark.is-ghost')
+      if (!ghost) return null
+      const cs = getComputedStyle(ghost)
+      return { opacity: cs.opacity, transform: ghost.style.transform, transition: cs.transitionProperty }
     })()`)
     check(
       '收场是滑回合体，不是淡出消失',
-      sawLeaving && mergeInfo !== null && mergeInfo.opacity === '1' && mergeInfo.transform !== '',
+      sawLeaving &&
+        mergeInfo !== null &&
+        mergeInfo.opacity === '1' &&
+        mergeInfo.transition === 'transform' &&
+        /translateY/.test(mergeInfo.transform),
       JSON.stringify({ sawLeaving, mergeInfo }),
+    )
+
+    /*
+     * 合体结束后必须只剩一个。这是「同时出现两个三角」的直接回归判据：
+     * 上一版用 TransitionGroup，它的 FLIP 会把三角的内联 transform 清成 0，
+     * 合体的那个既不动也不触发 transitionend，只能等兜底超时 —— 那 700ms 里
+     * 屏幕上就是两个三角。
+     */
+    const settledOne = await waitFor(cdp, `document.querySelectorAll('.subtable__mark').length === 1`, 2000, 40)
+    const ghostLeft = await cdp.evaluate(`document.querySelectorAll('.subtable__mark.is-ghost').length`)
+    check(
+      '合体结束后只留一个三角（不残留幽灵）',
+      settledOne && ghostLeft === 0,
+      `还剩 ${ghostLeft} 个`,
     )
 
     /* ---------------- 底部告警分层：当前文件 vs 整个工程 ---------------- */
@@ -6872,6 +6900,82 @@ const scenarios = {
       await store(`return project.viewFile.segments.map((s) => s.text).join()`),
     )
 
+    /* ---------------- 侧栏：底栏只剩两个入口，收起走宽度过渡 ---------------- */
+
+    await goto(cdp, `${BASE}/?demo=1&view=editor&theme=light`)
+    await sleep(500)
+    const sideBase = await cdp.evaluate(`(() => {
+      const nav = document.querySelector('.sidebar')
+      const foot = document.querySelector('.sidebar__foot')
+      if (!nav || !foot) return null
+      const cs = getComputedStyle(nav)
+      return {
+        width: Math.round(nav.getBoundingClientRect().width),
+        transition: cs.transitionProperty,
+        buttons: [...foot.querySelectorAll('button')].map((b) => b.className),
+        // 底栏不该再有「点进关于页」的版本图标按钮
+        hasInfoBtn: [...foot.querySelectorAll('button')].some((b) =>
+          (b.getAttribute('title') ?? '').includes('关于'),
+        ),
+        // 打开就是一条游标 → 只该有一个三角（这里是「两个三角」的直接判据）
+        marks: document.querySelectorAll('.subtable__mark').length,
+        rows: document.querySelectorAll('.subtable__body [data-seg-id]').length,
+      }
+    })()`)
+    check(
+      '打开编辑器时只有一个三角（不残留多余的）',
+      sideBase !== null && sideBase.marks === 1 && sideBase.rows > 0,
+      JSON.stringify({ marks: sideBase?.marks, rows: sideBase?.rows }),
+    )
+    check(
+      '侧栏宽度有过渡（收起 / 展开是动画，不是硬切）',
+      sideBase !== null && sideBase.transition.includes('width'),
+      JSON.stringify(sideBase),
+    )
+    check(
+      '侧栏底栏只剩更新提示与开关，没有版本图标按钮',
+      sideBase !== null && sideBase.hasInfoBtn === false && sideBase.buttons.length <= 2,
+      JSON.stringify(sideBase),
+    )
+
+    const toggle = await cdp.evaluate(`(() => {
+      const b = document.querySelector('.sidebar__collapse')
+      if (!b) return null
+      const r = b.getBoundingClientRect()
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+    })()`)
+    if (toggle) {
+      await cdp.click(toggle.x, toggle.y)
+      // 过渡是 180ms：中途量一次应当夹在两端之间，量完再看终点
+      await sleep(60)
+      const mid = await cdp.evaluate(
+        `Math.round(document.querySelector('.sidebar').getBoundingClientRect().width)`,
+      )
+      await sleep(400)
+      const end = await cdp.evaluate(`(() => {
+        const nav = document.querySelector('.sidebar')
+        const label = document.querySelector('.sidebar__label')
+        const lr = label ? label.getBoundingClientRect() : null
+        return {
+          width: Math.round(nav.getBoundingClientRect().width),
+          labelWidth: lr ? Math.round(lr.width) : -1,
+          labelOpacity: label ? getComputedStyle(label).opacity : null,
+          titles: [...document.querySelectorAll('.sidebar__item')].every((b) => !!b.getAttribute('title')),
+        }
+      })()`)
+      check(
+        '收起过程是连续的（中途宽度夹在两端之间）',
+        sideBase !== null && mid > 52 && mid < sideBase.width,
+        `${sideBase.width} → ${mid} → ${end.width}`,
+      )
+      check(
+        '收起后只留图标：宽度 52、标签不可见、每个图标都有 title',
+        end.width === 52 && end.labelWidth === 0 && end.labelOpacity === '0' && end.titles === true,
+        JSON.stringify(end),
+      )
+      await shot(cdp, 'probe-sidebar-collapsed.png')
+    }
+
     await cdp.evaluate(`(() => {
       Object.keys(localStorage).filter((k) => k.startsWith('xbaos.settings')).forEach((k) => localStorage.removeItem(k))
       return true
@@ -7082,46 +7186,116 @@ const scenarios = {
     await run(`project.recognizing = false; logs.clear()`)
   },
 
-  'marks-dbg': async (cdp) => {
+  /*
+   * 只有零宽字符的字幕条。
+   *
+   * 用户看到的是「时间轴上凭空多出一个空心圆角框，点不到也删不掉」——
+   * 那不是渲染出错，而是一条 `text` 里只有 U+200B / U+200C / U+2060 的条目：
+   * `trim()` 不认这些字符，判空说「有内容」，屏幕上却一个字也没有。
+   * 这组断言守住两头：显示层要落到「（空）」，判空工具要把它算成空。
+   */
+  async 'invisible-text'(cdp) {
     await goto(cdp, `${BASE}/?demo=1&view=editor&theme=light`)
-    await sleep(1200)
-    const run = (body) =>
+    await sleep(600)
+
+    /*
+     * 从默认设置出发。这一场不碰提示开关，但探针所有场景共用同一个浏览器
+     * profile —— 上一轮跑留下的 `xbaos.settings` 会让「引导气泡在不在」这类
+     * 与本节无关的东西随机漂移。清一次再重新加载，场景才对得上自己的前提。
+     */
+    await cdp.evaluate(`(() => {
+      Object.keys(localStorage)
+        .filter((k) => k.startsWith('xbaos.settings'))
+        .forEach((k) => localStorage.removeItem(k))
+      return true
+    })()`)
+    await goto(cdp, `${BASE}/?demo=1&view=editor&theme=light`)
+    await sleep(400)
+
+    const store = (body) =>
       cdp.evaluate(`(() => {
         const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
         const project = pinia.get('project')
         const editor = pinia.get('editor')
         ${body}
       })()`)
-    const dump = () =>
-      cdp.evaluate(`(() => {
-        const body = document.querySelector('.subtable__body')
-        const layer = body ? body.querySelector('.subtable__marks') : null
-        const all = body ? [...body.querySelectorAll('.subtable__mark')] : []
-        return {
-          n: all.length,
-          layerTop: layer ? Math.round(layer.getBoundingClientRect().top) : null,
-          m: all.map((x) => ({
-            id: x.dataset.markId,
-            y: x.dataset.y,
-            cls: x.className,
-            inline: x.style.transform,
-            computed: getComputedStyle(x).transform,
-            trans: getComputedStyle(x).transitionProperty + ' ' + getComputedStyle(x).transitionDuration,
-            top: Math.round(x.getBoundingClientRect().top),
-          })),
-        }
-      })()`)
-    check('DBG 初始', false, JSON.stringify(await dump()))
-    const segs = await run(`const f = project.viewFile; return f ? f.segments.slice(0, 8).map((s) => [s.id, s.start, s.end]) : []`)
-    for (const [id, start, end] of segs) {
-      await run(`editor.setPlayhead(${(start + end) / 2}); return true`)
-      await sleep(260)
-      check(`DBG ${id}`, false, JSON.stringify(await dump()))
-    }
-    await sleep(1500)
-    check('DBG 稳定后', false, JSON.stringify(await dump()))
-  },
 
+    const ZW = 'String.fromCharCode(0x200b, 0x200c, 0x2060)'
+    const seeded = await store(`
+      const f = project.viewFile
+      if (!f) return 'no-file'
+      f.durationSec = 20
+      f.segments = [
+        { id: 'zw', start: 0, end: 4, text: ${ZW}, origin: ${ZW}, issues: [] },
+        { id: 'mix', start: 5, end: 9, text: ${ZW} + '看得见的文字', origin: '', issues: [] },
+        { id: 'plain', start: 10, end: 14, text: '正常一条', origin: '正常一条', issues: [] },
+      ]
+      editor.clearSelection()
+      editor.setPlayhead(1)
+      return f.segments.length
+    `)
+    check('注入含不可见字符的条目', seeded === 3, JSON.stringify(seeded))
+    await sleep(400)
+
+    const view = await cdp.evaluate(`(() => {
+      const pick = (id) => document.querySelector('.tl-clip[data-seg-id="' + id + '"]')
+      const txt = (id) => {
+        const el = pick(id)
+        return el ? el.querySelector('.tl-clip__text').textContent : null
+      }
+      const tableRow = (id) => {
+        const row = document.querySelector('.subtable .row[data-seg-id="' + id + '"]')
+        if (!row) return null
+        return row.querySelector('.row__text') ? row.querySelector('.row__text').textContent : null
+      }
+      return {
+        zw: txt('zw'),
+        zwTable: tableRow('zw'),
+        zwWidth: Math.round((pick('zw') ? pick('zw').getBoundingClientRect().width : 0)),
+        mix: txt('mix'),
+        plain: txt('plain'),
+      }
+    })()`)
+
+    check(
+      '只有零宽字符的字幕条显示「（空）」，不是空心边框',
+      view.zw === '（空）',
+      JSON.stringify(view),
+    )
+    check('表格里同一条也显示「（空）」', view.zwTable === '（空）', JSON.stringify(view))
+    check(
+      '零宽字符混着正文时只显示正文',
+      typeof view.mix === 'string' && view.mix === '看得见的文字',
+      JSON.stringify(view),
+    )
+    check('普通条目照常显示', view.plain === '正常一条', JSON.stringify(view))
+
+    /*
+     * 「点得到」比「看起来对」更要紧：用户真正的困境是「不知道这是哪一条、也点不准」。
+     * 它必须和普通字幕条一样能被指针选中，才能被删掉。
+     */
+    const zwBox = await cdp.evaluate(`(() => {
+      const el = document.querySelector('.tl-clip[data-seg-id="zw"]')
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+    })()`)
+    if (zwBox) {
+      await cdp.click(zwBox.x, zwBox.y)
+      await sleep(250)
+      const selected = await cdp.evaluate(`(() => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        return pinia.get('editor').selectedIds.slice()
+      })()`)
+      check(
+        '空条目仍能在时间轴上点选（点得到才删得掉）',
+        Array.isArray(selected) && selected.includes('zw'),
+        JSON.stringify(selected),
+      )
+    } else {
+      check('空条目在轨道上有实体元素', false, '找不到 .tl-clip[data-seg-id="zw"]')
+    }
+  },
   'editor-order': async (cdp) => {
     const run = (body) =>
       cdp.evaluate(`(() => {

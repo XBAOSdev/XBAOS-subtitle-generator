@@ -110,7 +110,7 @@ function close(): void {
           <span class="saveproj__ext">.xbsgp</span>
         </div>
         <p v-if="conflict" class="saveproj__note saveproj__note--err">
-          该目录已有同名项目，请换个名字
+          该目录已存在同名项目，请更换名称
         </p>
         <p v-else-if="replaced" class="saveproj__note">已替换不能用作文件名的字符</p>
         <p v-else class="saveproj__note">保存后项目名与磁盘文件名保持一致</p>

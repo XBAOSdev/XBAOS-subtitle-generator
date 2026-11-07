@@ -160,7 +160,7 @@ async function askRemove(file: AudioFile): Promise<void> {
   const count = file.segments.length
   if (count > 0) {
     const message = `「${file.name}」已经识别出 ${count} 条字幕，移除后这些字幕会一并丢失，且无法恢复。`
-    const detail = '磁盘上的原始文件不会被删除，只是从队列里移出。'
+    const detail = '磁盘上的原始文件不会被删除，仅从队列移出。'
     const bridge = window.xbaos
     if (bridge) {
       const ok = await bridge.dialog.confirm({
@@ -189,7 +189,7 @@ async function openProject(): Promise<void> {
 async function clearAll(): Promise<void> {
   const total = project.intake.length
   const detail =
-    '已经识别完成的内容在各自的项目里，不受影响。清空只丢掉还没开始识别的这些素材，原始文件不会被删除。'
+    '已识别的内容在各自项目中，不受影响。清空仅移除尚未开始识别的素材，原始文件不会被删除。'
 
   const bridge = window.xbaos
   if (bridge) {
@@ -220,7 +220,7 @@ async function clearAll(): Promise<void> {
 async function openRecorder(): Promise<void> {
   const bridge = window.xbaos
   if (!bridge?.record?.open) {
-    ui.notify('info', '浏览器预览模式下不可用', '录音需要以桌面应用方式运行')
+    ui.notify('info', '浏览器预览模式下不可用', '录音仅在桌面应用中可用')
     return
   }
   ui.setRecordActive(true)

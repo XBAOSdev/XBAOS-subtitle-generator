@@ -687,7 +687,7 @@ async function readClipboard(): Promise<void> {
     }
     if (blocks.length !== list.length) {
       parseError.value =
-        `只识别到 ${blocks.length} 个文件，但你选择了 ${list.length} 个。` +
+        `仅识别到 ${blocks.length} 个文件，所选为 ${list.length} 个。` +
         '请确认 AI 的回复原样保留了每一行「【文件 k/N】文件名」，再重新复制完整结果。'
       note(parseError.value, 'error')
       return
@@ -1190,15 +1190,15 @@ onBeforeUnmount(() => {
             <div class="tips__row">
               <Icon name="shield" :size="14" />
               <span>
-                字幕内容会发送到你选择的第三方 AI 服务，请注意隐私与版权。本软件不会代你发送，
-                也不接收、不存储这些内容。
+                字幕内容将发送至所选的第三方 AI 服务，请注意隐私与版权。本软件不代为发送，
+                也不接收、不存储相关内容。
               </span>
             </div>
             <div class="tips__row">
               <Icon name="alert" :size="14" />
               <span v-if="isTranslate">
-                AI 可能漏译或合并条目。因此条数一旦对不上，本软件会整份拒绝并请你重新生成，
-                不会勉强贴入。
+                AI 可能漏译或合并条目。条数与原文不符时，本软件将整份拒绝并要求重新生成，
+                不会部分写入。
               </span>
               <span v-else>AI 可能改错或漏改，取回后请核对变化明细再确认覆盖。</span>
             </div>

@@ -342,7 +342,7 @@ function applyDictReplace(): void {
     ui.notify(
       'info',
       '还没有替换词表',
-      '在「设置」里按「错词=正词」每行一条填好词表，这里就能一键批量纠正',
+      '在「设置」中按「错词=正词」逐行填写词表后，可在此批量纠正',
     )
     return
   }
@@ -400,7 +400,7 @@ function normalizePunctuation(): void {
 
   ui.notify(
     changed > 0 ? 'success' : 'info',
-    changed > 0 ? `已规范 ${changed} 条字幕的标点` : '标点已经是规范的',
+    changed > 0 ? `已规范 ${changed} 条字幕的标点` : '标点已规范',
     file.name,
   )
 }

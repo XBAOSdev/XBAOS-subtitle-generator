@@ -10,6 +10,7 @@
  */
 
 import type { SegmentIssue, SubtitleSegment } from '@/types'
+import { stripInvisible } from '@/utils/segmentOps'
 
 /** 校验用到的规格参数（来自设置页的「字幕规格」） */
 export interface ValidateSpec {
@@ -66,7 +67,9 @@ export function validateSegment(
   spec: ValidateSpec,
 ): SegmentIssue[] {
   const issues: SegmentIssue[] = []
-  const text = seg.text.trim()
+  // 先清掉零宽字符再判长度：只有 U+200B 的条目在界面上与空条目完全一样，
+  // 不这样处理它既不会报「这一条没有内容」，字数统计也会凭空多出几个
+  const text = stripInvisible(seg.text).trim()
 
   if (text === '') {
     issues.push({ level: 'warning', code: 'EMPTY', message: '这一条没有内容' })

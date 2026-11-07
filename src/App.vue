@@ -173,7 +173,7 @@ async function checkModelsOnStart(): Promise<void> {
     ui.notify(
       'warning',
       '还没有可用的识别模型',
-      '请先下载一个模型，或把 ggml 格式的 .bin 模型文件放进模型文件夹',
+      '请先下载模型，或将 ggml 格式的 .bin 模型文件放入模型文件夹',
     )
   } catch {
     /* 拿不到应用信息就静默跳过，不打扰用户 */
@@ -222,13 +222,13 @@ function onAssistResult(payload: AssistSubmitPayload): void {
     ui.notify(
       'info',
       '撤销按文件生效',
-      `这次改了 ${applied} 个文件。Ctrl+Z 只回退当前查看的那个，其余文件需切换过去分别撤销`,
+      `本次涉及 ${applied} 个文件。Ctrl+Z 仅回退当前文件，其余文件需切换后分别撤销`,
     )
   }
   if (applied === 0) {
     ui.notify(
       'error',
-      translating ? '译文没能写回' : 'AI 校对结果没能写回',
+      translating ? '译文写入失败' : 'AI 校对结果写入失败',
       // 翻译最常见的失败原因就是条数对不上 —— 直接说出来，别让用户猜
       translating
         ? '译文条数与字幕条数必须完全一致；目标字幕也可能已被清空或替换'
@@ -258,7 +258,7 @@ async function onRecordSaved(filePath: string): Promise<void> {
   if (added <= 0) return
   // 录完就是要立刻看它、标它、识别它 —— 落到导入页
   ui.navigate('home')
-  ui.notify('info', '录音已加入队列', '确认无误后就可以开始识别')
+  ui.notify('info', '录音已加入队列', '确认无误后即可开始识别')
 }
 
 /** 录音窗口关掉了 → 解除主界面的压暗 */

@@ -408,7 +408,7 @@ function reportPlayError(err: unknown): void {
   ui.notify(
     'error',
     '音频无法播放',
-    e?.name === 'NotSupportedError' ? '该格式不被当前环境支持' : (e?.message ?? String(err)),
+    e?.name === 'NotSupportedError' ? '当前环境不支持该格式' : (e?.message ?? String(err)),
   )
 }
 

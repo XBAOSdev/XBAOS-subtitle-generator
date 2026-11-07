@@ -11,7 +11,7 @@
  */
 import { ref } from 'vue'
 import { tidyMenu, type MenuItem, type MenuState } from '@/utils/menu'
-import { useProjectStore } from '@/stores/project'
+import { useProjectStore, type ProjectDraft } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
 import { confirmDestructive, confirmWithOption } from '@/utils/confirm'
 import { serializeSubtitle, applyLineEnding } from '@/utils/subtitle'
@@ -111,7 +111,8 @@ export function useSidebarMenu(options: SidebarMenuOptions) {
     const targets = project.drafts.filter((d) => !owners.has(d.id))
     const moveChildren: MenuItem[] = targets.map((d) => ({
       key: `move:${d.id}`,
-      label: d.name || '未命名项目',
+      // 与侧栏同一套命名：name 为空时按子项目名现算，不能在这里退回「未命名项目」
+      label: project.draftDisplayName(d),
       hint: `${project.draftItems(d).length} 项`,
     }))
     moveChildren.push({ key: 'move:@new', label: '新建项目' })
@@ -227,15 +228,15 @@ export function useSidebarMenu(options: SidebarMenuOptions) {
     if (key === 'draft:delete') {
       const names = ids
         .map((id) => project.drafts.find((d) => d.id === id))
-        .filter(Boolean)
-        .map((d) => (d as { name?: string }).name || '未命名项目')
+        .filter((d): d is ProjectDraft => d !== undefined)
+        .map((d) => project.draftDisplayName(d))
       const res = await confirmWithOption({
         title: '删除项目',
         message:
           ids.length === 1
-            ? `「${names[0]}」的项目文件会从磁盘上删除，找不回来。`
-            : `这 ${ids.length} 个项目的文件会从磁盘上删除，找不回来。`,
-        detail: '勾上下面这一项就只把它从侧栏移出，磁盘上的 .xbsgp 会留着。',
+            ? `「${names[0]}」的项目文件将从磁盘删除，且无法恢复。`
+            : `这 ${ids.length} 个项目的文件将从磁盘删除，且无法恢复。`,
+        detail: '勾选此项则仅从侧栏移出，磁盘上的 .xbsgp 文件保留。',
         confirmLabel: '删除',
         checkboxLabel: '只从列表移除（保留磁盘文件）',
       })
@@ -296,9 +297,9 @@ export function useSidebarMenu(options: SidebarMenuOptions) {
         title: '从项目中移除',
         message:
           ids.length === 1
-            ? `「${f?.name ?? ''}」的 ${f?.segments.length ?? 0} 条字幕会一起没掉。`
-            : `这 ${ids.length} 个子项目和它们的字幕会一起没掉。`,
-        detail: '源文件还在磁盘上，只是不再属于这个项目。',
+            ? `「${f?.name ?? ''}」的 ${f?.segments.length ?? 0} 条字幕将一并删除。`
+            : `这 ${ids.length} 个子项目及其字幕将一并删除。`,
+        detail: '源文件仍在磁盘上，但不再属于该项目。',
         confirmLabel: '移除',
       })
       if (ok) project.removeItems(ids)
@@ -313,7 +314,7 @@ export function useSidebarMenu(options: SidebarMenuOptions) {
   async function saveSubtitles(ids: string[]): Promise<void> {
     const bridge = window.xbaos
     if (!bridge) {
-      ui.notify('warning', '浏览器预览无法保存字幕', '请在桌面应用里使用')
+      ui.notify('warning', '浏览器预览无法保存字幕', '请在桌面应用中使用')
       return
     }
     let done = 0

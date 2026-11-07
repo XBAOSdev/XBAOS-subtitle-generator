@@ -42,8 +42,8 @@ const TABS: WordTab[] = [
     id: 'common',
     label: '常用词库',
     intro:
-      '每次断行都会用到，与勾选了哪些领域词库无关。按语类分组，共 ' +
-      `${COMMON_WORDS.length} 词。这些词只参与切点判断，不会发送给识别引擎。`,
+      '断行时始终生效，与勾选的领域词库无关。按语类分组，共 ' +
+      `${COMMON_WORDS.length} 词。仅参与切点判断，不会发送给识别引擎。`,
     count: COMMON_WORDS.length,
     sections: COMMON_WORD_GROUPS.map((g) => ({
       label: g.label,
@@ -162,7 +162,7 @@ const matchedCount = computed(() =>
     <template #footer>
       <div class="wb__foot">
         <span class="wb__foot-note">
-          内置内容随版本提供，不可修改。自己的词请加到导入页识别设置里的「领域词」。
+          内置词表随版本提供，不可修改。自定义词请添加到导入页识别设置中的「领域词」。
         </span>
         <button class="btn" type="button" @click="emit('close')">关闭</button>
       </div>

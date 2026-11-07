@@ -144,7 +144,7 @@ async function preview(columnId: string, local: number): Promise<void> {
   const segments = column.segments.filter((seg) => seg.speaker === local)
   const range = pickSampleRange(segments, column.durationSec ?? 0)
   if (!range) {
-    ui.notify('info', '没有可试听的片段', '这一位还没有字幕')
+    ui.notify('info', '没有可试听的片段', '该讲话人没有可用字幕')
     return
   }
 
@@ -168,7 +168,7 @@ async function preview(columnId: string, local: number): Promise<void> {
   await project.ensureMedia(audioId)
   const media = project.mediaOf(audioId)
   if (!media.blobUrl) {
-    ui.notify('warning', '无法试听', '这个文件读不到音频')
+    ui.notify('warning', '无法试听', '该文件无法读取音频')
     return
   }
   const el = previewEl.value
@@ -225,7 +225,7 @@ onBeforeUnmount(stopPreview)
 <template>
   <ModalDialog
     title="讲话人对应关系"
-    subtitle="同一个人的讲话人在不同文件里可能编号不同。把它们拖到同一行，就是同一个人。"
+    subtitle="同一个人在不同文件中的讲话人编号可能不同。拖到同一行即视为同一个人。"
     width="min(880px, 92vw)"
     :mask-closable="false"
     @close="cancel"
@@ -260,7 +260,7 @@ onBeforeUnmount(stopPreview)
                   :class="{ 'is-playing': previewingKey === `${col.id}#${cellAt(col.id, row)!.local}` }"
                   type="button"
                   draggable="true"
-                  :title="`点击试听这一位（至少 3 秒）`"
+                  :title="`试听该讲话人（至少 3 秒）`"
                   @click="preview(col.id, cellAt(col.id, row)!.local)"
                   @dragstart="onDragStart($event, col.id, cellAt(col.id, row)!.local)"
                   @dragend="onDragEnd"
@@ -286,7 +286,7 @@ onBeforeUnmount(stopPreview)
       </div>
 
       <p class="spkmap__tip">
-        拖动标签可以换行；拖到最后两行是给它单独开一位。下面两行也可以当暂存区用。
+        拖动标签可改变归属；拖至最后两行可单独成行，该两行亦可作暂存区。
       </p>
     </div>
 

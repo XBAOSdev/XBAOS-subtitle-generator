@@ -143,7 +143,7 @@ function close(): void {
             />
             <span class="field__unit">秒</span>
           </span>
-          <span class="field__hint">填充后留一点缝，防止播放器在边界处闪烁</span>
+          <span class="field__hint">填充后保留少量间隙，避免播放器在边界处闪烁</span>
         </label>
 
         <div class="field">
@@ -165,7 +165,7 @@ function close(): void {
             <span class="field__unit">秒</span>
           </span>
           <span class="field__hint">
-            避免前一条语音很短、却被拉长到接近阈值的情况
+            避免语音较短时被拉长到接近阈值
           </span>
         </div>
       </div>

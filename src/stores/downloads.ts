@@ -69,7 +69,7 @@ export const useDownloadsStore = defineStore('downloads', () => {
         if (ev.already) {
           ui.notify('info', `${name} 已存在`, '无需重复下载')
         } else {
-          ui.notify('success', `${name} 已下载`, '点击「切换使用」开始用它识别')
+          ui.notify('success', `${name} 已下载`, '点击「切换使用」即可启用')
           // 下载完往往人已经不在软件前面了，闪一下任务栏把人叫回来
           ui.flashTaskBar()
         }

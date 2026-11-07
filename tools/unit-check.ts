@@ -1829,6 +1829,18 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     /watch\(aiReviewTipEnabled[\s\S]{0,120}?aiReviewTipDismissed\.value = false/.test(settingsSrc),
     '否则打开开关也看不到气泡',
   )
+  /*
+   * 「不再提示」只有一条实现，且必须同时关掉设置里的总开关。
+   *
+   * 曾经只写 `aiReviewTipDismissed`：气泡确实不再出现，但设置页那个开关还亮着 ——
+   * 用户去设置里看到的与自己刚点的按钮相反，只会判定「这个按钮没生效」。
+   */
+  const editorSrc = readFileSync(new URL('../src/views/EditorView.vue', import.meta.url), 'utf8')
+  check(
+    '「不再提示」同时关掉设置里的总开关',
+    /function muteAiTip\(\)[\s\S]{0,320}?aiReviewTipEnabled = false/.test(editorSrc),
+    '只写 dismissed，设置页的开关会与用户刚做的选择相反',
+  )
   check('档位越界值被夹回合法范围', normalizeStrength(-3) === 0 && normalizeStrength(99) === 3)
   check('档位 NaN 落回平衡档', normalizeStrength(Number.NaN) === 2)
   check(
@@ -1839,6 +1851,86 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '档位下标与数组顺序一致（滑块靠它取档，错位就会「选严格实际是宽松」）',
     SCRIPT_STRENGTH_OPTIONS.every((o, i) => o.value === i) &&
       strengthOption(3).label === '宽松',
+  )
+}
+
+/* ---- 只有零宽字符的「空条目」 ---- */
+
+/*
+ * 一条 `text` 里只有 U+200B / U+200C / U+2060 的字幕，`trim()` 判它「有内容」，
+ * 屏幕上却一个字也画不出来 —— 时间轴上就是一个悬空的空心圆角框，
+ * 用户既认不出是哪条，也没法在表格里定位去删。判空必须走「有没有看得见的字符」。
+ */
+{
+  const opsSrc = readFileSync(new URL('../src/utils/segmentOps.ts', import.meta.url), 'utf8')
+  check(
+    '判空按「有没有看得见的字符」，不是 trim()',
+    /export function hasText\(seg[\s\S]{0,120}?hasVisibleText\(seg\.text\)/.test(opsSrc),
+    'trim() 不认零宽字符，会把它当成有内容',
+  )
+  const invisibleTable = /INVISIBLE_CHARS = (\/\[[^\]]*\]\/g)/.exec(opsSrc)?.[1] ?? ''
+  check(
+    '不可见字符表覆盖零宽空格 / 连接符 / word-joiner / 软连字符',
+    ['\\u00ad', '\\u200b-\\u200f', '\\u2060', '\\ufeff'].every((c) =>
+      invisibleTable.includes(c),
+    ),
+    invisibleTable || '没找到 INVISIBLE_CHARS',
+  )
+
+  const timelineSrc = readFileSync(
+    new URL('../src/components/TimelineTrack.vue', import.meta.url),
+    'utf8',
+  )
+  check(
+    '时间轴字幕条显示前清掉不可见字符',
+    /function clipText[\s\S]{0,260}?stripInvisible\(seg\.text\)/.test(timelineSrc),
+    '否则字幕条上只剩一个空心边框',
+  )
+  check(
+    '字幕条的 title 也不直接吐原文',
+    !/\$\{bar\.seg\.text \|\| '（空）'\}/.test(timelineSrc),
+    '悬停提示里不能是一串看不见的字符',
+  )
+
+  const tableSrc = readFileSync(
+    new URL('../src/components/SubtitleTable.vue', import.meta.url),
+    'utf8',
+  )
+  check(
+    '表格单元格不再用 `text || （空）` 判空',
+    !/seg\.text \|\| '（空）'/.test(tableSrc) && /displayText\(seg\.text\)/.test(tableSrc),
+    '同一条在表格里也不能显示成空白行',
+  )
+
+  const parseSrc = readFileSync(
+    new URL('../src/utils/subtitleParse.ts', import.meta.url),
+    'utf8',
+  )
+  check(
+    '导入字幕时按可见字符判空（零宽条目直接丢弃）',
+    /filter\(\(s\) => hasVisibleText\(s\.text\)/.test(parseSrc),
+    '导入的 SRT 里带零宽字符时不该变成空条目',
+  )
+
+  const projectSrc = readFileSync(new URL('../src/stores/project.ts', import.meta.url), 'utf8')
+  check(
+    '识别结果入库前清掉不可见字符',
+    /text: stripInvisible\(msg\.text\)\.trim\(\)/.test(projectSrc),
+    '源头清掉，后面各处就不必各自兜底',
+  )
+
+  const validateSrc = readFileSync(new URL('../src/utils/validate.ts', import.meta.url), 'utf8')
+  check(
+    '校验判空按可见字符（否则空条不报「这一条没有内容」）',
+    /const text = stripInvisible\(seg\.text\)\.trim\(\)/.test(validateSrc),
+    '零宽条目会绕过 EMPTY 规则',
+  )
+
+  const exportSrc = readFileSync(new URL('../src/utils/subtitle.ts', import.meta.url), 'utf8')
+  check(
+    '导出文本前清掉不可见字符',
+    /const src = stripInvisible\(seg\.text\)\.trim\(\)/.test(exportSrc),
+    '否则写进文件的文本里带着看不见的字符',
   )
 }
 
@@ -5317,7 +5409,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   }
   check(
     '删除项目先二次确认，确认里写着会删磁盘文件',
-    /confirmWithOption\(\{[\s\S]{0,400}项目文件会从磁盘上删除[\s\S]{0,400}checkboxLabel: '只从列表移除/
+    /confirmWithOption\(\{[\s\S]{0,400}项目文件将从磁盘删除[\s\S]{0,400}checkboxLabel: '只从列表移除/
       .test(sideMenuSrc) &&
       /res\.checked[\s\S]{0,120}closeDraft[\s\S]{0,80}else await project\.deleteDrafts/.test(
         sideMenuSrc,
@@ -5346,6 +5438,41 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
       // 一拖就把看不见的顺序也改了
       treeSrc.includes("query.value.trim() === ''"),
     '搜索时还能拖拽，一拖就把看不见的顺序也改了',
+  )
+
+  /* ---------------------------------------------- P7b：项目显示名 / 侧栏底栏 */
+  const sidebarSrc = readSrc('src/components/AppSidebar.vue')
+
+  check(
+    '项目显示名统一走 draftDisplayName（菜单里不许自己判空）',
+    // name 为空是常态：识别落盘建的项目没有名字，侧栏按子项目名现算。
+    // 菜单自己写 `d.name || '未命名项目'`，就会出现「侧栏有名、菜单里没名」。
+    sideMenuSrc.includes('project.draftDisplayName(') &&
+      !sideMenuSrc.includes('d.name ||') &&
+      /function draftDisplayName\(d: ProjectDraft\): string[\s\S]{0,400}defaultProjectName/.test(
+        projectSrc,
+      ),
+    '同一份数据两套命名，用户会以为「移到」的目标是另一个项目',
+  )
+  check(
+    '侧栏底栏只剩更新提示与开关（不再有版本图标按钮）',
+    !sidebarSrc.includes('sidebar__meta-icon') &&
+      !/icon: 'info', label: '关于'/.test(sidebarSrc) &&
+      /class="sidebar__update"/.test(sidebarSrc) &&
+      /class="sidebar__collapse"/.test(sidebarSrc),
+    '底栏挤了三个入口，折叠开关反而认不出来',
+  )
+  check(
+    '侧栏收起 / 展开走宽度过渡，不用 display 瞬时切换',
+    /\.sidebar\s*\{[^}]*transition:\s*width var\(--dur-base\)/.test(sidebarSrc) &&
+      /\.sidebar\.is-collapsed \.sidebar__label\s*\{[^}]*max-width:\s*0/.test(sidebarSrc) &&
+      !/\.sidebar\.is-collapsed \.sidebar__label[^}]*display:\s*none/.test(sidebarSrc),
+    'display: none 是瞬时的，宽度动画走到一半文字会凭空消失',
+  )
+  check(
+    '文件树不再用「共 N 个子项目，按顺序首尾相接」占一行',
+    !treeSrc.includes('首尾相接') && treeSrc.includes('匹配 {{ matchedItems }}'),
+    '这行常驻文案只解释了一次性的事实，占的却是每次都要看的位置',
   )
   check(
     '「保存项目」只存当前项目，「保存全部项目」走小三角',
@@ -5499,7 +5626,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
   check(
     '保存对话框实时校验同目录重名',
-    saveDlg.includes('bridge.fs.exists(path)') && saveDlg.includes('该目录已有同名项目'),
+    saveDlg.includes('bridge.fs.exists(path)') && saveDlg.includes('该目录已存在同名项目'),
   )
   check(
     '写项目是原子写（临时文件 + 改名）',

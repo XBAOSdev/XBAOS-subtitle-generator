@@ -84,6 +84,7 @@ async function onUpdateClick(): Promise<void> {
           :class="{ 'is-active': ui.currentView === item.key }"
           :aria-current="ui.currentView === item.key ? 'page' : undefined"
           :title="ui.sidebarCollapsed ? item.label : undefined"
+          :data-badge="item.badge ? '1' : undefined"
           @click="go(item)"
         >
           <Icon :name="item.icon" :size="16" />
@@ -126,18 +127,8 @@ async function onUpdateClick(): Promise<void> {
           <Icon :name="ui.sidebarCollapsed ? 'chevron-right' : 'chevron-left'" :size="13" />
         </button>
 
-        <!-- 收起后版本号没地方放，换成一个图标；点它去「关于」看完整版本与许可 -->
-        <span v-if="ui.sidebarCollapsed" class="sidebar__meta-icon">
-          <button
-            class="sidebar__collapse"
-            type="button"
-            :title="`v${appVersion} · 前往关于页`"
-            @click="go({ key: 'about', icon: 'info', label: '关于' })"
-          >
-            <Icon name="info" :size="13" />
-          </button>
-        </span>
-        <span v-else class="sidebar__version">v{{ appVersion }}</span>
+        <!-- 版本号：收起时淡出，位置让给开关本身 -->
+        <span class="sidebar__version">v{{ appVersion }}</span>
       </div>
     </div>
   </nav>
@@ -151,6 +142,13 @@ async function onUpdateClick(): Promise<void> {
   flex-direction: column;
   background: var(--color-bg-surface);
   border-right: 1px solid var(--color-border);
+  /*
+   * 收起 / 展开走宽度过渡，配合下面各元素一起收 —— 单改宽度会看到文字先溢出、
+   * 再被裁掉的错位感。`overflow: hidden` 是收窄过程中唯一能挡住文字的措施
+   * （窄到 52px 时里面的 208px 宽的行本来就在外面）。
+   */
+  overflow: hidden;
+  transition: width var(--dur-base) var(--ease-out);
 }
 
 .sidebar__list {
@@ -162,9 +160,12 @@ async function onUpdateClick(): Promise<void> {
 }
 
 .sidebar__item {
+  position: relative;
   width: 100%;
   height: 36px;
   display: flex;
+  /* 单个图标时靠它居中；展开时标签 flex: 1 撑满，这条不起作用 */
+  justify-content: center;
   align-items: center;
   gap: var(--space-3);
   padding: 0 var(--space-3);
@@ -174,7 +175,9 @@ async function onUpdateClick(): Promise<void> {
   font-weight: var(--weight-medium);
   text-align: left;
   transition: background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out),
+    padding var(--dur-base) var(--ease-out),
+    gap var(--dur-base) var(--ease-out);
 }
 
 .sidebar__item:hover {
@@ -190,9 +193,14 @@ async function onUpdateClick(): Promise<void> {
 .sidebar__label {
   flex: 1;
   min-width: 0;
+  /* 收起时靠 max-width 归零收掉（width 从 auto 到 0 不可过渡），同时淡出 */
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition:
+    max-width var(--dur-base) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out);
 }
 
 .sidebar__badge {
@@ -207,6 +215,33 @@ async function onUpdateClick(): Promise<void> {
   color: var(--color-text-tertiary);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+  transition:
+    width var(--dur-base) var(--ease-out),
+    padding var(--dur-base) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out);
+}
+
+/*
+ * 收起态用一个 6px 圆点代替数字角标：位置放不下数字，但「这儿有东西」要留记号。
+ * 单独用伪元素而不是改角标本身 —— 从「行内胶囊」跳到「图标右上角」不是位置过渡
+ * 能表达的，换一个元素纯淡入反而干净。
+ */
+.sidebar__item[data-badge]::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+  pointer-events: none;
+}
+
+.sidebar.is-collapsed .sidebar__item[data-badge]::after {
+  opacity: 1;
 }
 
 .sidebar__item.is-active .sidebar__badge {
@@ -218,6 +253,7 @@ async function onUpdateClick(): Promise<void> {
   flex: none;
   padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--color-border-subtle);
+  transition: padding var(--dur-base) var(--ease-out);
 }
 
 /**
@@ -231,6 +267,7 @@ async function onUpdateClick(): Promise<void> {
   width: 100%;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: var(--space-2);
   margin-bottom: var(--space-3);
   padding: 6px var(--space-2);
@@ -242,7 +279,8 @@ async function onUpdateClick(): Promise<void> {
   font-weight: var(--weight-medium);
   text-align: left;
   transition: background var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out);
+    border-color var(--dur-fast) var(--ease-out),
+    padding var(--dur-base) var(--ease-out);
 }
 
 .sidebar__update:hover {
@@ -265,9 +303,22 @@ async function onUpdateClick(): Promise<void> {
 
 .sidebar__update-text {
   min-width: 0;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition:
+    max-width var(--dur-base) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out);
+}
+
+.sidebar__version {
+  white-space: nowrap;
+  overflow: hidden;
+  max-width: 140px;
+  transition:
+    max-width var(--dur-base) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out);
 }
 
 .sidebar__meta {
@@ -298,43 +349,43 @@ async function onUpdateClick(): Promise<void> {
 
 /* ---- 收起态：只留图标 ---- */
 /*
- * 宽度压到只够放一个图标 + 两侧留白。标签、角标数字、版本号文字一起收掉，
+ * 宽度压到只够放一个图标 + 两侧留白。标签、角标数字、版本号一起收掉，
  * 这一块就只剩「一列能点的图标」—— 要认是哪一个，靠 hover 的 title。
- * 角标收成一个小圆点挂在图标右上角：数字放不下了，但「这儿有东西」得留个记号。
+ *
+ * 全部用 max-width / opacity / padding 过渡，不用 `display: none` ——
+ * 后者是瞬时切换，宽度动画走到一半时会看到文字先凭空消失。
  */
 .sidebar.is-collapsed {
   width: 52px;
 }
 
 .sidebar.is-collapsed .sidebar__item {
-  justify-content: center;
   padding: 0;
   gap: 0;
 }
 
-.sidebar.is-collapsed .sidebar__label,
-.sidebar.is-collapsed .sidebar__update-text,
-.sidebar.is-collapsed .sidebar__version {
-  display: none;
+.sidebar.is-collapsed .sidebar__label {
+  max-width: 0;
+  opacity: 0;
 }
 
 .sidebar.is-collapsed .sidebar__badge {
-  position: absolute;
-  top: 4px;
-  right: 6px;
   min-width: 0;
-  width: 6px;
-  height: 6px;
+  width: 0;
+  height: 0;
   padding: 0;
+  opacity: 0;
+  overflow: hidden;
   font-size: 0;
 }
 
-.sidebar.is-collapsed .sidebar__item {
-  position: relative;
+.sidebar.is-collapsed .sidebar__update-text,
+.sidebar.is-collapsed .sidebar__version {
+  max-width: 0;
+  opacity: 0;
 }
 
 .sidebar.is-collapsed .sidebar__update {
-  justify-content: center;
   padding: 6px 0;
 }
 
@@ -343,7 +394,6 @@ async function onUpdateClick(): Promise<void> {
 }
 
 .sidebar.is-collapsed .sidebar__meta {
-  flex-direction: column;
   gap: var(--space-1);
 }
 </style>
