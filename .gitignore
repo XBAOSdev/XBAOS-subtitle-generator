@@ -10,6 +10,14 @@ dist-*/
 dist-electron/
 release/
 out/
+# electron-builder 用 --dir 或临时目录解开的那一坨 Chromium 资源。
+# 目录名从来不由代码决定（命令行 --config.directories.output 想叫什么就叫什么），
+# 所以不能只拦 release/：release-build/、win-unpacked/、win-unpacked.tmp/
+# 都出现过。里面 LICENSES.chromium.html 单个 20MB，GitHub 会把它算成 HTML，
+# 足以把语言统计顶到 80% 以上；locales/*.pak 另有几十 MB。
+release-build/
+*-unpacked/
+*-unpacked.*/
 
 # ===== 缓存 =====
 .vite/

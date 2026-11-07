@@ -5981,5 +5981,24 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
 }
 
+// ---------------------------------------------------------------------------
+// 仓库卫生：拦不住构建产物，代价是仓库被一次性撑大上百 MB
+// ---------------------------------------------------------------------------
+{
+  const ignore = readFileSync(new URL('../.gitignore', import.meta.url), 'utf8')
+  check(
+    '.gitignore 拦得住 electron-builder 的解包目录',
+    /^release-build\/$/m.test(ignore) &&
+      /^\*-unpacked\/$/m.test(ignore) &&
+      /^\*-unpacked\.\*\/$/m.test(ignore),
+    '输出目录名由命令行决定，只拦 release/ 不够：release-build/win-unpacked.tmp 曾整包进仓库（92.8MB，其中 LICENSES.chromium.html 单个 20MB，把 GitHub 语言统计顶成 84.6% HTML）',
+  )
+  check(
+    '.gitignore 仍放行说话人分离模型',
+    /^!resources\/diarization\/\*\.onnx$/m.test(ignore),
+    '拦 *.onnx 的那条会连随包分发的两个模型一起挡掉，打包机就找不到真实文件',
+  )
+}
+
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 process.exit(fail > 0 ? 1 : 0)
