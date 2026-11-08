@@ -4111,7 +4111,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const about = readText('src/views/AboutView.vue')
   check(
     '关于页的隐私说明列出了两处联网（检查更新 + 下载模型）',
-    about.includes('检查更新') && about.includes('下载可选模型'),
+    about.includes('检查更新') && about.includes('下载模型') && about.includes('两处'),
     '缺一处就会退回到「只有在下载模型时才联网」那种不准确的表述',
   )
   check(
@@ -4943,6 +4943,37 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '--font-sans 以内嵌字体打头',
     /--font-sans:\s*"Noto Sans SC"/.test(tokensCss),
     '排在系统字体后面就白内嵌了：装了思源黑体的机器会先用系统那份',
+  )
+
+  /*
+   * 界面只有一套字体（2026-11-08 定）。
+   *
+   * 此前 `.mono` 走 Cascadia / Consolas：许可表右列与左侧中文并排时，
+   * 一眼能看出两种字形。等宽本来只是对齐手段，而内嵌子集含全部 ASCII、
+   * 数字 advance 恒为 521 —— 天然就对齐，不必为此引入第二套字体。
+   */
+  check(
+    '--font-mono 指向 --font-sans（不再落到系统等宽字体）',
+    /--font-mono:\s*var\(--font-sans\)/.test(tokensCss),
+    '回退到 Cascadia / Consolas 会让同一屏出现两种字形',
+  )
+
+  const fontOffenders: string[] = []
+  for (const rel of readdirSync(new URL('../src/', import.meta.url), {
+    recursive: true,
+  }) as string[]) {
+    if (!/\.(css|vue)$/.test(rel)) continue
+    const text = readFileSync(new URL(`../src/${rel}`, import.meta.url), 'utf8')
+    for (const m of text.matchAll(/font-family:[^;\n}]*/g)) {
+      if (/(Cascadia|Consolas|Courier|ui-monospace|monospace)/.test(m[0])) {
+        fontOffenders.push(`${rel.split(/[\\/]/).pop()}: ${m[0].trim().slice(0, 64)}`)
+      }
+    }
+  }
+  check(
+    '没有任何一处 font-family 落到系统等宽字体',
+    fontOffenders.length === 0,
+    fontOffenders.join(' | ') || '界面字体唯一',
   )
 }
 

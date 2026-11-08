@@ -290,8 +290,8 @@ async function changeModelsDir(): Promise<void> {
     title: '更改模型存储位置',
     message: `要把模型存储位置改成这个文件夹吗？\n\n${dir}`,
     detail:
-      '更改后软件只从这个新文件夹里查找模型。原来位置已经下载好的模型不会自动搬过去 —— ' +
-      '请尽快把它们手动复制到新文件夹，否则界面上会显示没有可用模型，需要重新下载。',
+      '软件将只从新文件夹查找模型。原有模型不会自动迁移，请手动复制过去；' +
+      '否则界面将显示无可用模型，需重新下载。',
     buttons: ['取消', '确认更改'],
     defaultId: 0,
     cancelId: 0,
@@ -914,7 +914,7 @@ function reset(): void {
               </div>
               <div class="block__body">
                 <p class="field__hint">
-                  识别出错或引擎异常退出时导出，发给开发者即可排查。<b>不含音频内容与字幕文本</b>。
+                  识别出错或引擎异常退出时导出，供开发者排查。<b>不含音频与字幕文本</b>。
                 </p>
                 <div class="diag">
                   <button class="btn" type="button" :disabled="diagBusy" @click="exportDiag">
@@ -1329,7 +1329,7 @@ function reset(): void {
   border-radius: 3px;
   background: var(--color-bg-inset);
   color: var(--color-text-primary);
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: var(--font-mono);
 }
 
 /* 与导入页 .seg 同一套容器观感：inset 底 + 细边，选中标记交给滑动指示块 */

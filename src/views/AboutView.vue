@@ -236,10 +236,9 @@ const LIBS = [
             </ul>
 
             <p class="licenses__note">
-              本软件不含任何需要付费授权的组件，只内置可自由分发的开源音频解码实现
+              不含需付费授权的组件，只内置可自由分发的开源解码实现
               （WAV、AIFF、MP3、FLAC、OGG Vorbis、Opus）。
-              AAC、WMA、AMR、DTS 等格式的部分专利仍在保护期内，所以没有内置它们的解码器，
-              需要先转换为上列任一格式。
+              AAC、WMA、AMR、DTS 的部分专利仍在保护期内，未内置解码器，请先转换为上列任一格式。
             </p>
 
             <button class="btn btn--sm licenses__open" type="button" @click="openLicenses">
@@ -256,14 +255,14 @@ const LIBS = [
           </div>
           <div class="block__body">
             <ul class="privacy">
-              <li>音频文件的解码、识别、编辑与导出全部在本机完成，不会上传到任何服务器。</li>
+              <li>解码、识别、编辑、导出均在本机完成，音频与字幕不上传。</li>
               <li>
-                当前版本只有两处会联网：<strong>检查更新</strong>（向
-                <span class="mono">{{ branding.updateSiteLabel }}</span> 读取版本清单，可在设置中关闭）与
-                <strong>下载可选模型</strong>（访问模型仓库）。不下载模型时，关掉自动检查即可完全离线使用。
+                联网仅两处：<strong>检查更新</strong>（读取
+                <span class="mono">{{ branding.updateSiteLabel }}</span> 的版本清单，可在设置中关闭）与
+                <strong>下载模型</strong>（访问模型仓库）。关闭自动检查、模型就位后，可完全离线使用。
               </li>
-              <li>软件不收集任何使用数据，不包含统计与埋点组件。</li>
-              <li>AI 校对与 AI 翻译经系统剪贴板中继，由用户自行粘贴至所选在线服务，本软件不接收、不存储相关内容。</li>
+              <li>不收集使用数据，不含统计与埋点组件。</li>
+              <li>AI 校对与翻译经剪贴板中继：由用户粘贴至所选在线服务，本软件不接收、不存储。</li>
             </ul>
           </div>
         </section>

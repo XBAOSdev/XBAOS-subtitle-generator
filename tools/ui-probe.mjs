@@ -5255,7 +5255,7 @@ const scenarios = {
       })()`)
       check(
         '关于页的隐私说明补上了「检查更新」这处联网',
-        about.includes('检查更新') && about.includes('下载可选模型'),
+        about.includes('检查更新') && about.includes('下载模型') && about.includes('两处'),
         about.slice(0, 120),
       )
 

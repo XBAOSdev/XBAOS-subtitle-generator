@@ -189,7 +189,7 @@ async function openProject(): Promise<void> {
 async function clearAll(): Promise<void> {
   const total = project.intake.length
   const detail =
-    '已识别的内容在各自项目中，不受影响。清空仅移除尚未开始识别的素材，原始文件不会被删除。'
+    '只移除尚未识别的素材。已识别的内容留在各自项目中，原始文件不删除。'
 
   const bridge = window.xbaos
   if (bridge) {

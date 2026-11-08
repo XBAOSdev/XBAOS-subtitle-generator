@@ -312,7 +312,7 @@ async function openAiReview(): Promise<void> {
     const ok = await confirmDestructive({
       title: '继续校对会清除已有译文',
       message: `这些字幕已有译文（${langs.join(' / ')}）。AI 校对按校对结果重建字幕，译文不会保留。`,
-      detail: '校对结果里不含译文。若仍需要译文，请在校对完成后再翻译一次。本次改动可用 Ctrl+Z 撤回。',
+      detail: '校对结果不含译文，如需译文请在校对后再翻译一次。可用 Ctrl+Z 撤回。',
       confirmLabel: '仍然校对',
     })
     if (!ok) return
@@ -390,8 +390,8 @@ async function openAiTranslate(): Promise<void> {
   if (langs.length > 0) {
     const ok = await confirmDestructive({
       title: '这些字幕已有译文',
-      message: `继续翻译时，选择同一种语言会整体替换那份译文；选择其他语言则与现有译文并存。`,
-      detail: `现有译文：${langs.join(' / ')}。无论哪种情况，本次改动都可用 Ctrl+Z 撤回。`,
+      message: `选同一种语言会整体替换该译文；选其他语言则与现有译文并存。`,
+      detail: `现有译文：${langs.join(' / ')}。两种情况下本次改动都可用 Ctrl+Z 撤回。`,
       confirmLabel: '继续翻译',
     })
     if (!ok) return

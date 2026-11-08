@@ -58,8 +58,8 @@ const TABS: WordTab[] = [
       id: lexicon.id,
       label: lexicon.name,
       intro:
-        `${lexicon.note}。勾选这个词库后：核心词恒定注入提示词，` +
-        `扩展词在深度模式下按本段音频实际出现的词精选后注入，断句专用词只参与断行。`,
+        `${lexicon.note}。勾选后：核心词始终注入提示词；` +
+        `扩展词仅在深度模式下按本段出现的词精选注入；断句词只参与断行。`,
       count: lexicon.core.length + lexicon.extended.length + wrapWords.length,
       sections: [
         { label: '核心词', note: '进提示词', words: lexicon.core },
@@ -162,7 +162,7 @@ const matchedCount = computed(() =>
     <template #footer>
       <div class="wb__foot">
         <span class="wb__foot-note">
-          内置词表随版本提供，不可修改。自定义词请添加到导入页识别设置中的「领域词」。
+          内置词表不可修改。自定义词请添加到导入页的「领域词」。
         </span>
         <button class="btn" type="button" @click="emit('close')">关闭</button>
       </div>

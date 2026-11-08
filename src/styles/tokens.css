@@ -5,15 +5,17 @@
 
 :root {
   /*
-   * 字体族：**内嵌的 Noto Sans SC 子集打头**（与思源黑体同源，见 `fonts.css`），
-   * 子集外的生僻字逐字回退到系统里可能存在的思源黑体 / 苹方 / 雅黑。
-   * 把内嵌那条放在最前，才不会被「用户刚好装了思源黑体」反过来盖掉 ——
-   * 同一台机器上界面字宽必须可复现。
+   * 字体族：内嵌的 Noto Sans SC 子集打头（与思源黑体同源，见 `fonts.css`），
+   * 子集外的生僻字逐字回退到系统字体。放在最前才不会被「用户刚好装了思源黑体」
+   * 反过来盖掉 —— 同一台机器上界面字宽必须可复现。
+   *
+   * 界面只有一套字体：等宽是排版手段，不是另一种字形。内嵌子集含全部 ASCII，
+   * 数字 advance 恒为 521（汉字 1000），数字与英文天然对齐；落到 Cascadia /
+   * Consolas 会让同一屏出现两种字体，故 `--font-mono` 直接指向 sans。
    */
   --font-sans: "Noto Sans SC", "Source Han Sans SC", "PingFang SC",
     "HarmonyOS Sans SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
-  --font-mono: "Cascadia Mono", "JetBrains Mono", "Consolas", "Courier New",
-    monospace;
+  --font-mono: var(--font-sans);
 
   /* 字号 */
   --font-size-xs: 0.75rem;      /* 12px  辅助说明 */

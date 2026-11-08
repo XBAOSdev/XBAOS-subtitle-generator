@@ -225,7 +225,7 @@ onBeforeUnmount(stopPreview)
 <template>
   <ModalDialog
     title="讲话人对应关系"
-    subtitle="同一个人在不同文件中的讲话人编号可能不同。拖到同一行即视为同一个人。"
+    subtitle="同一人在不同文件中的编号可能不同。拖到同一行即视为同一人。"
     width="min(880px, 92vw)"
     :mask-closable="false"
     @close="cancel"

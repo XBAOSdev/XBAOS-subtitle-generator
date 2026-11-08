@@ -986,8 +986,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <p class="block__hint">
-              默认全部处理。条目太多、AI 一次吃不下时可以分批：只勾这一段，取回时也只覆盖这一段，
-              其余字幕保持原样。
+              默认全选。条目过多时可分批：只勾这一段，取回时也只覆盖这一段。
             </p>
 
             <ul class="pick" :class="{ 'pick--open': openPick !== null }">
@@ -1179,8 +1178,7 @@ onBeforeUnmount(() => {
             <div class="tips__row">
               <Icon name="info" :size="14" />
               <span>
-                只复制 AI 的回答即可。若读入结果异常，通常是复制时带上了网页中的其他文字，
-                重新选中回答复制一次即可。
+                只复制 AI 的回答。读入异常通常是复制时带上了网页其他文字，重新复制一次即可。
               </span>
             </div>
             <div class="tips__row">
@@ -1190,15 +1188,14 @@ onBeforeUnmount(() => {
             <div class="tips__row">
               <Icon name="shield" :size="14" />
               <span>
-                字幕内容将发送至所选的第三方 AI 服务，请注意隐私与版权。本软件不代为发送，
-                也不接收、不存储相关内容。
+                字幕内容将随粘贴发送至所选第三方 AI 服务，请注意隐私与版权。本软件不代为发送，
+                不接收、不存储。
               </span>
             </div>
             <div class="tips__row">
               <Icon name="alert" :size="14" />
               <span v-if="isTranslate">
-                AI 可能漏译或合并条目。条数与原文不符时，本软件将整份拒绝并要求重新生成，
-                不会部分写入。
+                AI 可能漏译或合并条目。条数不符时整份拒绝，不部分写入。
               </span>
               <span v-else>AI 可能改错或漏改，取回后请核对变化明细再确认覆盖。</span>
             </div>
@@ -2100,7 +2097,7 @@ onBeforeUnmount(() => {
   max-height: 320px;
   overflow: auto;
   background: var(--color-bg-surface);
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.65;
   color: var(--color-text-secondary);
