@@ -12,7 +12,7 @@
  * 三层共用同一个坐标映射 `x(t) = (t - viewStartSec) * pxPerSec`，
  * 这是整块界面唯一的「时间 ↔ 像素」换算，任何交互都走它，不各算各的。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { useEditorStore } from '@/stores/editor'
 import { useSettingsStore } from '@/stores/settings'
@@ -951,6 +951,72 @@ watch(
     if (t >= viewStartSec.value && t <= viewStartSec.value + span * 0.9) return
     jumpTo(t - span * 0.2)
   },
+)
+
+/**
+ * 每个项目各自的「看到哪儿」：缩放倍数、视窗左边缘、播放头。
+ *
+ * 不记的症状很具体：在项目一里放大到 4 倍去看某个词的断句，切去项目二对照，
+ * 回来时视窗还停在项目一那个位置；而两份工程的时长不同，那个位置往往已经是
+ * 空白，整块波形看着像坏了。
+ *
+ * 为什么**连续写**而不是「切换时写一次」：
+ *   ① 切到没有内容的项目时整个编辑区会被换成空态，本组件直接卸载 —— 卸载之后
+ *      再进来的 watcher 不会执行，「切走那一刻记一笔」这一笔就永远丢了。
+ *   ② 放大、平移、拖播放头都是独立的动作，随时可能被打断（切页、关窗），
+ *      与其挑一个「大概都会经过」的时机，不如每次变了就记。
+ * 写的是 `boundDraftId` 而不是 `project.activeDraftId`：切换那一瞬间这两个
+ * 已经不是同一个了，按后者写会把上一份的视图记到新项目头上。
+ */
+let boundDraftId = project.activeDraftId
+
+function persistTimelineView(): void {
+  if (!boundDraftId) return
+  project.rememberTimelineView(boundDraftId, {
+    zoom: zoom.value,
+    startSec: viewStartSec.value,
+    playheadSec: editor.playheadSec,
+  })
+}
+
+watch([zoom, viewStartSec, () => editor.playheadSec], persistTimelineView)
+
+/** 把记忆摆到界面上（夹取按**当前**工程的时长算） */
+async function applyTimelineView(id: string): Promise<void> {
+  const mem = project.timelineViewOf(id)
+  await nextTick()
+  const z = Math.min(maxZoom.value, Math.max(1, mem.zoom))
+  zoom.value = z
+  zoomGoal = z
+  viewStartSec.value = mem.startSec
+  panGoalSec = mem.startSec
+  clampView()
+  clampPanGoal()
+  editor.setPlayhead(Math.min(mem.playheadSec, Math.max(0, duration.value)))
+  scheduleDraw()
+}
+
+/*
+ * 挂载即按记忆摆位。
+ *
+ * 不能只在「切项目」时做：切到一个空项目再切回来，本组件是**重新挂载**的，
+ * 全新实例的 `zoom` 从 1 开始，而它的切换 watcher（`prev === id`）这一轮什么
+ * 都不会做 —— 不做这一步，切回来永远是「适应宽度 + 播放头在最左」。
+ */
+onMounted(() => {
+  boundDraftId = project.activeDraftId
+  void applyTimelineView(project.activeDraftId)
+})
+
+watch(
+  () => project.activeDraftId,
+  async (id) => {
+    // 先把上一份存下来（此刻 boundDraftId 还是旧的）
+    persistTimelineView()
+    boundDraftId = id
+    await applyTimelineView(id)
+  },
+  { flush: 'post' },
 )
 
 /** 拖拽中的预览也走全局监听：指针可能被 SetPointerCapture 绑到热区上 */

@@ -15,6 +15,7 @@ import { useSplitAtPlayhead } from '@/composables/useSplitAtPlayhead'
 import { translationLangsOf } from '@/utils/exportPlan'
 import { confirmDestructive } from '@/utils/confirm'
 import { toPlain } from '@/utils/plain'
+import type { MenuItem } from '@/utils/menu'
 import FileTree from '@/components/FileTree.vue'
 import TimelineTrack from '@/components/TimelineTrack.vue'
 import SubtitleTable from '@/components/SubtitleTable.vue'
@@ -439,9 +440,10 @@ const dirtyDrafts = computed(() =>
 )
 
 /**
- * 保存项目（方案 5.3）：主按钮只存**当前**这一个。
- * 同时开着多个、不止一个脏的时候，按钮右侧出小三角，展开「保存全部项目」——
- * 按一下主按钮就把别人也写了，属于意料之外的副作用。
+ * 保存项目：主按钮**只存当前这一个**。
+ *
+ * 按一下主按钮就把别人也写了，属于意料之外的副作用 —— 用户手里那份可能正
+ * 改到一半，不想连它一起落盘。
  */
 function saveProjectFile(): void {
   if (project.projectPath) void project.saveProject()
@@ -451,21 +453,84 @@ function saveProjectFile(): void {
 const saveMenu = ref<{ x: number; y: number } | null>(null)
 
 function openSaveMenu(event: MouseEvent): void {
-  saveMenu.value = { x: event.clientX, y: event.clientY }
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  /*
+   * 往上开，贴着按钮上沿：底栏就在窗口最下边，往下开必然被 UiMenu 夹回来，
+   * 结果是菜单跳到屏幕另一头（落差一下几百像素，看着像点错了东西）。
+   * 高度交给 UiMenu 自己夹 —— 它本来就会把越界的菜单收回视口里。
+   */
+  saveMenu.value = { x: rect.left, y: rect.top - 6 }
 }
 
-function onSaveMenuPick(key: string): void {
+/** 当前是否为脏（活动项目读活引用，其余读草稿自己那一格） */
+function isDirtyDraft(id: string): boolean {
+  const d = project.drafts.find((x) => x.id === id)
+  if (!d) return false
+  return d.id === project.activeDraftId ? project.projectDirty : d.dirty
+}
+
+/**
+ * 保存下拉：常驻，不按项目数量分档。
+ *
+ * 只有一份工程时它显示「保存全部 + 保存这一份」，看着略重复 —— 但那是**稳定**
+ * 的重复；换成「多项目才出现」会让同一个按钮的位置与形状随工程数量变，用户
+ * 每换一次工作现场就要重新找一遍。
+ */
+const saveMenuItems = computed<MenuItem[]>(() => {
+  const dirty = dirtyDrafts.value.length
+  const items: MenuItem[] = [
+    {
+      key: 'save-all',
+      label: '保存全部项目',
+      icon: 'save',
+      hint: dirty > 0 ? `${dirty} 个未保存` : '无改动',
+      disabled: dirty === 0,
+    },
+    { key: 'save-sep', label: '', divider: true },
+  ]
+  for (const d of project.drafts) {
+    /*
+     * 行里只写项目名、不写「保存 某某」：名字本身可能就占满一行（「S03E12 开放式
+     * 耳机横评 等」），再垫两个字会被省略号吃掉，而名字才是唯一能认出是哪一份的
+     * 信息。菜单是从保存按钮上展开的，左边的保存图标已经说明了这一下要做什么。
+     */
+    items.push({
+      key: `draft:${d.id}`,
+      label: project.draftDisplayName(d),
+      icon: 'save',
+      hint: isDirtyDraft(d.id) ? '未保存' : '已保存',
+      // 没改动的不给点：这一项的动作是「写盘」，没东西可写就是空操作
+      disabled: !isDirtyDraft(d.id),
+    })
+  }
+  return items
+})
+
+async function onSaveMenuPick(key: string): Promise<void> {
   saveMenu.value = null
-  if (key === 'save-all') void project.saveAllProjects()
+  if (key === 'save-all') {
+    void project.saveAllProjects()
+    return
+  }
+  const id = key.startsWith('draft:') ? key.slice(6) : ''
+  if (!id) return
+  if (id === project.activeDraftId) {
+    saveProjectFile()
+    return
+  }
+  const target = project.drafts.find((d) => d.id === id)
+  if (!target) return
+  /*
+   * 没落过盘的项目只能先切过去、走一次「存哪儿」—— 保存对话框读的是活动项目的
+   * 状态，替它捏一份上下文比切一下复杂得多，也会让对话框里的名字对不上。
+   */
+  if (!target.path) {
+    if ((await project.switchDraft(id)) === false) return
+    saveProjectFile()
+    return
+  }
+  await project.saveAllProjects([id])
 }
-
-const saveAllItems = computed(() => [
-  {
-    key: 'save-all',
-    label: '保存全部项目',
-    hint: `${dirtyDrafts.value.length} 个`,
-  },
-])
 
 /** 悬停提示：没保存过的项目要说明「这一下会问你存哪」 */
 const saveProjectHint = computed(() =>
@@ -762,8 +827,8 @@ async function saveInPlace(): Promise<void> {
 
       <span class="spacer" />
 
-      <!-- 保存：主按钮 + 小三角拼成一组。三角单独立着像个走丢的方块，
-           合并之后一眼看出「更多保存方式」属于保存这一个动作 -->
+      <!-- 保存：主按钮存当前这一个，右侧小三角展开「存哪一个」。
+           三角常驻 —— 只在多项目时才出现，等于让这个按钮随工程数量变形 -->
       <span class="btngroup">
         <button
           class="btn"
@@ -776,14 +841,8 @@ async function saveInPlace(): Promise<void> {
           <span>保存项目</span>
           <span v-if="project.projectDirty" class="editor__dot" aria-hidden="true" />
         </button>
-        <button
-          v-if="dirtyDrafts.length > 1"
-          class="btn"
-          type="button"
-          title="更多保存方式"
-          @click="openSaveMenu"
-        >
-          <Icon name="chevron-down" :size="12" />
+        <button class="btn" type="button" title="保存哪一个项目" @click="openSaveMenu">
+          <Icon name="chevron-up" :size="12" />
         </button>
       </span>
       <button
@@ -806,7 +865,7 @@ async function saveInPlace(): Promise<void> {
       v-if="saveMenu"
       :x="saveMenu.x"
       :y="saveMenu.y"
-      :items="saveAllItems"
+      :items="saveMenuItems"
       @close="saveMenu = null"
       @pick="onSaveMenuPick"
     />

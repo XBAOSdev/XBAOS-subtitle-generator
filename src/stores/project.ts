@@ -1460,6 +1460,33 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   /**
+   * 每个项目上一次的时间轴视图：缩放倍数、左边缘时间、播放头。
+   *
+   * 与滚动位置同一套口径 —— **只在内存里**，进程结束即丢。它描述的是「这一会儿
+   * 我在看哪儿」，不是工程的一部分：写进 `.xbsgp` 会让「打开一份工程」这个动作
+   * 依赖上一次会话的临时状态，换台机器看同一份工程会莫名停在半中间。
+   *
+   * 不记的后果很具体：放大了 4 倍去看某个词的断句，切去另一份工程对照，回来时
+   * 视窗还停在上一份的地方 —— 新工程时长不同，这个位置往往已经是空白。
+   */
+  const timelineViews = new Map<string, { zoom: number; startSec: number; playheadSec: number }>()
+
+  function timelineViewOf(draftId: string): { zoom: number; startSec: number; playheadSec: number } {
+    const hit = timelineViews.get(draftId)
+    // 副本：调用方拿到的是「当时的快照」，不能反过来改到记忆里
+    return hit ? { ...hit } : { zoom: 1, startSec: 0, playheadSec: 0 }
+  }
+
+  function rememberTimelineView(
+    draftId: string,
+    view: Partial<{ zoom: number; startSec: number; playheadSec: number }>,
+  ): void {
+    if (!draftId) return
+    const prev = timelineViews.get(draftId) ?? { zoom: 1, startSec: 0, playheadSec: 0 }
+    timelineViews.set(draftId, { ...prev, ...view })
+  }
+
+  /**
    * 「把这一条滚进视野」的请求。
    *
    * 侧栏点一个子项目 → 字幕列表跳到它第一行。**跨项目**时先切项目再跳，
@@ -3817,6 +3844,8 @@ const MIME_BY_EXT: Record<string, string> = {
     revealRequest,
     scrollTopOf,
     rememberScrollTop,
+    timelineViewOf,
+    rememberTimelineView,
     exportRecords,
     rememberExport,
     exportRecordsOf,

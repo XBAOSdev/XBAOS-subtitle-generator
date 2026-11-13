@@ -13,6 +13,29 @@ export interface ToastItem {
   message?: string
 }
 
+/**
+ * 通知中心里的一条。
+ *
+ * 与弹出的那条是**两笔账**：弹出的最多同时 4 条、几秒后自己消失；这里记的是
+ * 本次运行发生过的全部通知，只在关掉软件时清空（`at` 用于排时间）。
+ */
+export interface NoticeItem extends ToastItem {
+  /** 发生时刻（`Date.now()`），通知中心按它排时间 */
+  at: number
+}
+
+/**
+ * 同时弹出的通知上限。
+ *
+ * 通知落在窗口右上角，而那一块在每个界面里都是功能区（时间轴、工具面板、
+ * 保存按钮）。排成一列往下长，等于越用越挡。超过 4 条就把最早那条挤出去 ——
+ * 它并没有丢，进标题栏的通知中心了。
+ */
+export const TOAST_LIMIT = 4
+
+/** 通知中心最多留多少条：挂机一整天也不至于攒出几千条 DOM */
+const NOTICE_LIMIT = 200
+
 /** 全局弹窗标识 */
 export type DialogKey =
   | 'unsupported-format'
@@ -76,6 +99,8 @@ export const useUiStore = defineStore('ui', () => {
   const currentView = ref<ViewKey>('home')
   const sidebarCollapsed = ref(false)
   const toasts = ref<ToastItem[]>([])
+  /** 本次运行的全部通知（弹出那条被挤掉、或者自己消失，这里都还在） */
+  const notices = ref<NoticeItem[]>([])
   const dialog = ref<DialogKey>(null)
   /** 弹窗附加上下文，例如不支持格式的文件名列表 */
   const dialogPayload = ref<Record<string, unknown>>({})
@@ -227,7 +252,10 @@ export const useUiStore = defineStore('ui', () => {
 
   function notify(type: ToastType, title: string, message?: string): string {
     const id = uid('toast')
-    toasts.value.push({ id, type, title, message })
+    const item = { id, type, title, message }
+    // 弹出的只留最近 4 条，最早的挤出去（它仍在 notices 里，用户想看还找得到）
+    toasts.value = [...toasts.value, item].slice(-TOAST_LIMIT)
+    notices.value = [...notices.value, { ...item, at: Date.now() }].slice(-NOTICE_LIMIT)
     window.setTimeout(() => dismissToast(id), type === 'error' ? 7000 : 4200)
     return id
   }
@@ -236,10 +264,22 @@ export const useUiStore = defineStore('ui', () => {
     toasts.value = toasts.value.filter((t) => t.id !== id)
   }
 
+  /**
+   * 一次性收掉所有弹出的通知（鼠标靠过来时用）。
+   *
+   * 只清弹出的那一列，通知中心不受影响 —— 用户的动作是「别挡我」，
+   * 不是「我刚才那条别记了」。
+   */
+  function dismissAllToasts(): void {
+    if (toasts.value.length === 0) return
+    toasts.value = []
+  }
+
   return {
     currentView,
     sidebarCollapsed,
     toasts,
+    notices,
     dialog,
     dialogPayload,
     settingsAnchor,
@@ -263,5 +303,6 @@ export const useUiStore = defineStore('ui', () => {
     flashTaskBar,
     notify,
     dismissToast,
+    dismissAllToasts,
   }
 })

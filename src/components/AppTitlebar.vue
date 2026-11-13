@@ -6,6 +6,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useI18n } from '@/composables/useI18n'
 import { branding } from '@/branding'
 import Icon from '@/components/Icon.vue'
+import NoticeCenter from '@/components/NoticeCenter.vue'
 
 const ui = useUiStore()
 const settings = useSettingsStore()
@@ -95,6 +96,9 @@ onUnmounted(() => unsubscribeState?.())
       >
         <Icon :name="themeIcon" :size="15" />
       </button>
+
+      <!-- 通知中心：弹出的通知最多 4 条、靠近就收，看不见的那些在这里 -->
+      <NoticeCenter />
 
       <span class="titlebar__sep" aria-hidden="true" />
 

@@ -246,6 +246,11 @@ withDefaults(
       <path d="M12 11v5.5" />
       <circle cx="12" cy="7.9" r="0.95" fill="currentColor" stroke="none" />
     </template>
+    <!-- 通知中心：标题栏那个入口 -->
+    <template v-else-if="name === 'bell'">
+      <path d="M6.5 10a5.5 5.5 0 0 1 11 0c0 3.2.9 4.9 1.8 5.9.4.4.1 1.1-.4 1.1H5.1c-.5 0-.8-.7-.4-1.1C5.6 14.9 6.5 13.2 6.5 10Z" />
+      <path d="M10 19.2a2.2 2.2 0 0 0 4 0" />
+    </template>
     <template v-else-if="name === 'external'">
       <path d="M14 4h6v6" />
       <path d="M20 4 11.5 12.5" />

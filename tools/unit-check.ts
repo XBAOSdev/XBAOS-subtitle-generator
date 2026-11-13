@@ -5509,8 +5509,9 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '「保存项目」只存当前项目，「保存全部项目」走小三角',
     /function saveProjectFile\(\): void \{[\s\S]{0,200}?\}/.test(editorSrc) &&
       !/function saveProjectFile[\s\S]{0,200}saveAllProjects/.test(editorSrc) &&
-      // 小三角与主按钮拼成一组（`.btngroup`），点它才知道还有「保存全部」
-      /class="btngroup"[\s\S]{0,800}openSaveMenu[\s\S]{0,300}chevron-down/.test(editorSrc) &&
+      // 小三角与主按钮拼成一组（`.btngroup`），点它才知道还有「保存全部」。
+      // 箭头朝上：底栏贴着窗口下沿，菜单只能往上开
+      /class="btngroup"[\s\S]{0,800}openSaveMenu[\s\S]{0,300}chevron-up/.test(editorSrc) &&
       /key: 'save-all'/.test(editorSrc),
     '主按钮一下存了别的项目，属于意料之外的副作用',
   )
@@ -6084,6 +6085,113 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
       readFileSync(new URL('../src/components/dialogs/ExportDialog.vue', import.meta.url), 'utf8'),
     ),
     '用户建的项目叫「小包听幕介绍」，导出来却叫「合并时间轴.srt」，还得手工改名',
+  )
+}
+
+/* ---- 1.3.1：显示方式、通知、保存下拉与「每个项目看到哪儿」 ---- */
+{
+  const src = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const thumbSrc = src('src/directives/segThumb.ts')
+  const tableSrc = src('src/components/SubtitleTable.vue')
+  const uiSrc = src('src/stores/ui.ts')
+  const toastSrc = src('src/components/ToastStack.vue')
+  const titleSrc = src('src/components/AppTitlebar.vue')
+  const noticeSrc = src('src/components/NoticeCenter.vue')
+  const editorSrc = src('src/views/EditorView.vue')
+  const trackSrc = src('src/components/TimelineTrack.vue')
+  const projectSrc = src('src/stores/project.ts')
+
+  check(
+    '指示块按 rect 差值定位（不再用整数化的 offsetLeft）',
+    thumbSrc.includes('getBoundingClientRect()') &&
+      thumbSrc.includes('el.clientLeft') &&
+      !/thumb\.style\.left = `\$\{active\.offsetLeft\}/.test(thumbSrc),
+    'offsetLeft 是整数，125%/150% 缩放下会差出 1~2 物理像素，内描边一贴边就露馅',
+  )
+  check(
+    '指示块逐个观察按钮（不只是容器）',
+    /for \(const node of el\.children\)/.test(thumbSrc) && /ro\.observe\(node\)/.test(thumbSrc),
+    '字重变化让某个按钮变宽、容器总宽恰好不变时，只有盯住按钮本身才会重新量',
+  )
+  check(
+    '字体就绪后补量一次',
+    /document\.fonts\?\.ready\.then\(\(\) => measure\(true\)\)/.test(thumbSrc),
+    '内嵌字体是异步交换的，首帧量到的是系统字体的宽度',
+  )
+  check(
+    '显示方式取「有效值」而不是存的偏好',
+    /const viewMode = computed<SubtitleViewMode>\(\(\) =>[\s\S]{0,120}hasAnyTranslation\.value \? settings\.subtitleView : 'source'/.test(
+      tableSrc,
+    ) && /'is-active': viewMode === opt\.value/.test(tableSrc),
+    '没有译文时偏好可能还停在「双语」，滑块画在双语上，界面就成了「只显示一种语言却标着双语」',
+  )
+  check(
+    '有效值不回写偏好',
+    !/settings\.subtitleView = viewMode/.test(tableSrc),
+    '用户上次选的双语，等这次翻译完还要接着用',
+  )
+  check(
+    '选中条数占固定槽宽',
+    /\.op--count \{[\s\S]{0,160}min-width: 78px/.test(tableSrc),
+    '文案从「未选择」变「已选 12 条」会让宽度跳一下，右边那组分段控件跟着横移',
+  )
+
+  check(
+    '弹出的通知有上限',
+    /export const TOAST_LIMIT = 4/.test(uiSrc) && /slice\(-TOAST_LIMIT\)/.test(uiSrc),
+    '右上角是每个界面都要用的地方，排到第七条就是把界面糊住了',
+  )
+  check(
+    '挤掉的通知仍在通知中心',
+    /notices\.value = \[\.\.\.notices\.value/.test(uiSrc) && /NOTICE_LIMIT/.test(uiSrc),
+    '识别失败这类只有一次机会说明白的事，不能凭「用户大概不看」就丢掉',
+  )
+  check(
+    '接收不到鼠标的通知不留关闭键',
+    /pointer-events: none/.test(toastSrc) && !/toast__close/.test(toastSrc),
+    '留一个点不到的关闭键比没有更糟',
+  )
+  check(
+    '指针靠近即收起（走坐标判定而不是 enter）',
+    /pointermove/.test(toastSrc) &&
+      /nearStack\(event\.clientX/.test(toastSrc) &&
+      !/@mouseenter|addEventListener\('mouseenter'/.test(toastSrc),
+    '通知是后出现在静止指针底下的，浏览器不会补发 enter/leave',
+  )
+  check(
+    '标题栏有通知入口',
+    /NoticeCenter/.test(titleSrc) && /notice__btn/.test(noticeSrc),
+    '弹出的被 4 条上限挤掉之后，用户得有地方找回来看',
+  )
+
+  check(
+    '保存下拉常驻（不再按项目数量开关）',
+    !/v-if="dirtyDrafts\.length > 1"/.test(editorSrc) &&
+      /key: `draft:\$\{d\.id\}`/.test(editorSrc),
+    '只在多项目时才出现，等于让同一个按钮随工程数量变形',
+  )
+  check(
+    '下拉里有「保存全部项目」',
+    /key: 'save-all'/.test(editorSrc) && /保存全部项目/.test(editorSrc),
+  )
+
+  check(
+    '每个项目各记一份时间轴视图',
+    /timelineViewOf/.test(projectSrc) &&
+      /rememberTimelineView/.test(projectSrc) &&
+      /const timelineViews = new Map/.test(projectSrc),
+    '在项目一里放大看断句，切去项目二对照，回来时视窗还停在项目一的位置',
+  )
+  check(
+    '时间轴视图连续写、按绑定的项目写',
+    /watch\(\[zoom, viewStartSec, \(\) => editor\.playheadSec\], persistTimelineView\)/.test(trackSrc) &&
+      /if \(!boundDraftId\) return/.test(trackSrc),
+    '切到空项目时组件会卸载，「切走那一刻记一笔」这一笔会永远丢掉',
+  )
+  check(
+    '组件重新挂载时按记忆摆位',
+    /onMounted\(\(\) => \{[\s\S]{0,160}applyTimelineView\(project\.activeDraftId\)/.test(trackSrc),
+    '空项目再切回来是重新挂载的全新实例，不做这一步永远是「适应宽度 + 播放头在最左」',
   )
 }
 
