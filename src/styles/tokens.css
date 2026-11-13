@@ -78,6 +78,12 @@
   --control-height: 32px;
   --control-height-lg: 38px;
 
+  /* 窗口关闭键悬停色：取 Windows 11 系统那一档深红（#C42B1C）。
+     不借 --color-danger —— 那是「错误提示」语义色（浅一档的珊瑚红），
+     贴在窗口右上角时看着灰扑扑的，与旁边几个灰键拉不开层次。
+     两个主题共用同一个值：系统原生按钮也不分深浅主题。 */
+  --color-window-close: #c42b1c;
+
   /* 布局约束 */
   --content-max-width: 1180px;
 

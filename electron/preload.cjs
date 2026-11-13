@@ -101,6 +101,14 @@ contextBridge.exposeInMainWorld('xbaos', {
   // ---- 窗口控制
   window: {
     control: (action) => ipcRenderer.send('window:control', action),
+    /**
+     * 贴靠到屏幕的某一块。
+     *
+     * 传的是**比例**而不是像素：屏幕尺寸、DPI、任务栏高度都由主进程按当前
+     * 显示器的工作区换算，渲染进程不该知道这些（多显示器下更是如此）。
+     * `cell = { x, y, w, h }`，四个值都是 0–1。
+     */
+    snap: (cell) => ipcRenderer.send('window:snap', cell),
     onStateChange: (cb) => subscribe('window:state', cb),
   },
 

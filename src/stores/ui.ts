@@ -101,6 +101,14 @@ export const useUiStore = defineStore('ui', () => {
   const toasts = ref<ToastItem[]>([])
   /** 本次运行的全部通知（弹出那条被挤掉、或者自己消失，这里都还在） */
   const notices = ref<NoticeItem[]>([])
+  /**
+   * 用户看到过的最新一条通知的 id。
+   *
+   * 记 id 而不是时间戳：同一毫秒里连发两条通知时，`at > seenAt` 会把第二条
+   * 判成已读；而且时间戳比较还要求时钟单调，系统时间被改动就会一直亮着。
+   * id 是每条通知唯一的，新的进来一定与上次不同。
+   */
+  const noticeSeenId = ref<string | null>(null)
   const dialog = ref<DialogKey>(null)
   /** 弹窗附加上下文，例如不支持格式的文件名列表 */
   const dialogPayload = ref<Record<string, unknown>>({})
@@ -167,6 +175,25 @@ export const useUiStore = defineStore('ui', () => {
     const task = taskByOwner[owner]
     return task ? { owner, percent: task.percent, label: task.label } : null
   })
+
+  /**
+   * 通知中心有没有未读。
+   *
+   * 判据是「最新一条的 id 与上次看过的不一样」——不是「有没有通知」。
+   * 铃铛上那个圆点的语义是「有新东西」，看过了就该消失；否则它会一直亮着，
+   * 用户很快就学会无视它，等真有失败通知时也看不见了。
+   * 0 条时恒为 false（全被关掉之后不该留一个孤零零的点）。
+   */
+  const noticeUnread = computed(() => {
+    const latest = notices.value[notices.value.length - 1]
+    return !!latest && latest.id !== noticeSeenId.value
+  })
+
+  /** 通知面板展开时调用：把当前最新一条记为已读，圆点消失，下一条进来再亮 */
+  function markNoticesSeen(): void {
+    const latest = notices.value[notices.value.length - 1]
+    noticeSeenId.value = latest ? latest.id : null
+  }
 
   function beginTask(owner: string, label: string): void {
     taskByOwner[owner] = { percent: 0, label }
@@ -280,6 +307,8 @@ export const useUiStore = defineStore('ui', () => {
     sidebarCollapsed,
     toasts,
     notices,
+    noticeUnread,
+    markNoticesSeen,
     dialog,
     dialogPayload,
     settingsAnchor,

@@ -1372,6 +1372,43 @@ function registerIpc() {
     } else if (action === 'close') win.close()
   })
 
+  /*
+   * 贴靠布局（标题栏「最大化」悬停浮窗里点一格）。
+   *
+   * 为什么由主进程算：屏幕工作区、DPI 缩放、任务栏高度、多显示器归属都只有
+   * 主进程知道。渲染进程只传比例 —— 它看到的是「把窗口切到左边一半」，
+   * 而不是「x=0 y=0 w=960 h=1040」这种一定会在别的机器上错的值。
+   *
+   * 先把最大化解开再设边界：最大化状态下 `setBounds` 在 Windows 上不生效。
+   * 顺序不能反，也不能只调 setBounds 了事。
+   */
+  ipcMain.on('window:snap', (event, cell) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win.isDestroyed()) return
+    const parts = ['x', 'y', 'w', 'h'].map((k) => Number(cell && cell[k]))
+    if (parts.some((v) => !Number.isFinite(v))) return
+    const [rx, ry, rw, rh] = parts.map((v) => Math.min(1, Math.max(0, v)))
+    if (rw <= 0.05 || rh <= 0.05) return
+
+    // 窗口当前所在的显示器（不是主屏）：双屏下贴到主屏去是明显的错
+    const area = screen.getDisplayMatching(win.getBounds()).workArea
+    const bounds = {
+      x: Math.round(area.x + area.width * rx),
+      y: Math.round(area.y + area.height * ry),
+      width: Math.round(area.width * rw),
+      height: Math.round(area.height * rh),
+    }
+    // 贴靠出来的格子不能小于窗口自己的最小尺寸，否则 win.setBounds 会被夹住，
+    // 结果是「贴到了但没贴满」—— 提前夹到合法区间，至少位置是对的
+    const [minW, minH] = win.getMinimumSize()
+    bounds.width = Math.max(bounds.width, minW)
+    bounds.height = Math.max(bounds.height, minH)
+
+    if (win.isMaximized()) win.unmaximize()
+    if (win.isFullScreen()) win.setFullScreen(false)
+    win.setBounds(bounds)
+  })
+
   // ---- 系统对话框
   ipcMain.handle('dialog:pickAudio', async () => {
     if (!mainWindow) return []

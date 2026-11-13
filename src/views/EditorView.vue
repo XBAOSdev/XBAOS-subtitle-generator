@@ -842,7 +842,9 @@ async function saveInPlace(): Promise<void> {
           <span v-if="project.projectDirty" class="editor__dot" aria-hidden="true" />
         </button>
         <button class="btn" type="button" title="保存哪一个项目" @click="openSaveMenu">
-          <Icon name="chevron-up" :size="12" />
+          <!-- 箭头朝下：它是「展开菜单」的固定符号，不随菜单弹出方向翻转。
+               早先跟着「菜单往上开」画成朝上，用户第一眼读成了「收起/返回」 -->
+          <Icon name="chevron-down" :size="12" />
         </button>
       </span>
       <button

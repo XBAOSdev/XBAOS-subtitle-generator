@@ -7376,6 +7376,168 @@ const scenarios = {
 
     await run(`project.setBatchMode('separate')`)
   },
+
+  /*
+   * 通知圆点的「看过就消失」。
+   *
+   * store 层的判据（最新 id ≠ 已读 id）在 unit 里卡着，这里验的是**界面上真的
+   * 亮了又灭**：发两条 → 圆点在 → 展开面板 → 圆点没了 → 再来一条 → 又亮。
+   */
+  async 'notice-dot'(cdp) {
+    await goto(cdp, BASE + '/?demo=1&view=editor')
+    await sleep(400)
+    const useUi = (body) =>
+      cdp.evaluate(`(async () => {
+        const s = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('ui')
+        if (!s) throw new Error('拿不到 ui store')
+        ${body}
+      })()`)
+
+    await useUi(`s.notify('info', '探针通知一'); s.notify('info', '探针通知二'); return true`)
+    await sleep(200)
+    const dotAfterNotify = await cdp.evaluate(`!!document.querySelector('.notice__dot')`)
+
+    const bell = await cdp.evaluate(`(() => {
+      const r = document.querySelector('.notice__btn').getBoundingClientRect()
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+    })()`)
+    await cdp.click(bell.x, bell.y)
+    await sleep(250)
+    const afterOpen = await cdp.evaluate(`(() => ({
+      dot: !!document.querySelector('.notice__dot'),
+      items: document.querySelectorAll('.notice__item').length,
+      open: !!document.querySelector('.notice__panel'),
+    }))()`)
+
+    // 面板还开着的时候再来一条：也要重新亮起来
+    await useUi(`s.notify('error', '探针通知三'); return true`)
+    await sleep(200)
+    const dotAfterNew = await cdp.evaluate(`!!document.querySelector('.notice__dot')`)
+
+    check('来了新通知就点圆点', dotAfterNotify === true, `圆点 ${dotAfterNotify}`)
+    check(
+      '展开通知中心后圆点消失，且面板里能看到这两条',
+      afterOpen.open === true && afterOpen.dot === false && afterOpen.items >= 2,
+      JSON.stringify(afterOpen),
+    )
+    check('再来一条又亮起', dotAfterNew === true, `圆点 ${dotAfterNew}`)
+    await shot(cdp, 'notice-center.png')
+  },
+
+  /*
+   * 贴靠布局浮窗（悬停最大化键 → 六宫格 → 点一格把窗口贴过去）。
+   *
+   * 浏览器预览里没有桥，`canSnap()` 恒为假、浮窗永不出现，所以这里先补一个
+   * 只有 `window.snap` 的桩（装桩晚于 App 挂载，`onStateChange` 没被注册不影响
+   * 这个场景）——要验的是「悬停会不会弹、点了传出去的比例对不对」，
+   * 真实停靠那一步归 Electron 探针与主进程。
+   */
+  async 'snap-layouts'(cdp) {
+    await goto(cdp, BASE + '/?demo=1&view=editor')
+    await sleep(500)
+    await cdp.evaluate(`(() => {
+      window.__snapCalls = []
+      window.xbaos = window.xbaos || {}
+      window.xbaos.window = {
+        control: () => {},
+        snap: (cell) => window.__snapCalls.push(cell),
+        onStateChange: () => () => {},
+      }
+      return true
+    })()`)
+
+    const geo = await cdp.evaluate(`(() => {
+      // 主题键也是 .titlebar__btn，不能按下标取；用 aria-label 认出最大化/还原那个
+      const max = [...document.querySelectorAll('.titlebar__btn')]
+        .find((b) => /最大化|还原/.test(b.getAttribute('aria-label') || ''))
+      if (!max) return null
+      const r = max.getBoundingClientRect()
+      const bar = document.querySelector('.titlebar').getBoundingClientRect()
+      return {
+        x: Math.round(r.x + r.width / 2),
+        y: Math.round(r.y + r.height / 2),
+        barBottom: Math.round(bar.bottom),
+        barRight: Math.round(bar.right),
+      }
+    })()`)
+
+    await cdp.move(geo.x, geo.y)
+    // 悬停有 220ms 延迟（防「划过最大化」时乱弹），等它落地
+    await sleep(420)
+    const panel = await cdp.evaluate(`(() => {
+      const el = document.querySelector('.snap')
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return {
+        presets: el.querySelectorAll('.snap__preset').length,
+        cells: el.querySelectorAll('.snap__cell').length,
+        top: Math.round(r.top),
+        bottom: Math.round(r.bottom),
+        left: Math.round(r.left),
+        right: Math.round(r.right),
+        width: Math.round(r.width),
+        drag: getComputedStyle(el).webkitAppRegion,
+      }
+    })()`)
+    check('悬停最大化键弹出贴靠浮窗', panel !== null, panel ? `宽 ${panel.width}` : '没出现')
+    check(
+      '浮窗有六种预设、19 个可选格',
+      panel !== null && panel.presets === 6 && panel.cells === 19,
+      panel ? `${panel.presets} 组 / ${panel.cells} 格` : '',
+    )
+    check(
+      '浮窗在标题栏下方、贴着窗口右侧，且不吃拖动',
+      panel !== null &&
+        panel.top >= geo.barBottom &&
+        panel.right <= geo.barRight &&
+        geo.barRight - panel.right < 80 &&
+        panel.drag === 'no-drag',
+      panel ? `top ${panel.top} / right ${panel.right}（栏底 ${geo.barBottom}，窗口右 ${geo.barRight}）` : '',
+    )
+    if (panel) {
+      // 放大截这一块：格线是否贴合卡片边界，全屏截图看不出来
+      await shot(cdp, 'snap-layouts.png', {
+        x: panel.left - 6,
+        y: panel.top - 6,
+        width: panel.width + 12,
+        height: panel.bottom - panel.top + 12,
+        scale: 2,
+      })
+    }
+
+    // 点第一组的左半格：传出去的应该是 {0,0,0.5,1}
+    const cell = await cdp.evaluate(`(() => {
+      const c = document.querySelector('.snap__preset .snap__cell')
+      if (!c) return null
+      const r = c.getBoundingClientRect()
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+    })()`)
+    if (cell) await cdp.click(cell.x, cell.y)
+    await sleep(300)
+    const afterClick = await cdp.evaluate(`(() => ({
+      calls: window.__snapCalls,
+      open: !!document.querySelector('.snap'),
+    }))()`)
+    check(
+      '点格子传出工作区比例并收起浮窗',
+      Array.isArray(afterClick.calls) &&
+        afterClick.calls.length === 1 &&
+        afterClick.calls[0].x === 0 &&
+        afterClick.calls[0].w === 0.5 &&
+        afterClick.calls[0].h === 1 &&
+        afterClick.open === false,
+      JSON.stringify(afterClick),
+    )
+
+    // 再弹一次，把指针移开：面板必须自己收掉（关不掉的浮层会一直挡着界面）
+    await cdp.move(geo.x, geo.y)
+    await sleep(420)
+    const reopened = await cdp.evaluate(`!!document.querySelector('.snap')`)
+    await cdp.move(geo.x - 400, geo.y + 300)
+    await sleep(220)
+    const closed = await cdp.evaluate(`!document.querySelector('.snap')`)
+    check('指针移开即收起', reopened === true && closed === true, `重开 ${reopened}，移开后收起 ${closed}`)
+  },
 }
 
 /* ---------------------------------------------------------------------- main */

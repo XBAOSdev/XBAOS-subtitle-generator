@@ -5,7 +5,7 @@
 由使用者自行粘贴到所选的第三方在线服务，本软件不代使用者发起请求、也不接收结果以外的数据。
 本文件列出随产物分发的组件，以及仅在构建阶段使用、不进入产物的工具。
 
-最后核对日期：2026-11-04
+最后核对日期：2026-11-13
 
 ## 一、随产物分发
 
@@ -38,6 +38,19 @@
 | stb_vorbis | 1.22 | MIT / Unlicense | Sean Barrett（stb） | OGG Vorbis 音频解码 |
 | libopus | 1.5.2 | BSD-3-Clause | Xiph.Org 基金会 | Opus 音频解码 |
 | FFmpeg | non-proprietary 构建 | LGPL-2.1-or-later | the FFmpeg developers | 音视频容器解析（`ffmpeg.dll`，Electron 随包） |
+| jieba 分词词典 | 2026-11 快照 | MIT | Sun Junyi（经 cppjieba 再分发） | 断句词表（只取词与词频，构建期裁剪） |
+
+### 断句词表的数据来源
+
+`src/data/wrapDict.ts` 里那 7 万条词来自 jieba 的 `dict.txt`（每行「词 词频 词性」），
+**不是代码组件**，但它确实随产物分发，所以在这里说明：
+
+- 只取「词」与「词频」两列，产物里没有任何释义、例句或词性标注体系；
+- 已剔除人名、地名、机构名、其他专名与外文词条 —— 与本软件「不收品牌名、公司名、
+  人名」的既有红线一致；
+- 只用于折行时判断「哪里是词边界」，**不进识别提示词**，不影响识别结果；
+- 生成脚本 `tools/build-wrap-dict.mjs` 与裁剪规则一并开源，结果可复现。
+- 许可原文见本目录下的 `jieba.LICENSE.txt`。
 
 ### 随包分发的模型权重
 

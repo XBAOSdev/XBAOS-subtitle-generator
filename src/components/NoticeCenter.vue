@@ -54,10 +54,16 @@ function onKeydown(event: KeyboardEvent): void {
  *
  * 展开时顺手收掉右上角那一列弹出的通知：两者占的是同一块地方，而面板里本来
  * 就是同样的内容（还更全），叠着显示只会互相盖住。
+ *
+ * 同时把当前最新一条记为已读，铃铛上的圆点随之消失 —— 用户已经"看到了"，
+ * 点不点开都一样；再留着它闪，这个提示就失去了"有新东西"的意思。
  */
 function toggle(): void {
   open.value = !open.value
-  if (open.value) ui.dismissAllToasts()
+  if (open.value) {
+    ui.dismissAllToasts()
+    ui.markNoticesSeen()
+  }
 }
 
 onMounted(() => {
@@ -81,7 +87,7 @@ onBeforeUnmount(() => {
       @click="toggle"
     >
       <Icon name="bell" :size="15" />
-      <span v-if="ui.notices.length > 0" class="notice__dot" aria-hidden="true" />
+      <span v-if="ui.noticeUnread" class="notice__dot" aria-hidden="true" />
     </button>
 
     <div v-if="open" class="notice__panel" role="dialog" aria-label="本次运行的通知">

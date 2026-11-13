@@ -80,6 +80,8 @@ const LIBS = [
   // 与「用户自行获取的识别模型」不是一回事，必须单独列出来。
   { name: 'pyannote 声纹切分模型', license: 'MIT License' },
   { name: '3D-Speaker CAM++ 声纹模型', license: 'Apache License 2.0' },
+  // 断句词表的数据来源。不是代码组件，但词条随产物分发，按 MIT 的要求署名
+  { name: 'jieba 分词词典（断句词表）', license: 'MIT License' },
   { name: '思源黑体（内嵌 Noto Sans SC 子集）', license: 'SIL Open Font License 1.1' },
   // 以下三个是识别模型，**不随安装包分发**，由使用者自行获取。列在这里是因为
   // 它们的许可各不相同，用户下载时用得上；权利归各自发布者，不在本软件范围内。

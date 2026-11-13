@@ -393,7 +393,14 @@ async function onUpdateClick(): Promise<void> {
   padding: var(--space-3) var(--space-2);
 }
 
+/*
+ * 收起后这一行只剩开关本身（版本号 max-width 归零、不可见）。
+ * 必须居中：`.sidebar__meta` 是 flex 行，默认从左排 —— 22px 的按钮落在
+ * 52px 栏里会偏左 7px，和上面那列居中的导航图标对不上，看着像没对齐的意外。
+ * gap 同时归零：零宽度的版本号仍会占掉一个间隙，居中的是「按钮 + 间隙」这一坨。
+ */
 .sidebar.is-collapsed .sidebar__meta {
-  gap: var(--space-1);
+  gap: 0;
+  justify-content: center;
 }
 </style>

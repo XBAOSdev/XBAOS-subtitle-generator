@@ -21,6 +21,11 @@ Belle 中文微调版、SenseVoice 等多种模型。模型文件不随本软件
 软件分发，分别采用 MIT 与 Apache License 2.0，版权归 CNRS 与阿里巴巴通义实验室，
 本软件保持文件原样、不作修改。原文见安装目录下的 licenses 文件夹。
 
+断句所用的词表由 jieba 分词词典裁剪而来（MIT 许可，版权归原作者 Sun Junyi，
+经 cppjieba 再分发），只保留「词」与「词频」两列，并已剔除人名、地名、机构名等
+专名。词条仅在字幕折行时用于判断词边界，不参与识别，也不改变识别结果。裁剪规则
+与生成脚本随源代码一并提供，许可原文见 licenses 文件夹下的 jieba.LICENSE.txt。
+
 二、开源许可
 本软件的源代码依照 Apache License 2.0（https://www.apache.org/licenses/LICENSE-2.0）
 开源发布。就源代码而言，你可以在遵循该许可的前提下使用、修改与再分发。

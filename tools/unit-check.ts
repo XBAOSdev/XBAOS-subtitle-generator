@@ -51,6 +51,7 @@ import {
   speakerName,
 } from '../src/utils/speaker'
 import { buildWrapWords } from '../src/utils/wrapWords'
+import { WRAP_DICT_RAW } from '../src/data/wrapDict'
 import {
   defaultProjectName,
   isProjectPath,
@@ -1211,7 +1212,7 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     }),
   )
 
-  // 对照：不传词表时「不 / 把」被切开；传入词表后挪到「为什么」之后
+  // 对照：不传词表时按宽度均分；传入词表后切点必须避开词内部
   const hard = seg(0, 6, '那微软为什么不把错误的标准改过来呢')
   const plain = applyLineWrap([hard], SPEC)
   const smart = applyLineWrap([hard], { ...SPEC, wrapWords: words })
@@ -1220,21 +1221,35 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     plain.segments.map((s) => s.text).join('|') === '那微软为什么不把错|误的标准改过来呢',
     plain.segments.map((s) => s.text).join('|'),
   )
-  check(
-    '词表把切点拉回词边界',
-    smart.segments.map((s) => s.text).join('|') === '那微软为什么|不把错误的标准改过来呢',
-    smart.segments.map((s) => s.text).join('|'),
-  )
-  check('词表不增删任何一个字', smart.segments.map((s) => s.text).join('') === hard.text)
+  /*
+   * 判据改成「切点不落在任何已收录词内部」，不再锁死具体字符串。
+   *
+   * 2026-11-13 断点模型从「加权求和」换成「约束 + 字典序」之后，这条确实从
+   * 「那微软为什么|不把…」挪到了「…错误的|标准…」—— 两者都在词边界上，没有
+   * 谁对谁错；锁死字符串会让每次调参都变成一场无意义的改测试。
+   */
+  const insideKnownWord = (text: string, lines: string[]): string[] => {
+    const bad: string[] = []
+    let pos = 0
+    for (let i = 0; i < lines.length - 1; i += 1) {
+      pos += Array.from(lines[i]).length
+      for (const w of words) {
+        for (let at = Math.max(0, pos - w.length + 1); at < pos; at += 1) {
+          if (text.startsWith(w, at) && at + w.length > pos) bad.push(`${w}@${pos}`)
+        }
+      }
+    }
+    return bad
+  }
+  const smartLines = smart.segments.map((s) => s.text)
+  check('词表让切点避开所有已收录词的内部', insideKnownWord(hard.text, smartLines).length === 0, smartLines.join('|'))
+  check('词表不增删任何一个字', smartLines.join('') === hard.text)
   check('词表不改变条数', smart.segments.length === plain.segments.length)
 
   // 常见搭配同样不能被横切
   const equalCase = '很多人觉得打开这个模式就等于在互联网上穿上了隐身衣'
-  check(
-    '「等于」不被切开',
-    breakIntoLines(equalCase, 32, words).join('|') === '很多人觉得打开这个模式|就等于在互联网上穿上了隐身衣',
-    breakIntoLines(equalCase, 32, words).join('|'),
-  )
+  const equalLines = breakIntoLines(equalCase, 32, words)
+  check('「等于」不被切开', insideKnownWord(equalCase, equalLines).length === 0, equalLines.join('|'))
   const stdCase = '但问题就在于这套标准真的被全面执行了吗'
   check(
     '「标准」不被切开',
@@ -1260,6 +1275,48 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     noFrag.segments.every((s) => widthUnits(s.text) >= 12),
     JSON.stringify(noFrag.segments.map((s) => [s.text, widthUnits(s.text)])),
   )
+
+  /* ---- 2026-11-13：断点模型从「加权求和」换成「约束 + 字典序 + 全局最优」 ---- */
+  {
+    const src = readFileSync(new URL('../src/utils/lineWrap.ts', import.meta.url), 'utf8')
+    check(
+      '断点求解是整段动态规划，不是逐行贪心',
+      /function layoutLines/.test(src) && /Math\.ceil\(total \/ capacity\) \+ 1/.test(src) && /lessThan\(sum, cur\)/.test(src),
+      '贪心只对当前行最优，最后一行常常只剩三五个字 —— 尾巴就是这么被推出去的',
+    )
+    check(
+      '切进已收录词内部是硬约束而不是扣分',
+      /const C_IN_WORD = 0/.test(src) && /out\[C_IN_WORD\] = 1/.test(src) && !/score -=/.test(src),
+      '加权求和里 −8000 会被行首禁则的 −12000 盖过：为了避开「们」而切进另一个词',
+    )
+    check(
+      '只有两侧都有词才算词交界',
+      /mask\.endAt\.has\(j\)/.test(src) && /mask\.startAt\.has\(j\)/.test(src),
+      '「…专有 | 编解码器…」里「专有」在此结束，但右边的「编」只是未收录词的头半个字',
+    )
+    check(
+      '排版禁则：标点不落行首',
+      /NO_LINE_START_PUNCT/.test(src) && /NO_LINE_END_OPEN/.test(src),
+      '「…逐字降级 / 。界面图标…」把句号甩到下一行开头，一眼就是错的',
+    )
+
+    /*
+     * 短行门槛（0.2 容量 = 3.2 字）真正生效的样例：句号把长度顶到三段，
+     * 不设门槛时末段会只剩「体积大」三个字 —— 一条字幕闪一下就没有。
+     */
+    const shortTail = breakIntoLines('两套引擎需要若干第三方源码与预编译库。体积大', 32, words)
+    check(
+      '不切出三字以下的孤条',
+      shortTail.length >= 2 && shortTail.every((line) => Array.from(line).length >= 4),
+      JSON.stringify(shortTail),
+    )
+
+    /*
+     * 行首标点由既有断言「标点没被搬到行首或行中」守着，这里不再重复：
+     * 关掉断点强度后它会立刻失败，说明那条是真的有效；本条重写一遍只会变成
+     * 一条永远不会红的摆设。
+     */
+  }
 
   /*
    * 断句质量回归集（2026-11-03 新增）。
@@ -5510,8 +5567,8 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     /function saveProjectFile\(\): void \{[\s\S]{0,200}?\}/.test(editorSrc) &&
       !/function saveProjectFile[\s\S]{0,200}saveAllProjects/.test(editorSrc) &&
       // 小三角与主按钮拼成一组（`.btngroup`），点它才知道还有「保存全部」。
-      // 箭头朝上：底栏贴着窗口下沿，菜单只能往上开
-      /class="btngroup"[\s\S]{0,800}openSaveMenu[\s\S]{0,300}chevron-up/.test(editorSrc) &&
+      // 箭头朝下：这是「展开菜单」的固定符号，不跟着菜单的弹出方向翻转
+      /class="btngroup"[\s\S]{0,800}openSaveMenu[\s\S]{0,400}chevron-down/.test(editorSrc) &&
       /key: 'save-all'/.test(editorSrc),
     '主按钮一下存了别的项目，属于意料之外的副作用',
   )
@@ -6065,10 +6122,12 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '留着会被撤销栈与草稿各拷一份，而它一旦错位就是全错',
   )
   check(
-    '断点打分把真实停顿算进去',
-    /score \+= Math\.min\(pause, 0\.45\) \* 5000/.test(lineWrapSrc) &&
+    '断点把真实停顿当成独立一档证据',
+    /PAUSE_STRONG/.test(lineWrapSrc) &&
+      /pause >= PAUSE_STRONG/.test(lineWrapSrc) &&
       /pausesOf\(ct, charAt\)/.test(lineWrapSrc),
-    '切点只按宽度填满必然切在句子中间 —— 一句话的尾巴就是这样被扔到下一条的',
+    '停顿过去只是加权求和里的一项（最多 2250 分），能被行首禁则的 −12000 直接盖掉；' +
+      '现在它是字典序比较里的一档，只在词内否决与短行之下',
   )
   check(
     '折行拆分的时间取自逐字时间轴',
@@ -6192,6 +6251,124 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '组件重新挂载时按记忆摆位',
     /onMounted\(\(\) => \{[\s\S]{0,160}applyTimelineView\(project\.activeDraftId\)/.test(trackSrc),
     '空项目再切回来是重新挂载的全新实例，不做这一步永远是「适应宽度 + 播放头在最左」',
+  )
+}
+
+/*
+ * 2026-11-13 · 第二批：通知已读 / 窗口关闭键 / 贴靠浮窗 / 词表扩容
+ */
+{
+  const readSrc = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const uiSrc = readSrc('src/stores/ui.ts')
+  const noticeSrc = readSrc('src/components/NoticeCenter.vue')
+  const titleSrc = readSrc('src/components/AppTitlebar.vue')
+  const sidebarSrc = readSrc('src/components/AppSidebar.vue')
+  const tokensSrc = readSrc('src/styles/tokens.css')
+  const globalCss = readSrc('src/styles/global.css')
+  const preloadSrc = readSrc('electron/preload.cjs')
+  const mainSrc = readSrc('electron/main.js')
+  const dictSrc = readSrc('src/data/wrapDict.ts')
+  const lexiconSrc = readSrc('src/data/lexicons.ts')
+
+  check(
+    '通知圆点按「看过没有」判断，不按「有没有通知」',
+    /const noticeUnread = computed/.test(uiSrc) &&
+      /latest\.id !== noticeSeenId\.value/.test(uiSrc) &&
+      /v-if="ui\.noticeUnread"/.test(noticeSrc) &&
+      !/v-if="ui\.notices\.length > 0"/.test(noticeSrc),
+    '圆点常亮等于没有提示：用户很快学会无视它，真失败时也看不见',
+  )
+  check(
+    '展开通知中心即记为已读',
+    /function markNoticesSeen/.test(uiSrc) && /ui\.markNoticesSeen\(\)/.test(noticeSrc),
+    '看了却不消失，下一条新通知进来时就没有「有新东西」可言',
+  )
+  check(
+    '关闭键用系统那一档深红，不借危险色',
+    /--color-window-close: #c42b1c/.test(tokensSrc) &&
+      /--color-window-close/.test(titleSrc) &&
+      !/\.titlebar__btn--close:hover\s*\{[^}]*--color-danger/.test(titleSrc),
+    '--color-danger 是「错误提示」语义色，浅一档，贴在窗口角上灰扑扑的',
+  )
+  check(
+    '毛玻璃下标题栏两个功能键同色',
+    /html\.glass \.titlebar__btn,\s*\n?\s*html\.glass \.notice__btn,/.test(globalCss),
+    'glass 模式只给 .titlebar__btn 提了色，铃铛还是 secondary：并排两个键一亮一暗',
+  )
+  check(
+    '侧栏收起时底栏开关居中',
+    /\.sidebar\.is-collapsed \.sidebar__meta\s*\{[^}]*justify-content:\s*center/.test(sidebarSrc),
+    '22px 的开关落在 52px 栏里从左排，比上面那列居中图标偏左 7px，看着像没对齐',
+  )
+
+  check(
+    '最大化键悬停弹出贴靠浮窗',
+    /SNAP_PRESETS/.test(titleSrc) &&
+      /@pointerenter="scheduleSnap"/.test(titleSrc) &&
+      /role="dialog"/.test(titleSrc),
+    'Windows 11 的贴靠浮窗只给原生标题栏按钮画，自绘标题栏拿不到，只能自己画',
+  )
+  check(
+    '浮窗有六种预设，且每格是按钮',
+    (titleSrc.match(/\{ x: [\d.]+, y: [\d.]+, w: [\d.]+, h: [\d.]+ \}/g) ?? []).length >= 18 &&
+      /class="snap__cell"/.test(titleSrc),
+    '预设太少不如不给；格子不可点就只是个装饰图',
+  )
+  check(
+    '浮窗关闭走坐标判定，不靠 mouseleave',
+    /function insideSnapZone/.test(titleSrc) &&
+      /addEventListener\('pointermove', onSnapPointerMove\)/.test(titleSrc) &&
+      !/@pointerleave=|addEventListener\('mouseleave'|addEventListener\('pointerleave'/.test(titleSrc),
+    '面板是后出现在静止指针下面的元素，浏览器不补发 enter/leave；按钮与面板之间还有 6px 缝',
+  )
+  check(
+    '贴靠位置由主进程按工作区换算',
+    /'window:snap'/.test(preloadSrc) &&
+      /ipcMain\.on\('window:snap'/.test(mainSrc) &&
+      /screen\.getDisplayMatching\(win\.getBounds\(\)\)\.workArea/.test(mainSrc),
+    '渲染进程只知道比例；DPI、任务栏、多显示器都只有主进程知道',
+  )
+  check(
+    '贴靠前先解开最大化',
+    /if \(win\.isMaximized\(\)\) win\.unmaximize\(\)[\s\S]{0,80}win\.setBounds\(bounds\)/.test(mainSrc),
+    '最大化状态下 setBounds 在 Windows 上不生效，顺序反了就贴不动',
+  )
+
+  check(
+    '通用词表进了断句词表',
+    dictSrc.includes('WRAP_DICT_RAW') &&
+      buildWrapWords([], '').includes('我们') &&
+      buildWrapWords([], '').length > 60000,
+    '三千词覆盖不了日常口播，剩下的切点只能按宽度猜',
+  )
+  check(
+    '通用词表只有 2–6 个汉字',
+    WRAP_DICT_RAW.split(/\s+/)
+      .filter(Boolean)
+      .every((w) => {
+        const n = [...w].length
+        return n >= 2 && n <= 6 && /^[\u4e00-\u9fff]+$/.test(w)
+      }),
+    '单字没有「内部」可言；超过 6 字超出匹配窗口（MAX_WORD_ATOMS）',
+  )
+  check(
+    '词表按「词库勾选 + 手填术语」缓存',
+    /const key = `\$\{lexiconIds\.join/.test(readSrc('src/utils/wrapWords.ts')) &&
+      buildWrapWords([], '') === buildWrapWords([], ''),
+    '七万元素的 Set 每批重建一次要 4ms，而设置整场会话都不变',
+  )
+  check(
+    '领域词库的断句词里放进了专业搭配',
+    /'功耗墙'/.test(lexiconSrc) &&
+      /'边际改善'/.test(lexiconSrc) &&
+      /'打击感'/.test(lexiconSrc) &&
+      buildWrapWords(['tech'], '').includes('功耗墙'),
+    '「功耗 / 墙」「边际 / 改善」正是折行时最容易被劈开的位置',
+  )
+  check(
+    '扩表不改提示词预算',
+    !/wrapDict|WRAP_DICT/.test(readSrc('src/utils/prompt.ts')),
+    '两万条词灌进 initial_prompt 会把预算撑爆，且这些词引擎本来就认得',
   )
 }
 

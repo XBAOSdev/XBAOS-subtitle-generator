@@ -6,7 +6,7 @@ import { useUiStore } from '@/stores/ui'
 import type { PunctuationMode } from '@/types'
 import { PAUSE_PUNCT_LABELS } from '@/utils/punctuation'
 import { parseReplaceDict } from '@/utils/dictReplace'
-import { buildWrapWords } from '@/utils/wrapWords'
+import { buildWrapWords, wrapDictSize } from '@/utils/wrapWords'
 import { COMMON_WORDS, COMMON_WORD_GROUPS } from '@/data/commonWords'
 import { LEXICONS } from '@/data/lexicons'
 import {
@@ -32,9 +32,11 @@ const ui = useUiStore()
 /** 词表里能解析出多少条可用规则。给个即时反馈，免得手滑写了不生效还不知道 */
 const dictRuleCount = computed(() => parseReplaceDict(settings.dictReplacements).length)
 
-/** 内置词表的规模，界面上直接报数，用户不用点开也心里有数 */
+/** 内置常用词的规模，界面上直接报数，用户不用点开也心里有数 */
 const commonWordCount = COMMON_WORDS.length
 const commonGroupCount = COMMON_WORD_GROUPS.length
+/** 通用词表（jieba 裁剪）的条数 */
+const dictWordCount = wrapDictSize()
 /** 显卡加速是否可用：由当前模型架构决定，见 stores/model.ts */
 const canUseGpu = computed(() => model.caps.gpu)
 
@@ -860,6 +862,10 @@ function reset(): void {
                     <span class="wb-stat__label">常用词</span>
                   </div>
                   <div class="wb-stat">
+                    <span class="wb-stat__num">{{ dictWordCount }}</span>
+                    <span class="wb-stat__label">通用词表</span>
+                  </div>
+                  <div class="wb-stat">
                     <span class="wb-stat__num">{{ commonGroupCount }}</span>
                     <span class="wb-stat__label">常用词类别</span>
                   </div>
@@ -1211,7 +1217,7 @@ function reset(): void {
 /* ---- 内置词表：数字概览 ---- */
 .wb-stats {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: var(--space-3);
   margin: var(--space-3) 0;
 }

@@ -478,6 +478,11 @@ export interface XbaosBridge {
 
   window: {
     control: (action: 'minimize' | 'maximize' | 'close') => void
+    /**
+     * 贴靠到屏幕的某一块。四个值都是当前显示器工作区的比例（0–1）：
+     * 像素换算在主进程做 —— 只有它知道 DPI 缩放、任务栏高度与多显示器归属。
+     */
+    snap: (cell: { x: number; y: number; w: number; h: number }) => void
     onStateChange: (cb: (state: { maximized: boolean; fullScreen: boolean }) => void) => () => void
   }
 

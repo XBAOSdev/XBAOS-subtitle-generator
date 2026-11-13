@@ -966,6 +966,7 @@ html.glass .titlebar__name,
 html.glass .abar__name,
 html.glass .rbar__name,
 html.glass .titlebar__btn,
+html.glass .notice__btn,
 html.glass .abar__icon,
 html.glass .rbar__icon {
   color: var(--color-text-primary);

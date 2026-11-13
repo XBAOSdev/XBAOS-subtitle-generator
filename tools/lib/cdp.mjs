@@ -129,6 +129,17 @@ export class Cdp {
     return res.result.value
   }
 
+  /**
+   * 只移动鼠标，不点击。
+   *
+   * 悬停类交互（贴靠浮窗、hover 浮层）必须靠真实的鼠标移动触发：Chromium
+   * 只有收到 `mouseMoved` 才会补发相应的 pointerover / pointerenter，
+   * 在页面里 `dispatchEvent` 造出来的合成事件走不到那套判断里。
+   */
+  async move(x, y) {
+    await this.send('Input.dispatchMouseEvent', { x, y, type: 'mouseMoved', button: 'none', buttons: 0 })
+  }
+
   async click(x, y) {
     const base = { x, y, button: 'left', clickCount: 1, buttons: 1 }
     await this.send('Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', buttons: 0 })
