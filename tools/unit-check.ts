@@ -6267,6 +6267,9 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   const globalCss = readSrc('src/styles/global.css')
   const preloadSrc = readSrc('electron/preload.cjs')
   const mainSrc = readSrc('electron/main.js')
+  const assistSrc = readSrc('src/views/AssistView.vue')
+  const recordSrc = readSrc('src/views/RecordView.vue')
+  const chromeSrc = readSrc('src/composables/useNativeChrome.ts')
   const dictSrc = readSrc('src/data/wrapDict.ts')
   const lexiconSrc = readSrc('src/data/lexicons.ts')
 
@@ -6302,36 +6305,34 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
 
   check(
-    '最大化键悬停弹出贴靠浮窗',
-    /SNAP_PRESETS/.test(titleSrc) &&
-      /@pointerenter="scheduleSnap"/.test(titleSrc) &&
-      /role="dialog"/.test(titleSrc),
-    'Windows 11 的贴靠浮窗只给原生标题栏按钮画，自绘标题栏拿不到，只能自己画',
+    'Windows 上窗口按钮交给系统绘制',
+    /titleBarStyle: 'hidden'/.test(mainSrc) &&
+      /titleBarOverlay: \{/.test(mainSrc) &&
+      /setTitleBarOverlay/.test(mainSrc) &&
+      /nativeChrome: process\.platform === 'win32'/.test(preloadSrc),
+    '自绘按钮系统不认，Windows 11 的贴靠布局永远不会为它弹出',
   )
   check(
-    '浮窗有六种预设，且每格是按钮',
-    (titleSrc.match(/\{ x: [\d.]+, y: [\d.]+, w: [\d.]+, h: [\d.]+ \}/g) ?? []).length >= 18 &&
-      /class="snap__cell"/.test(titleSrc),
-    '预设太少不如不给；格子不可点就只是个装饰图',
+    '不再自绘贴靠浮窗',
+    !/SNAP_PRESETS/.test(titleSrc) && !/'window:snap'/.test(preloadSrc) && !/window:snap/.test(mainSrc),
+    '自绘的六宫格在位置、间距、阴影上都对不上系统那个，不如没有',
   )
   check(
-    '浮窗关闭走坐标判定，不靠 mouseleave',
-    /function insideSnapZone/.test(titleSrc) &&
-      /addEventListener\('pointermove', onSnapPointerMove\)/.test(titleSrc) &&
-      !/@pointerleave=|addEventListener\('mouseleave'|addEventListener\('pointerleave'/.test(titleSrc),
-    '面板是后出现在静止指针下面的元素，浏览器不补发 enter/leave；按钮与面板之间还有 6px 缝',
+    '三个窗口都给系统按钮让出位置',
+    [titleSrc, assistSrc, recordSrc].every((s) => /env\(titlebar-area-width, 100vw\)/.test(s)),
+    '留白漏一个，通知键或置顶键就被压到最大化按钮下面，点不到',
   )
   check(
-    '贴靠位置由主进程按工作区换算',
-    /'window:snap'/.test(preloadSrc) &&
-      /ipcMain\.on\('window:snap'/.test(mainSrc) &&
-      /screen\.getDisplayMatching\(win\.getBounds\(\)\)\.workArea/.test(mainSrc),
-    '渲染进程只知道比例；DPI、任务栏、多显示器都只有主进程知道',
+    '有系统按钮时不再自绘那三个',
+    [titleSrc, assistSrc, recordSrc].every((s) => /v-if="!nativeChrome"/.test(s)),
+    '两套按钮同时在，系统三个与自绘三个并排，点哪个都别扭',
   )
   check(
-    '贴靠前先解开最大化',
-    /if \(win\.isMaximized\(\)\) win\.unmaximize\(\)[\s\S]{0,80}win\.setBounds\(bounds\)/.test(mainSrc),
-    '最大化状态下 setBounds 在 Windows 上不生效，顺序反了就贴不动',
+    '系统按钮的符号色跟着主题走',
+    /--color-text-primary/.test(chromeSrc) &&
+      /setOverlay/.test(chromeSrc) &&
+      /attributeFilter: \['data-theme'\]/.test(chromeSrc),
+    '系统按钮不认识 CSS 变量：不报色，深色主题下就是一片黑符号',
   )
 
   check(
@@ -6369,6 +6370,33 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '扩表不改提示词预算',
     !/wrapDict|WRAP_DICT/.test(readSrc('src/utils/prompt.ts')),
     '两万条词灌进 initial_prompt 会把预算撑爆，且这些词引擎本来就认得',
+  )
+
+  /*
+   * 非 ASCII 路径（GitHub issue #1）。
+   *
+   * 协议里的路径是 UTF-8，Windows 的窄字符文件 API 走 ANSI 代码页，于是
+   * 「模型就在目录里」和「引擎打不开」同时成立 —— 报错还长成「目录里没有
+   * model.onnx」，把人误导去查模型文件。这里守住三件事：不许再用窄字符
+   * 打开文件、路径必须过 UTF-8 → 宽字符、目录判定按文件系统而不是「能不能
+   * 打开」。
+   */
+  const asrSrc = readSrc('engine-onnx/src/main.cpp')
+  check(
+    'ONNX 引擎不用窄字符文件 API',
+    !/\bfopen\s*\(/.test(asrSrc),
+    '中文目录下 fopen 必然打不开（UTF-8 字节被按 GBK 解释）',
+  )
+  check(
+    'ONNX 引擎的模型路径走 UTF-8 → 宽字符',
+    asrSrc.includes('#include "platform.hpp"') &&
+      (asrSrc.match(/xbaos::pathFromUtf8\(/g) ?? []).length >= 2,
+    'pickFile 与目录判定各需要一次；漏一处就还是打不开中文目录',
+  )
+  check(
+    '目录不存在时不报成「目录里没有模型」',
+    /std::filesystem::is_directory\(probe/.test(asrSrc) && /模型目录不存在/.test(asrSrc),
+    '「目录里没有 model.onnx」这种说法与「文件明明在」互相矛盾，最费排查时间',
   )
 }
 

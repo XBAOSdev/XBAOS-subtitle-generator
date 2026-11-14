@@ -102,13 +102,18 @@ contextBridge.exposeInMainWorld('xbaos', {
   window: {
     control: (action) => ipcRenderer.send('window:control', action),
     /**
-     * 贴靠到屏幕的某一块。
+     * 标题栏的窗口按钮是不是系统画的。
      *
-     * 传的是**比例**而不是像素：屏幕尺寸、DPI、任务栏高度都由主进程按当前
-     * 显示器的工作区换算，渲染进程不该知道这些（多显示器下更是如此）。
-     * `cell = { x, y, w, h }`，四个值都是 0–1。
+     * Windows 上为 `true`（Window Controls Overlay）：界面不该再自绘那三个按钮，
+     * 还要给系统按钮留出 `env(titlebar-area-width)` 之外的位置。离开 Windows
+     * 或浏览器预览时为 `false`，界面按自绘处理。
      */
-    snap: (cell) => ipcRenderer.send('window:snap', cell),
+    nativeChrome: process.platform === 'win32',
+    /**
+     * 系统按钮的符号色。系统不认识页面的 CSS 变量，主题一变就得把算好的颜色
+     * 报上去；按钮底色恒为透明，由页面与毛玻璃材质透上来。
+     */
+    setOverlay: (colors) => ipcRenderer.send('window:overlay', colors),
     onStateChange: (cb) => subscribe('window:state', cb),
   },
 

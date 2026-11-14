@@ -53,6 +53,7 @@
 // audio.hpp 的符号全在 xaudio 命名空间内（与 whisper 引擎共用同一份实现）
 #include "audio.hpp"
 #include "mini_json.hpp"
+#include "platform.hpp"
 #include "vad.hpp"
 
 using namespace xaudio;
@@ -64,6 +65,8 @@ using namespace xaudio;
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -204,12 +207,20 @@ struct Cue {
 
 // ---------------------------------------------------------------- 模型路径
 
+/*
+ * 这一节的每一条都必须走 xbaos::pathFromUtf8，理由与 audio.hpp 里写的一样：
+ * 协议里的路径是 UTF-8，Windows 的窄字符文件 API 走的是 ANSI 代码页（简体中文
+ * 系统上是 GBK）。把 UTF-8 字节直接交给 std::fopen，路径里只要有中文就必定
+ * 打不开 —— 表现是「模型文件明明在目录里，引擎却报目录里没有 model.onnx」。
+ * 用户把模型放在 E:\小包听幕\models\sensevoice-small 就是这样挂的（issue #1）。
+ */
+
 /** 目录里找一个存在的文件，找不到返回空串 */
 std::string pickFile(const std::string &dir, std::initializer_list<const char *> names) {
     for (const char *name : names) {
         std::string full = dir + "\\" + name;
-        if (FILE *f = std::fopen(full.c_str(), "rb")) {
-            std::fclose(f);
+        std::ifstream f(xbaos::pathFromUtf8(full), std::ios::binary);
+        if (f.is_open()) {
             return full;
         }
     }
@@ -234,14 +245,21 @@ bool resolveModelFiles(const std::string &given, std::string &onnx, std::string 
         return false;
     }
 
+    std::error_code ec;
+    const std::filesystem::path probe = xbaos::pathFromUtf8(given);
     std::string dir = given;
+
     // 传的是文件：优先当成 onnx，同时把目录推出来找 tokens.txt
-    if (FILE *f = std::fopen(given.c_str(), "rb")) {
-        std::fclose(f);
+    if (std::filesystem::is_regular_file(probe, ec)) {
         dir = parentDir(given);
         onnx = given;
     } else {
-        // 传的是目录
+        // 传的是目录。目录本身不存在时说清楚是目录的问题，不要报成
+        // 「目录里没有 model.onnx」—— 那会把人引到错的方向上去
+        if (!std::filesystem::is_directory(probe, ec)) {
+            err = "模型目录不存在：" + given;
+            return false;
+        }
         onnx = pickFile(dir, {"model.int8.onnx", "model.onnx"});
         if (onnx.empty()) {
             err = "模型目录里没有 model.int8.onnx 或 model.onnx";

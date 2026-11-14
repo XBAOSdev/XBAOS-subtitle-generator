@@ -21,6 +21,7 @@
  *    全部由它派生 —— 删段之后的「自动补位」于是不需要任何额外逻辑，它就是派生结果。
  */
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { useNativeChrome } from '@/composables/useNativeChrome'
 import Icon from '@/components/Icon.vue'
 import { useUiStore } from '@/stores/ui'
 import { encodeWav, peakEnvelope } from '@/utils/wav'
@@ -917,6 +918,8 @@ async function save(): Promise<void> {
 
 /* ------------------------------------------------------------------ 关窗 */
 
+const { nativeChrome } = useNativeChrome()
+
 let offCloseRequest: (() => void) | undefined
 
 /** 标题栏的最小化 / 最大化。与 AssistView 同一套桥；浏览器预览里走 window.close 兜底 */
@@ -1074,15 +1077,18 @@ watch(joinedSec, () => requestDraw())
       </div>
 
       <div class="rbar__right">
-        <button class="rbar__icon" type="button" title="最小化" @click="windowControl('minimize')">
-          <Icon name="minus" :size="14" />
-        </button>
-        <button class="rbar__icon" type="button" title="最大化" @click="windowControl('maximize')">
-          <Icon name="square" :size="12" />
-        </button>
-        <button class="rbar__icon rbar__icon--close" type="button" title="关闭" @click="forceClose()">
-          <Icon name="x" :size="14" />
-        </button>
+        <!-- Windows 上这三个按钮由系统画（贴靠布局要它才给），关窗仍走同一条闸门 -->
+        <template v-if="!nativeChrome">
+          <button class="rbar__icon" type="button" title="最小化" @click="windowControl('minimize')">
+            <Icon name="minus" :size="14" />
+          </button>
+          <button class="rbar__icon" type="button" title="最大化" @click="windowControl('maximize')">
+            <Icon name="square" :size="12" />
+          </button>
+          <button class="rbar__icon rbar__icon--close" type="button" title="关闭" @click="forceClose()">
+            <Icon name="x" :size="14" />
+          </button>
+        </template>
       </div>
     </header>
 
@@ -1359,6 +1365,8 @@ watch(joinedSec, () => requestDraw())
   display: flex;
   align-items: center;
   -webkit-app-region: no-drag;
+  /* 给系统按钮让位；没有 overlay 时 env 回落 100vw，减出来正好是 0 */
+  margin-right: calc(100vw - env(titlebar-area-width, 100vw));
 }
 
 .rbar__icon {

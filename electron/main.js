@@ -724,6 +724,34 @@ function glassWindowOptions(headless) {
   }
 }
 
+/*
+ * 窗口按钮交给系统画。
+ *
+ * 自绘三个按钮看着能做得更齐，代价是 Windows 11 的贴靠布局（悬停最大化弹出
+ * 六宫格）永远不出现 —— 那个浮窗是系统给**它自己的**标题栏按钮画的，
+ * HTML 画出来的按钮系统不认，位置也不会替我们算。改用 Window Controls
+ * Overlay 把按钮还回去之后，浮窗、悬停高亮、双击最大化都是原生行为。
+ *
+ * `color` 给全透明：按钮区的底色由页面（含毛玻璃材质）透上来，系统只负责
+ * 符号与悬停状态；`symbolColor` 只有一个值，随主题走，由渲染层报上来。
+ */
+const NATIVE_WINDOW_CONTROLS = process.platform === 'win32'
+/** 必须与 CSS 的 `--titlebar-height` 一致（三个窗口的标题栏都是这一档） */
+const TITLEBAR_HEIGHT = 40
+
+function nativeChromeOptions(theme) {
+  if (!NATIVE_WINDOW_CONTROLS) return { frame: false }
+  return {
+    // 注意：不要同时写 `frame: false`。Windows 上这两者一起用会让系统按钮不出现
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#00000000',
+      symbolColor: theme === 'dark' ? '#e6e6e6' : '#1f1f1f',
+      height: TITLEBAR_HEIGHT,
+    },
+  }
+}
+
 /** 三个窗口一起切材质。窗口可能还没建、可能已销毁，逐个判掉 */
 function applyGlassMaterial(active) {
   for (const win of [mainWindow, assistWindow, recordWindow]) {
@@ -792,8 +820,8 @@ function createWindow() {
     // 最小尺寸也不能超过屏幕可用高度，否则小屏上窗口永远塞不进工作区
     minWidth: Math.min(1040, width),
     minHeight: Math.min(680, height),
-    // 界面自带标题栏，用系统边框会重复一条
-    frame: false,
+    // 界面自带标题栏，用系统边框会重复一条。Windows 上改为把三个按钮交回系统
+    ...nativeChromeOptions(startupTheme),
     // 开发模式的窗口/任务栏图标。打包后 build/ 不进 asar，
     // Windows 会自动取 exe 里嵌的图标资源，无需指定
     ...(app.isPackaged ? {} : { icon: path.join(repoRoot, 'build', 'icon.ico') }),
@@ -988,8 +1016,8 @@ function createAssistWindow(payload) {
     // 可缩放：提示词长短不一，用户会想把它拉大一点看
     resizable: true,
     maximizable: true,
-    // 与主窗口一致的自绘标题栏
-    frame: false,
+    // 与主窗口一致：Windows 上三个按钮由系统画，贴靠布局才是原生的
+    ...nativeChromeOptions(resolvedStartupTheme()),
     // 不默认置顶：两个窗口来回切是这段流程的常态，长期钉在最前反而挡住别的窗口
     alwaysOnTop: false,
     ...(app.isPackaged ? {} : { icon: path.join(repoRoot, 'build', 'icon.ico') }),
@@ -1076,7 +1104,7 @@ function createRecordWindow() {
     minHeight: 480,
     resizable: true,
     maximizable: true,
-    frame: false,
+    ...nativeChromeOptions(resolvedStartupTheme()),
     alwaysOnTop: false,
     ...(app.isPackaged ? {} : { icon: path.join(repoRoot, 'build', 'icon.ico') }),
     backgroundColor: glass.active ? '#00000000' : glass.solidBg,
@@ -1373,40 +1401,22 @@ function registerIpc() {
   })
 
   /*
-   * 贴靠布局（标题栏「最大化」悬停浮窗里点一格）。
+   * 系统按钮的颜色跟着主题走。
    *
-   * 为什么由主进程算：屏幕工作区、DPI 缩放、任务栏高度、多显示器归属都只有
-   * 主进程知道。渲染进程只传比例 —— 它看到的是「把窗口切到左边一半」，
-   * 而不是「x=0 y=0 w=960 h=1040」这种一定会在别的机器上错的值。
-   *
-   * 先把最大化解开再设边界：最大化状态下 `setBounds` 在 Windows 上不生效。
-   * 顺序不能反，也不能只调 setBounds 了事。
+   * 按钮底色恒为全透明（材质与页面底色透上来本身就是对的），只有符号色要在
+   * 深浅两套之间切 —— 系统按钮不认识我们的 CSS 变量，只能由渲染层读完计算样式
+   * 后报上来。`height` 每次一并给：Windows 要求三个字段同时传。
    */
-  ipcMain.on('window:snap', (event, cell) => {
+  ipcMain.on('window:overlay', (event, colors) => {
+    if (!NATIVE_WINDOW_CONTROLS) return
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win || win.isDestroyed()) return
-    const parts = ['x', 'y', 'w', 'h'].map((k) => Number(cell && cell[k]))
-    if (parts.some((v) => !Number.isFinite(v))) return
-    const [rx, ry, rw, rh] = parts.map((v) => Math.min(1, Math.max(0, v)))
-    if (rw <= 0.05 || rh <= 0.05) return
-
-    // 窗口当前所在的显示器（不是主屏）：双屏下贴到主屏去是明显的错
-    const area = screen.getDisplayMatching(win.getBounds()).workArea
-    const bounds = {
-      x: Math.round(area.x + area.width * rx),
-      y: Math.round(area.y + area.height * ry),
-      width: Math.round(area.width * rw),
-      height: Math.round(area.height * rh),
+    const symbolColor = typeof colors?.symbolColor === 'string' ? colors.symbolColor : '#e6e6e6'
+    try {
+      win.setTitleBarOverlay({ color: '#00000000', symbolColor, height: TITLEBAR_HEIGHT })
+    } catch {
+      // 没有 overlay 的窗口（例如非 Windows）上调用会抛错：忽略即可
     }
-    // 贴靠出来的格子不能小于窗口自己的最小尺寸，否则 win.setBounds 会被夹住，
-    // 结果是「贴到了但没贴满」—— 提前夹到合法区间，至少位置是对的
-    const [minW, minH] = win.getMinimumSize()
-    bounds.width = Math.max(bounds.width, minW)
-    bounds.height = Math.max(bounds.height, minH)
-
-    if (win.isMaximized()) win.unmaximize()
-    if (win.isFullScreen()) win.setFullScreen(false)
-    win.setBounds(bounds)
   })
 
   // ---- 系统对话框
