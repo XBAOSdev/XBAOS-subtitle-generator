@@ -249,10 +249,11 @@ async function onUpdateClick(): Promise<void> {
   color: var(--color-accent-text);
 }
 
+/* 底栏与上面的导航列表之间不画分割线：两者本来就在同一块面板里，
+ * 一条横贯全宽的线只把「五个入口 + 开关」切成了两半，没有分区含义。 */
 .sidebar__foot {
   flex: none;
   padding: var(--space-3) var(--space-4);
-  border-top: 1px solid var(--color-border-subtle);
   transition: padding var(--dur-base) var(--ease-out);
 }
 
@@ -385,7 +386,13 @@ async function onUpdateClick(): Promise<void> {
   opacity: 0;
 }
 
+/*
+ * 收起后按钮里只剩图标，文字是「max-width 归零」而不是移除 ——
+ * 它仍占掉一个 gap，于是 justify-content: center 居中的是「图标 + 间隙」这一坨，
+ * 图标本身偏左半个 gap。gap 必须同时归零，图标才落在 52px 栏的正中。
+ */
 .sidebar.is-collapsed .sidebar__update {
+  gap: 0;
   padding: 6px 0;
 }
 

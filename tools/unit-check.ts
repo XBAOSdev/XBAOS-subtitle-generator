@@ -6177,6 +6177,27 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     /document\.fonts\?\.ready\.then\(\(\) => measure\(true\)\)/.test(thumbSrc),
     '内嵌字体是异步交换的，首帧量到的是系统字体的宽度',
   )
+  /*
+   * 2026-11-14：容器一旦不在布局里（KeepAlive 移出文档 / 窗口最小化 / 祖先隐藏），
+   * 两个 rect 全是 0，差值也是 0 —— 照旧写下去就把指示块扔到左上角，页面回来时
+   * CSS 过渡再从那里滑过来，看着就是「一块底色从左上角飞出来」。
+   */
+  check(
+    '指示块量不到有效几何时不写坐标',
+    /!el\.getClientRects\(\)\.length \|\| !anchored\(el, thumb\)/.test(thumbSrc) &&
+      /if \(box\.width < 1 \|\| box\.height < 1 \|\| rect\.width < 1\)/.test(thumbSrc),
+    '折叠态照旧写 left/top=0，页面回来时就会从左上角滑出来',
+  )
+  check(
+    '从折叠状态回来时必须无动画就位',
+    /__segPending/.test(thumbSrc) && /const jump = !animate \|\| el\.__segPending === true/.test(thumbSrc),
+    '有动画就是从 (0,0) 飞过去，那正是用户看到的那一下',
+  )
+  check(
+    '结构观察忽略指示块自身的 class 变化',
+    /records\.every\(\(r\) => r\.target === thumb\)/.test(thumbSrc),
+    '加 `--jump` 会触发自己这一轮的 MutationObserver，pending 状态下能自激成死循环',
+  )
   check(
     '显示方式取「有效值」而不是存的偏好',
     /const viewMode = computed<SubtitleViewMode>\(\(\) =>[\s\S]{0,120}hasAnyTranslation\.value \? settings\.subtitleView : 'source'/.test(
@@ -6303,6 +6324,16 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     /\.sidebar\.is-collapsed \.sidebar__meta\s*\{[^}]*justify-content:\s*center/.test(sidebarSrc),
     '22px 的开关落在 52px 栏里从左排，比上面那列居中图标偏左 7px，看着像没对齐',
   )
+  check(
+    '侧栏收起时更新按钮图标居中',
+    /\.sidebar\.is-collapsed \.sidebar__update\s*\{[^}]*gap:\s*0/.test(sidebarSrc),
+    '文字只把 max-width 归零、仍占一个 gap，居中的是「图标 + 间隙」，图标偏左 4px',
+  )
+  check(
+    '侧栏底栏不画分割线',
+    !/\.sidebar__foot\s*\{[^}]*border-top/.test(sidebarSrc),
+    '一条横贯全宽的线把五个入口和开关切成两半，没有分区含义',
+  )
 
   check(
     'Windows 上窗口按钮交给系统绘制',
@@ -6331,8 +6362,19 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '系统按钮的符号色跟着主题走',
     /--color-text-primary/.test(chromeSrc) &&
       /setOverlay/.test(chromeSrc) &&
-      /attributeFilter: \['data-theme'\]/.test(chromeSrc),
+      /attributeFilter: \['data-theme', 'class'\]/.test(chromeSrc),
     '系统按钮不认识 CSS 变量：不报色，深色主题下就是一片黑符号',
+  )
+  /*
+   * 2026-11-14：曾为「左上角偶发一块白」把按钮区改成不透明同色，毛玻璃下就是一整块
+   * 实心色块（比那个偶发白块显眼得多），已回退。守回透明：材质与页面底色要透上来。
+   */
+  check(
+    '系统按钮区留透明，让材质透上来',
+    /TITLEBAR_GLASS = '#00000000'/.test(mainSrc) &&
+      /color: TITLEBAR_GLASS/.test(mainSrc) &&
+      !/TITLEBAR_BG/.test(mainSrc),
+    '给不透明底色时毛玻璃下按钮区会变成一块实心色块，与半透明标题栏对不上',
   )
 
   check(

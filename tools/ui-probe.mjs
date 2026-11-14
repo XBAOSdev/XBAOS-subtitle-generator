@@ -3072,6 +3072,39 @@ const scenarios = {
     })()`)
     check('分段控件选中标记滑动到了新的一格', thumb?.onActive === true, JSON.stringify(thumb))
 
+    /*
+     * 折叠再恢复（= 切走页面 / 最小化窗口时发生的事）。
+     *
+     * 容器一旦不在布局里，选中项与容器的 rect 都是 0，差值也是 0 —— 旧实现照旧写
+     * `left:0; top:0`，等页面回来 CSS 过渡就从那里滑过去，用户看到的是「一块底色
+     * 从左上角飞出来」。这里守两件事：折叠期间坐标不许被改写、恢复后必须仍贴着选中格。
+     */
+    const collapse = await cdp.evaluate(`(async () => {
+      const seg = document.querySelector('.seg')
+      const thumb = seg?.querySelector('.seg-thumb')
+      if (!seg || !thumb) return null
+      const before = thumb.style.left
+      seg.style.display = 'none'
+      await new Promise((r) => setTimeout(r, 120))
+      const hiddenLeft = thumb.style.left
+      const hiddenOpacity = thumb.style.opacity
+      seg.style.display = ''
+      await new Promise((r) => setTimeout(r, 160))
+      const active = seg.querySelector('.choice.is-active')
+      const t = thumb.getBoundingClientRect()
+      const a = active.getBoundingClientRect()
+      return {
+        before,
+        hiddenLeft,
+        kept: before !== '' && hiddenLeft === before,
+        hiddenOpacity,
+        backOpacity: thumb.style.opacity,
+        onActive: Math.abs(t.left - a.left) < 2 && Math.abs(t.width - a.width) < 2,
+      }
+    })()`)
+    check('折叠期间不把指示块改写到 (0,0)', collapse?.kept === true, JSON.stringify(collapse))
+    check('恢复后指示块仍贴着选中格', collapse?.onActive === true, JSON.stringify(collapse))
+
     const hint = await cdp.evaluate(`(() => {
       const blocks = [...document.querySelectorAll('.field__hint')]
       const el = blocks.find((b) => b.textContent.includes('五遍') || b.textContent.includes('两遍精选'))
@@ -6975,6 +7008,54 @@ const scenarios = {
       )
       await shot(cdp, 'probe-sidebar-collapsed.png')
     }
+
+    /*
+     * 收起态的更新提示只剩一个图标，它必须落在 52px 栏的正中。
+     * `justify-content: center` 居中的是「图标 + gap + 零宽文字」这一坨 ——
+     * 文字的 max-width 归零了但仍占一个间隙，图标就偏左 4px。截图看不出来，只能量。
+     */
+    await goto(cdp, `${BASE}/?demo=1&view=editor&theme=light&update=available`)
+    await sleep(500)
+    const alreadyCollapsed = await cdp.evaluate(
+      `document.querySelector('.sidebar')?.classList.contains('is-collapsed') === true`,
+    )
+    if (!alreadyCollapsed) {
+      const t2 = await cdp.evaluate(`(() => {
+        const b = document.querySelector('.sidebar__collapse')
+        if (!b) return null
+        const r = b.getBoundingClientRect()
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      })()`)
+      if (t2) {
+        await cdp.click(t2.x, t2.y)
+        await sleep(450)
+      }
+    }
+    const footBox = await cdp.evaluate(`(() => {
+      const nav = document.querySelector('.sidebar')
+      const btn = document.querySelector('.sidebar__update')
+      const foot = document.querySelector('.sidebar__foot')
+      if (!nav || !btn || !foot) return null
+      const nr = nav.getBoundingClientRect()
+      const icon = btn.querySelector('svg')
+      if (!icon) return null
+      const ir = icon.getBoundingClientRect()
+      return {
+        iconCenter: Math.round(ir.x + ir.width / 2),
+        axis: Math.round(nr.x + nr.width / 2),
+        borderTop: getComputedStyle(foot).borderTopWidth,
+      }
+    })()`)
+    check(
+      '收起时更新按钮的图标落在侧栏中轴上',
+      footBox !== null && Math.abs(footBox.iconCenter - footBox.axis) <= 1,
+      JSON.stringify(footBox),
+    )
+    check(
+      '侧栏底栏不画分割线',
+      footBox !== null && footBox.borderTop === '0px',
+      footBox ? footBox.borderTop : '没量到',
+    )
 
     await cdp.evaluate(`(() => {
       Object.keys(localStorage).filter((k) => k.startsWith('xbaos.settings')).forEach((k) => localStorage.removeItem(k))

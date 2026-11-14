@@ -738,15 +738,23 @@ function glassWindowOptions(headless) {
 const NATIVE_WINDOW_CONTROLS = process.platform === 'win32'
 /** 必须与 CSS 的 `--titlebar-height` 一致（三个窗口的标题栏都是这一档） */
 const TITLEBAR_HEIGHT = 40
+/**
+ * 按钮区不画底色（全透明），让页面底色与毛玻璃材质直接透上来。
+ *
+ * 曾为「左上角偶发一块白」改成过不透明同色，代价是按钮区变成一块实心色块 ——
+ * 毛玻璃下它与半透明标题栏的色差一眼可见，比那个偶发白块更难看，已回退。
+ */
+const TITLEBAR_GLASS = '#00000000'
 
 function nativeChromeOptions(theme) {
   if (!NATIVE_WINDOW_CONTROLS) return { frame: false }
+  const dark = theme === 'dark'
   return {
     // 注意：不要同时写 `frame: false`。Windows 上这两者一起用会让系统按钮不出现
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#00000000',
-      symbolColor: theme === 'dark' ? '#e6e6e6' : '#1f1f1f',
+      color: TITLEBAR_GLASS,
+      symbolColor: dark ? '#e6e6e6' : '#1f1f1f',
       height: TITLEBAR_HEIGHT,
     },
   }
@@ -1413,7 +1421,7 @@ function registerIpc() {
     if (!win || win.isDestroyed()) return
     const symbolColor = typeof colors?.symbolColor === 'string' ? colors.symbolColor : '#e6e6e6'
     try {
-      win.setTitleBarOverlay({ color: '#00000000', symbolColor, height: TITLEBAR_HEIGHT })
+      win.setTitleBarOverlay({ color: TITLEBAR_GLASS, symbolColor, height: TITLEBAR_HEIGHT })
     } catch {
       // 没有 overlay 的窗口（例如非 Windows）上调用会抛错：忽略即可
     }
