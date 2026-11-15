@@ -2725,6 +2725,17 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '少打一个的话，安装后换到另一种架构就没有引擎可用',
   )
   /*
+   * Electron 默认分发的 ffmpeg.dll（3.1MB）**含 AAC 与 H.264 解码器**。实测证据：
+   * 把它放进运行时，`decodeAudioData()` 能解 .m4a；换成非专有版（1.6MB）则报
+   * `EncodingError`，同一份 mp3 / flac / ogg / wav 照常解。也就是说「随包携带」
+   * 与「能不能解」是同一件事，删掉这一行就等于重新分发专有编解码器实现。
+   */
+  check(
+    '打包时把 Electron 自带的 ffmpeg 换成非专有版本',
+    /^downloadAlternateFFmpeg:\s*true\s*$/m.test(readSource('electron-builder.yml')),
+    '删掉这一行，ffmpeg.dll 会回到含 AAC / H.264 的版本，等于随包分发专有编解码器实现',
+  )
+  /*
    * ---- 下载完整性（2026-11-04）
    *
    * 清单里每个文件都必须带真实 sha256。Hugging Face 的 LFS 对象 id 与 ModelScope 的
