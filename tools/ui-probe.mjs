@@ -6670,6 +6670,34 @@ const scenarios = {
       `还剩 ${ghostLeft} 个`,
     )
 
+    /* ---------------- 相邻接缝：只指下一条（区间左闭右开） ---------------- */
+
+    /*
+     * 两条首尾严丝合缝时（甲.end === 乙.start），旧写法 `t >= start && t <= end`
+     * 会让两条同时命中 —— 游标刚好停在接缝上，下面冒出两个三角，而此刻只可能
+     * 在听一条。改成左闭右开后，接缝归下一条。真正的重叠（不同泳道同时存在）
+     * 仍然两个三角，上一条判据守着那个行为。
+     */
+    await store(`
+      const f = project.viewFile
+      f.segments = [
+        ${JSON.stringify(mk('s1', 0, 4, '接缝前的那一条'))},
+        ${JSON.stringify(mk('s2', 4, 8, '接缝后的那一条'))},
+      ]
+      editor.setPlayhead(4)
+    `)
+    await waitFor(cdp, `document.querySelectorAll('.subtable__mark.is-ghost').length === 0`, 2000)
+    const seam = await cdp.evaluate(`(() => {
+      const ids = [...document.querySelectorAll('.subtable__mark:not(.is-ghost)')].map((m) => m.dataset.markId)
+      const marked = [...document.querySelectorAll('.row.is-marked')].map((r) => r.dataset.segId)
+      return { ids, marked }
+    })()`)
+    check(
+      '首尾相接处只指下一条（接缝归后一条）',
+      seam.ids.length === 1 && seam.ids[0] === 's2' && seam.marked.length === 1 && seam.marked[0] === 's2',
+      JSON.stringify(seam),
+    )
+
     /* ---------------- 底部告警分层：当前文件 vs 整个工程 ---------------- */
 
     await store(`

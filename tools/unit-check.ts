@@ -6519,6 +6519,88 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     /std::filesystem::is_directory\(probe/.test(asrSrc) && /模型目录不存在/.test(asrSrc),
     '「目录里没有 model.onnx」这种说法与「文件明明在」互相矛盾，最费排查时间',
   )
+
+  /*
+   * 2026-11-15 用户报的三处排版 / 交互修正。
+   *
+   * 三条都容易被后来的「顺手重写」抹掉：区间是纯逻辑、平滑是两行像素、对齐
+   * 是半像素。抹掉之后都不报错，只是又变回「两个三角」「画面一顿」「看着歪」。
+   */
+  const seamTableSrc = readSrc('src/components/SubtitleTable.vue')
+  check(
+    '播放指示三角的命中区间左闭右开（接缝处只指下一条）',
+    /t >= s\.start && t < s\.end/.test(seamTableSrc) && !/t <= s\.end/.test(seamTableSrc),
+    '两条首尾相接时游标正站在接缝上，闭区间会同时命中两条，下面冒出两个三角',
+  )
+
+  const followTimelineSrc = readSrc('src/components/TimelineTrack.vue')
+  check(
+    '播放时的视窗跟随走平滑平移，不是瞬移',
+    /const FOLLOW_HOLD = 0\.86/.test(followTimelineSrc) &&
+      /panGoalSec = t - span \* FOLLOW_HOLD[\s\S]{0,160}startAnim\(\)/.test(followTimelineSrc),
+    '到 90% 处 jumpTo 一次，波形和游标一起「啪」地换位，看着像卡帧',
+  )
+
+  const capTokensSrc = readSrc('src/styles/tokens.css')
+  const contentCap = Number((capTokensSrc.match(/--content-max-width:\s*(\d+)px/) ?? [])[1])
+  check(
+    '页面内容宽度上限只拦超宽屏，不拦普通屏拉宽',
+    contentCap >= 1600,
+    `当前 ${contentCap}px：按默认窗口配的，窗口一最大化两边就露出死白边`,
+  )
+  check(
+    '导入页设置栏与设置页表单各自放宽到自己的上限',
+    /clamp\(300px, 24vw, 420px\)/.test(readSrc('src/views/HomeView.vue')) &&
+      /\.setmain__inner\s*\{[^}]*max-width:\s*1180px/.test(readSrc('src/views/SettingsView.vue')),
+    '外壳铺满、正文收窄是常规版式；两者都不动就等于「拉宽窗口没用」',
+  )
+
+  const optSidebarSrc = readSrc('src/components/AppSidebar.vue')
+  check(
+    '侧栏版本号补了光学对齐的半像素（用 transform，不用 top）',
+    /\.sidebar__version\s*\{[^}]*transform:\s*translateY\(-0\.5px\)/.test(optSidebarSrc),
+    '数字与 v 都没有下伸部，墨迹中心天生比行盒中心低半格；而 top 会被吸附成整像素，挪半格变挪一格',
+  )
+
+  /*
+   * 滚动条不许吃布局。
+   *
+   * Chromium 的滚动条是占位的：它一出现就从正文里扣掉 10px，面板内容一变长
+   * 正文就被横向挤一下。唯一稳的解法是让槽位常驻（`scrollbar-gutter: stable`），
+   * 所以这条断言扫全仓：**每个会纵向滚的块都必须自带 gutter**。
+   *
+   * 别指望 `--enable-features=OverlayScrollbar`：在主进程里 `appendSwitch`
+   * 对已经初始化过的 feature 列表无效（实测照旧占 15px），打包后开不出来。
+   */
+  {
+    const offenders: string[] = []
+    const scan = (dir: string): void => {
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name)
+        if (statSync(full).isDirectory()) {
+          scan(full)
+          continue
+        }
+        if (!/\.(vue|css)$/.test(name)) continue
+        const text = readFileSync(full, 'utf8')
+        for (const block of text.match(/\{[^{}]*\}/g) ?? []) {
+          if (!/(^|[\s;])overflow(-y)?\s*:\s*(auto|scroll)\s*;/.test(block)) continue
+          if (/scrollbar-gutter\s*:/.test(block)) continue
+          // 只横向滚的块不吃 gutter：它预留的是右侧 10px，对横向滚动条无用
+          if (/overflow-x\s*:\s*(auto|scroll)\s*;/.test(block) && !/overflow-y\s*:/.test(block)) continue
+          offenders.push(`${full} → ${block.replace(/\s+/g, ' ').slice(0, 60)}`)
+        }
+      }
+    }
+    scan(fileURLToPath(new URL('../src', import.meta.url)))
+    check(
+      '所有纵向滚动容器都预留了滚动条槽位',
+      offenders.length === 0,
+      offenders.length > 0
+        ? `缺 scrollbar-gutter: stable —— ${offenders.slice(0, 3).join(' | ')}`
+        : '内容变长时不再横向挤压正文',
+    )
+  }
 }
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)

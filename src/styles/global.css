@@ -137,7 +137,20 @@ table {
   color: var(--color-selection-text, var(--color-text-primary));
 }
 
-/* 滚动条 */
+/* ==========================================================================
+   滚动条
+   --------------------------------------------------------------------------
+   Chromium 的滚动条是**占位**的：只要它出现，就从正文里扣掉 10px，面板内容一
+   变长、滚动条冒出来，正文就被横向挤一下 —— 窄栏里最刺眼。
+
+   所以规矩是：**凡是会滚的容器，都要自带 `scrollbar-gutter: stable`**（写在各自
+   的规则里，见各处），槽位常驻，滚动条来去都不改内容宽度。unit 里有一条断言
+   扫全仓：`overflow-y: auto` 没带 gutter 直接红。
+
+   不要试图用 `-webkit-overlay` 那类开关绕开：Chromium 的 overlay 滚动条只能靠
+   命令行 `--enable-features=OverlayScrollbar` 打开，而主进程里 `appendSwitch`
+   对已经初始化过的 feature 列表是无效的（实测照旧占 15px），打包后没法可靠开。
+   ========================================================================== */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -712,6 +725,7 @@ kbd {
 /* 滚动区域 */
 .scroll-y {
   overflow-y: auto;
+  scrollbar-gutter: stable;
   overflow-x: hidden;
 }
 
@@ -751,6 +765,7 @@ kbd {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: var(--space-5) var(--space-6) var(--space-6);
 }
 

@@ -1043,6 +1043,7 @@ function reset(): void {
   width: 300px;
   max-height: 320px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: var(--space-1);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -1168,6 +1169,7 @@ function reset(): void {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   /* 顶部取 space-3：与左侧搜索框的上内边距同值，两者顶边才对得齐 */
   padding: var(--space-3) var(--space-6) var(--space-6);
 }
@@ -1175,11 +1177,16 @@ function reset(): void {
 .setmain__inner {
   width: 100%;
   /*
-   * 980px 不是随手取的：窗口 − 主侧栏 208 − 分组栏 196 − 左右内边距 48，
-   * 默认 1480 窗口下可用 1028 —— 取 980 让表单在常见宽度下不被拉成超长单行，
-   * 同时右侧仍留一点余量，窄窗自动收窄。
+   * 表单的**可读宽度**上限，与页面外壳的 `--content-max-width` 分开管。
+   *
+   * 旧值 980 是按「默认窗口 1360 − 侧栏 208 − 分组栏 196 − 内边距 48 = 908」
+   * 配的 —— 默认窗口下确实刚好，但窗口一拉宽表单就不动了，右侧留出一大片空。
+   * 提到 1180：表单里那些 `1fr 1fr` / `repeat(3, 1fr)` 的栅格会跟着长，宽屏下
+   * 一行能读完的项就不用折行。再宽下去单行文字会太长（扫读时找不到下一行的
+   * 起点），所以到 1180 为止 —— 它比外壳的 1760 小，正是「外壳铺满、正文收窄」
+   * 这个常规版式。
    */
-  max-width: 980px;
+  max-width: 1180px;
   margin: 0 auto;
 }
 

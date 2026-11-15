@@ -161,6 +161,7 @@ onBeforeUnmount(() => {
   width: 340px;
   max-height: min(60vh, 420px);
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: var(--space-2);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);

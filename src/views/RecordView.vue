@@ -1392,6 +1392,7 @@ watch(joinedSec, () => requestDraw())
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);

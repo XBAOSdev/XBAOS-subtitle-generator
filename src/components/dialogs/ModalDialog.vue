@@ -87,6 +87,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   align-items: safe center;
   justify-content: center;
   overflow: auto;
+  scrollbar-gutter: stable;
   padding: var(--space-6);
   background: var(--color-overlay);
 }
@@ -156,6 +157,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   /* 滚到底不要连带把外层遮罩滚走 */
   overscroll-behavior: contain;
   padding: var(--space-4);

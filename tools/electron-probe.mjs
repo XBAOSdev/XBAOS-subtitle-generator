@@ -394,6 +394,45 @@ const scenarios = {
   },
 
   /**
+   * 滚动条不吃布局。
+   *
+   * 只断一件事：往固定宽度的滚动容器里塞满内容、逼它出滚动条，容器的 `clientWidth`
+   * 不许变。变窄就说明滚动条又回去占位了 —— 那正是「面板内容一变长、正文被横向
+   * 挤一下」的根因，窄栏里最明显。
+   *
+   * 用应用自己的 `.scroll-y` 建样本，验的就是真实规则，而不是探针另写一份样式。
+   */
+  async scrollbar({ cdp }) {
+    const res = await cdp.evaluate(`(() => {
+      const box = document.createElement('div')
+      box.className = 'scroll-y'
+      box.style.cssText = 'position:fixed;left:-9999px;top:0;width:240px;height:120px'
+      box.innerHTML = '<div style="height:40px">短</div>'
+      document.body.appendChild(box)
+
+      const before = box.clientWidth
+      box.firstElementChild.style.height = '900px'
+      const after = box.clientWidth
+      const out = {
+        before,
+        after,
+        gutter: getComputedStyle(box).scrollbarGutter,
+        scrollable: box.scrollHeight > box.clientHeight,
+      }
+      box.remove()
+      return out
+    })()`)
+
+    check('容器确实滚起来了', res.scrollable === true)
+    check('槽位常驻（scrollbar-gutter: stable）', res.gutter === 'stable', String(res.gutter))
+    check(
+      '滚动条出现时不吃布局',
+      res.before === res.after && res.before > 0,
+      `clientWidth ${res.before} → ${res.after}`,
+    )
+  },
+
+  /**
    * 标题栏毛玻璃：桥注入、首屏状态与 html 类一致、开关 IPC 全链路。
    * 探针跑在临时 profile 里，怎么切都不会碰用户真实的设置副本。
    * 注意无头模式下主进程刻意不开 Mica（glassActive 含 !headless），

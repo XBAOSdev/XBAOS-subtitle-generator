@@ -311,6 +311,7 @@ onBeforeUnmount(stopPreview)
 
 .spkmap__scroll {
   overflow: auto;
+  scrollbar-gutter: stable;
   max-height: 52vh;
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);

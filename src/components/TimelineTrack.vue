@@ -545,6 +545,8 @@ function startScrub(event: PointerEvent): void {
   // 永远不会触发。这跟「拖整条字幕条」那条坑是同一个机制（那边也是不能 preventDefault，
   // 否则「点一下选中」失效），所以两处都只 stopPropagation。
   event.stopPropagation()
+  // 拖游标也解开跟随：他正捏着游标，画面不该自己往左滑
+  followOn = false
   scrubPointer = event.pointerId
   editor.scrubbing = true
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
@@ -611,6 +613,8 @@ function onStagePointerMove(event: PointerEvent): void {
     if (Math.abs(dx) < PAN_THRESHOLD) return
     panState.moved = true
     panning.value = true
+    // 手动拖时间轴 = 用户想去别处看看，先解开播放跟随，别跟他抢画面
+    followOn = false
     // 一开始按下的那次定位作废：用户是在拖时间轴，不是在挑位置
     editor.setPlayhead(panState.playheadBefore)
   }
@@ -942,14 +946,41 @@ watch(
   },
 )
 
-/** 播放时视窗跟着走，否则放大以后播到后面就看不见了 */
+/**
+ * 播放时视窗跟着走，否则放大以后播到后面就看不见了。
+ *
+ * 走法是**镜头平移**，不是瞬移：早先一到 90% 处就 `jumpTo()`，整条波形连同
+ * 游标一起「啪」地换位 —— 数据是对的，看着像卡了一帧。现在只把「目标位置」
+ * 写进去，由 `stepAnim` 逐帧逼近，于是波形整体向左滑、游标停在视窗右侧不动，
+ * 视觉上就是上一屏顺滑地换成下一屏。
+ *
+ * `FOLLOW_HOLD` 是游标停靠的位置（视窗宽度的 86%）。取 86% 而不是 100%：
+ * 右边要留出一点「马上要念的」的余光，贴边会让人以为游标被墙挡住了。
+ *
+ * `followOn` 是个闩：**只在下一次越过 90% 时才拉起**，拉起之后每帧都重设目标。
+ * 没有这个闩的话，一进入跟随状态就把游标钉死在 86%，用户手动拖时间轴会被
+ * 立刻拽回去（而 `onStagePointerMove` / `startScrub` 都会把闩解开）。
+ */
+const FOLLOW_HOLD = 0.86
+let followOn = false
+
 watch(
   () => editor.playheadSec,
   (t) => {
-    if (!editor.isPlaying || zoom.value <= 1) return
+    if (!editor.isPlaying || zoom.value <= 1) {
+      followOn = false
+      return
+    }
     const span = visibleSec.value
-    if (t >= viewStartSec.value && t <= viewStartSec.value + span * 0.9) return
-    jumpTo(t - span * 0.2)
+    if (!followOn) {
+      // 还在右边 10% 的余量里：不跟随，让游标自己走
+      if (t <= viewStartSec.value + span * 0.9) return
+      followOn = true
+    }
+    // 只写目标值：这一帧不挪画面，交给 stepAnim 平滑追过去
+    panGoalSec = t - span * FOLLOW_HOLD
+    clampPanGoal()
+    startAnim()
   },
 )
 

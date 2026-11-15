@@ -107,7 +107,19 @@ const markIds = computed<string[]>(() => {
   const list = segments.value
   const hits: string[] = []
   for (const s of list) {
-    if (t >= s.start && t <= s.end) {
+    /*
+     * 区间取 **左闭右开**：`[start, end)`。
+     *
+     * 相邻两条的接缝处（甲.end === 乙.start）游标正好站在上面时，闭区间会让
+     * 两条同时命中、下面冒出两个三角，而屏幕上那一瞬间只可能"在听一条"。
+     * 右开之后功劳归下一条 —— 游标一进入乙的区间就指乙，符合"接下来要念的是
+     * 乙"这个直觉。真正的重叠（甲 [0,4) 与乙 [1,5) 在 2 秒处）不受影响，
+     * 那两条本来就同时存在，两个三角是对的。
+     *
+     * 末尾那一刻（t === 全长）没有任何一条开区间能命中，会落到下面的
+     * 「最近吸附」分支，照样指回最后一条，不会出现空三角。
+     */
+    if (t >= s.start && t < s.end) {
       hits.push(s.id)
       if (hits.length >= MAX_MARKS) break
     }

@@ -455,8 +455,16 @@ async function start(event?: MouseEvent): Promise<void> {
 .view--fill .view__body-inner {
   height: 100%;
   display: grid;
-  /* 右侧固定宽、左侧吃掉剩下的：素材区的信息密度更高，宽度该给它 */
-  grid-template-columns: minmax(0, 1fr) clamp(300px, 24vw, 368px);
+  /*
+   * 右侧设置栏随窗口变宽、有上限；左侧素材区吃掉剩下的宽度。
+   *
+   * 上限从 368 提到 420：368 是按默认窗口算的，窗口一拉宽它就再也不动了，
+   * 而「识别语言 / 推理深度 / 热词」这些控件的天然宽度远不止 368 ——
+   * 宽屏下让它们长长，扫一眼就能读完，比一排挤在一起的下拉框好用。
+   * 但如果无限制地放，素材区会被挤成一条，所以到 420 就停。
+   * 下限 300 不动：窄窗口下这一栏再窄就放不下四个深度分段了。
+   */
+  grid-template-columns: minmax(0, 1fr) clamp(300px, 24vw, 420px);
   gap: var(--space-4);
   align-items: stretch;
 }
@@ -469,6 +477,7 @@ async function start(event?: MouseEvent): Promise<void> {
 @media (max-width: 940px) {
   .view--fill .view__body {
     overflow-y: auto;
+    scrollbar-gutter: stable;
   }
 
   .view--fill .view__body-inner {
@@ -492,6 +501,7 @@ async function start(event?: MouseEvent): Promise<void> {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: var(--space-4);
   display: flex;
   flex-direction: column;

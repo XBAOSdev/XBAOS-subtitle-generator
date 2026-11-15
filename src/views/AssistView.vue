@@ -1770,6 +1770,7 @@ onBeforeUnmount(() => {
   gap: 2px;
   max-height: 200px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .pick__row {
@@ -1876,6 +1877,7 @@ onBeforeUnmount(() => {
   /* 一个文件几百条时不能把整个区块撑开 */
   max-height: 260px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .cue {
@@ -2104,6 +2106,7 @@ onBeforeUnmount(() => {
   padding: var(--space-3);
   max-height: 320px;
   overflow: auto;
+  scrollbar-gutter: stable;
   background: var(--color-bg-surface);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -2229,6 +2232,7 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   max-height: 300px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .diff {

@@ -962,6 +962,7 @@ function close(): void {
   overflow: hidden;
   max-height: 300px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .plan__group + .plan__group {

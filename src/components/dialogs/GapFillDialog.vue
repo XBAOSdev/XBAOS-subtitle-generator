@@ -316,6 +316,7 @@ function close(): void {
 .gapfill__list {
   max-height: 240px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .gapfill__row {

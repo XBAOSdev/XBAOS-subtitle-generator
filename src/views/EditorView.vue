@@ -1072,6 +1072,7 @@ async function saveInPlace(): Promise<void> {
    */
   max-height: 120px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .editor__foot > .btn {

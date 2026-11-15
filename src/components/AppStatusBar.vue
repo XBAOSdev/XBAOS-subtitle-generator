@@ -375,6 +375,7 @@ watch(issueText, (next, prev) => {
   list-style: none;
   max-height: 200px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   /* 父级不裁剪了（要给「桥」留出空间），圆角由滚动区自己收口 */
   border-radius: 0 0 var(--radius-md) var(--radius-md);
   font-size: 11px;

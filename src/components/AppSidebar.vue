@@ -314,6 +314,20 @@ async function onUpdateClick(): Promise<void> {
 }
 
 .sidebar__version {
+  /*
+   * 光学对齐，不是几何对齐。
+   *
+   * `align-items: center` 居中的是**行盒**（16.5px），而 "v1.3.2" 里只有数字与
+   * 一个小写 v —— 没有下伸部，墨迹全压在基线上方，墨迹中心天生比行盒中心低
+   * 约 0.5px。旁边那个箭头是居中的 13px 图标，两者于是差半格：正常看不太出来，
+   * 放大截图就很明显（用户就是这么发现的）。
+   * 量过（4 倍图设备像素）：箭头墨迹中心 53.5，文字 55.5。
+   * 补 -0.5px 让两者重合；别改成动字号或行高，那会牵动别的排版。
+   */
+  position: relative;
+  /* 用 transform 而不是 top：top 会走布局、被吸附到整像素，-0.5 实际挪了 1px，
+     反而从「低半格」变成「高半格」；transform 在合成阶段生效，留得住半像素。 */
+  transform: translateY(-0.5px);
   white-space: nowrap;
   overflow: hidden;
   max-width: 140px;

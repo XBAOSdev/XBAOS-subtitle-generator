@@ -168,6 +168,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutside, tru
 .scsel__list {
   max-height: 220px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   gap: 2px;

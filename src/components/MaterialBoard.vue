@@ -411,6 +411,7 @@ const SUBTITLE_LABELS = SUBTITLE_EXTS.map((ext) => ext.toUpperCase())
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   /* 离场方块改绝对定位后，坐标以这里为原点 */
   position: relative;
   padding: var(--space-4);
