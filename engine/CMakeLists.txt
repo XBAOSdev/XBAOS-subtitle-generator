@@ -185,6 +185,7 @@ endif()
 add_executable(xbaos-engine
     src/main.cpp
     src/decoders/decoders.cpp
+    src/decoders/mfdec.cpp
     src/decoders/oggopus.cpp)
 
 target_include_directories(xbaos-engine PRIVATE
@@ -193,6 +194,14 @@ target_include_directories(xbaos-engine PRIVATE
     "${WHISPER_CPP_DIR}/ggml/include")
 
 target_link_libraries(xbaos-engine PRIVATE whisper)
+
+# AAC / MP4 走 Windows 自带的 Media Foundation 解码器。
+# 这几个库都是系统组件（Win10/11 自带 DLL），不随包分发，也不需要付费扩展；
+# 本仓库里没有一行 AAC 解码代码，实现与分发者都是微软 —— 这是许可边界所在，
+# 详见 src/decoders/mfdec.cpp 顶部。
+if(WIN32)
+    target_link_libraries(xbaos-engine PRIVATE mfplat mfreadwrite mfuuid ole32 shlwapi shell32)
+endif()
 
 if(XBAOS_HAS_OPUS)
     target_link_libraries(xbaos-engine PRIVATE opus)

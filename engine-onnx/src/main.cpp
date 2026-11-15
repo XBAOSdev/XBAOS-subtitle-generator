@@ -52,6 +52,7 @@
 
 // audio.hpp 的符号全在 xaudio 命名空间内（与 whisper 引擎共用同一份实现）
 #include "audio.hpp"
+#include "decodecli.hpp"
 #include "mini_json.hpp"
 #include "platform.hpp"
 #include "vad.hpp"
@@ -940,12 +941,18 @@ void cmdDiarize(const mj::Value &req, int64_t id) {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
 #ifdef _WIN32
     // 不做文本模式转换：协议行必须是裸 \n，否则主进程按行切会多出 \r
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
+
+    /*
+     * 一次性解码模式：主进程为 m4a / mp4 / aac 准备「可播放的 WAV」时会拉起本 exe，
+     * 跑完即退，不进 JSON-RPC 循环（详见 decodecli.hpp 顶部）。
+     */
+    if (const int code = runDecodeCli(); code >= 0) return code;
 
     logLine("ONNX 识别引擎启动");
 

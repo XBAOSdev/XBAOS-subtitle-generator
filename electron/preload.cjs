@@ -139,6 +139,13 @@ contextBridge.exposeInMainWorld('xbaos', {
     confirmOption: (options) => ipcRenderer.invoke('dialog:confirm-option', options),
   },
 
+  // ---- 媒体：取一份 Chromium 能播的音频
+  // 包内 ffmpeg 是非专有构建，解不了 AAC；m4a / mp4 / aac 要先转成 WAV 缓存，
+  // 否则试听没声音、波形也是空的。其余格式返回 path:null，渲染层直接读源文件。
+  media: {
+    playable: (p, ext) => ipcRenderer.invoke('media:playable', p, ext),
+  },
+
   // ---- 文件系统（受限：只暴露这几个操作）
   fs: {
     exists: (p) => ipcRenderer.invoke('fs:exists', p),

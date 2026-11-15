@@ -2736,6 +2736,74 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '删掉这一行，ffmpeg.dll 会回到含 AAC / H.264 的版本，等于随包分发专有编解码器实现',
   )
   /*
+   * ---- AAC 只走系统解码器（2026-11-15）
+   *
+   * 这是整套 AAC 支持的许可基础：一旦有人把 fdk-aac 之类的实现编进引擎，本软件就从
+   * 「调用操作系统的程序」变成「AAC 产品的实施者」，需要自行取得 Via LA 的专利许可。
+   * 所以这里两头都查：既查系统解码器有没有接上，也查有没有偷偷引入实现。
+   */
+  const engineSources = [
+    'engine/src/audio.hpp',
+    'engine/src/decodecli.hpp',
+    'engine/src/main.cpp',
+    'engine/src/decoders/decoders.cpp',
+    'engine/src/decoders/decoders.hpp',
+    'engine/src/decoders/mfdec.cpp',
+    'engine-onnx/src/main.cpp',
+  ].map((f) => readSource(f))
+  const engineText = engineSources.join('\n')
+  check(
+    '引擎里没有任何 AAC 实现（AAC 只走系统解码器）',
+    !/(fdk[_-]?aac|aacdec|avcodec|libfaad|ff_aac|aac_decoder)/i.test(engineText),
+    '把 AAC 实现编进引擎就是自行分发 AAC 实现，需要专利许可；只能用 Media Foundation',
+  )
+  check(
+    '系统解码器确实接在识别入口上',
+    /MFCreateSourceReaderFromByteStream/.test(readSource('engine/src/decoders/mfdec.cpp')) &&
+      /decodeMediaFoundation/.test(readSource('engine/src/audio.hpp')),
+    '少了这一步，m4a / mp4 / aac 只是「出现在格式表里」，导入时会报无法识别的音频格式',
+  )
+  check(
+    'MP4 与 ADTS 的魔数判别各归各位',
+    /isMp4/.test(readSource('engine/src/audio.hpp')) &&
+      /isAdts/.test(readSource('engine/src/audio.hpp')) &&
+      /\(d\[1\] & 0x06\) != 0/.test(readSource('engine/src/audio.hpp')),
+    'ADTS 与 MP3 共用 0xFF 同步字，只靠 layer 位区分；漏了这条 mask 会把 .aac 当 MP3 解',
+  )
+  const formatsText = readSource('src/utils/formats.ts')
+  const supportedBlock = formatsText.slice(
+    formatsText.indexOf('SUPPORTED_FORMATS'),
+    formatsText.indexOf('UNSUPPORTED_FORMATS'),
+  )
+  check(
+    'M4A / M4B / MP4 / AAC 在支持清单里',
+    ['m4a', 'm4b', 'mp4', 'aac'].every((e) =>
+      new RegExp(`ext: '${e}'`).test(supportedBlock),
+    ),
+    '清单是界面文案与导入校验的唯一来源，漏一个就仍然弹「不支持」',
+  )
+  check(
+    '支持清单里没有「supported: false 的 m4a」',
+    !/ext: 'm4a'[\s\S]{0,120}?supported: false/.test(formatsText),
+    '改口径时最容易只改一处，界面上会出现自相矛盾的两条',
+  )
+  check(
+    '导入 AAC 时先转出一份可播放的 WAV',
+    /'--decode'/.test(readSource('electron/media-cache.js')) &&
+      /needsSystemDecoder/.test(readSource('electron/main.js')),
+    '包内 ffmpeg 解不了 AAC：不转这一份，试听没有声音、波形也是空的',
+  )
+  check(
+    '引擎命令行参数取自宽字符命令行',
+    /CommandLineToArgvW/.test(readSource('engine/src/decodecli.hpp')),
+    'main 的 argv 是 ANSI 代码页（GBK），中文路径到这里已经是乱码',
+  )
+  check(
+    '渲染层读的是转好的那份音频',
+    /bridge\.media\.playable\(/.test(readSource('src/stores/project.ts')),
+    '少了这一步，m4a 的 <audio> 会报 DEMUXER_ERROR_NO_SUPPORTED_STREAMS',
+  )
+  /*
    * ---- 下载完整性（2026-11-04）
    *
    * 清单里每个文件都必须带真实 sha256。Hugging Face 的 LFS 对象 id 与 ModelScope 的

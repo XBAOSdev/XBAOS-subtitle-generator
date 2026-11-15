@@ -2333,6 +2333,12 @@ const MIME_BY_EXT: Record<string, string> = {
   opus: 'audio/ogg',
   aiff: 'audio/aiff',
   aif: 'audio/aiff',
+  // 下面四个正常走不到：主进程会把它们转成 WAV 再交过来（MIME 固定 audio/wav）。
+  // 留在这里是为了「万一没转成功」时 Blob 类型仍然说得对，便于排查。
+  m4a: 'audio/mp4',
+  m4b: 'audio/mp4',
+  mp4: 'audio/mp4',
+  aac: 'audio/aac',
 }
 
   /**
@@ -2383,13 +2389,24 @@ const MIME_BY_EXT: Record<string, string> = {
     touchMedia()
 
     try {
-      const bytes = await bridge.fs.readArrayBuffer(file.path)
+      /*
+       * 先要一份「Chromium 能播」的音频。
+       *
+       * 包内的 ffmpeg.dll 是非专有构建，解不了 AAC —— 直接读 m4a 会既没有波形、
+       * 也没有声音（`<audio>` 报 DEMUXER_ERROR_NO_SUPPORTED_STREAMS）。主进程
+       * 会让引擎用**系统解码器**转出一份 WAV 缓存，这里读的就是那份；
+       * 其余格式 path 为 null，照旧读源文件，不多绕一步。
+       */
+      const playable = await bridge.media.playable(file.path, file.ext)
+      if (!playable.ok) throw new Error(playable.message)
+      const readPath = playable.path ?? file.path
+      const mime = playable.path ? 'audio/wav' : (MIME_BY_EXT[file.ext] ?? '')
+
+      const bytes = await bridge.fs.readArrayBuffer(readPath)
 
       // Blob 要复制一份：decodeAudioData 会把传进去的 buffer 转移走（detach）
       const forAudio = bytes.slice(0)
-      m.blobUrl = URL.createObjectURL(
-        new Blob([forAudio], { type: MIME_BY_EXT[file.ext] ?? '' }),
-      )
+      m.blobUrl = URL.createObjectURL(new Blob([forAudio], { type: mime }))
       // 地址一就位就通知：播放器不必等波形解完就能出声
       touchMedia()
 

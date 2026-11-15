@@ -566,7 +566,16 @@ inline bool loadAudio16k(const std::string &path, AudioData &out, std::string &e
     const bool isFlac = std::memcmp(d, "fLaC", 4) == 0;
     const bool isOgg = std::memcmp(d, "OggS", 4) == 0;
     const bool isId3 = std::memcmp(d, "ID3", 3) == 0; // ID3 只有 3 字节，别把 \0 比进去
-    const bool isMp3Sync = d[0] == 0xFF && (d[1] & 0xE0) == 0xE0; // MPEG 帧同步位
+    // MP4 / M4A / M4B：ISO BMFF 的 `ftyp` box 恒在偏移 4
+    const bool isMp4 = n >= 12 && std::memcmp(d + 4, "ftyp", 4) == 0;
+    /*
+     * ADTS（裸 .aac）与 MP3 的帧同步字都以 0xFF 开头，只能用 layer 位区分：
+     *   ADTS  1111 1111 1111 I 00 P   → layer 两位恒为 00
+     *   MP3   1111 1111 111 V V L L   → layer 两位不可能是 00（那是保留值）
+     * 判别只看 d[1] 的 2~1 位，所以 mask 0x06。
+     */
+    const bool isAdts = d[0] == 0xFF && (d[1] & 0xF6) == 0xF0;
+    const bool isMp3Sync = d[0] == 0xFF && (d[1] & 0xE0) == 0xE0 && (d[1] & 0x06) != 0;
 
     xdec::DecodedAudio dec;
     if (isWav) {
@@ -591,8 +600,19 @@ inline bool loadAudio16k(const std::string &path, AudioData &out, std::string &e
         if (!xdec::decodeMp3(d, n, dec, err)) return false;
         return detail::finishAudio(std::move(dec.pcm), dec.channels, dec.sample_rate, out, err);
     }
+    /*
+     * AAC 家族交给系统解码器（Windows Media Foundation）。
+     *
+     * 顺序放在最后：上面几个都是自带实现，能自己解就不去碰系统。反过来 MP4 里
+     * 的音轨到底是不是 AAC 由容器说了算，这里不做猜测 —— 也许是 ALAC，也许是
+     * AC-3，但都只是「交给系统」而已，本软件仍然没有自带任何解码实现。
+     */
+    if (isMp4 || isAdts) {
+        if (!xdec::decodeMediaFoundation(d, n, dec, err)) return false;
+        return detail::finishAudio(std::move(dec.pcm), dec.channels, dec.sample_rate, out, err);
+    }
 
-    err = "无法识别的音频格式。支持 WAV / AIFF / MP3 / FLAC / OGG / Opus";
+    err = "无法识别的音频格式。支持 WAV / AIFF / MP3 / FLAC / OGG / Opus / M4A / MP4 / AAC";
     return false;
 }
 

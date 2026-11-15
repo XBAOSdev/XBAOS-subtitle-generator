@@ -525,6 +525,23 @@ export interface XbaosBridge {
     }) => Promise<{ index: number; checked: boolean }>
   }
 
+  media: {
+    /**
+     * 取一份 Chromium 能播的音频。
+     *
+     * m4a / mp4 / aac 这类格式包内 ffmpeg 解不了，主进程会调引擎（系统解码器）
+     * 生成 WAV 缓存并返回它的路径；其余格式返回 `path: null`，表示直接读源文件。
+     * 失败时 `ok:false` 且带可读的 `message`，调用方据此提示而不是统一报「没有音轨」。
+     */
+    playable: (
+      p: string,
+      ext: string,
+    ) => Promise<
+      | { ok: true; path: string | null; cached: boolean }
+      | { ok: false; message: string }
+    >
+  }
+
   fs: {
     exists: (p: string) => Promise<boolean>
     stat: (p: string) => Promise<{

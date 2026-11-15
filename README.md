@@ -80,6 +80,11 @@ Windows 安装包见官网：<https://subtitle.xbaos.com.cn>
 | FLAC | dr_flac |
 | OGG Vorbis | stb_vorbis |
 | Opus | libopus |
+| M4A / M4B / MP4 / AAC | Windows 自带的解码器（Media Foundation） |
+
+最后一栏不是本软件自带的库：AAC 的解码由 Windows 的媒体组件完成，本软件不含
+任何 AAC 实现，只做「取音轨 → 拿 PCM」的搬运。因此这类格式要求系统具备媒体功能
+（Windows N 版或精简系统需安装媒体功能包），且不支持 xHE-AAC。
 
 **字幕**：可读入 SRT / WebVTT / ASS / SSA，可导出 SRT / WebVTT / ASS。
 
@@ -87,11 +92,10 @@ Windows 安装包见官网：<https://subtitle.xbaos.com.cn>
 
 | 格式 | 原因 |
 |---|---|
-| M4A / AAC / MP4 | 编码涉及的**部分专利仍在保护期内** |
-| WMA | 微软专有编解码器 |
+| WMA | 微软专有编码，尚未接入系统解码器 |
 | AMR / AMR-WB | 包含多项专利的语音编码标准 |
 | DTS | 专有技术，专利保护期可能持续到 2040 年前后 |
-| AC-3 / E-AC-3 | **专利已到期**（AC-3 为 2017 年，E-AC-3 为 2026 年初），**无法律障碍**，只是尚未内置解码器 |
+| AC-3 / E-AC-3 | **专利已到期**（AC-3 为 2017 年，E-AC-3 为 2026 年初），**无法律障碍**，只是尚未接入解码器 |
 
 ---
 

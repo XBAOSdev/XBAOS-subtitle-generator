@@ -368,7 +368,6 @@ async function launch() {
 /* -------------------------------------------------------------------- 场景 */
 
 const scenarios = {
-  /** preload 桥是否注入了完整的接口 */
   async bridge({ cdp }) {
     const info = await cdp.evaluate(`(() => {
       const api = window.xbaos
@@ -516,6 +515,16 @@ const scenarios = {
         const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
         const project = pinia.get('project')
         const n = await project.addFilesFromPaths([${JSON.stringify(wav)}])
+        /*
+         * 2.4 起「导入」先进 intake（待识别队列），识别完成后才落进项目。
+         * 这个场景要测的是媒体管线（可播放地址 + 波形），不是批量流程，
+         * 所以手动把这一条搬进 files，省掉跑识别 —— 少一次模型依赖，快几百倍。
+         */
+        const item = project.intake[project.intake.length - 1]
+        if (item) {
+          project.intake.splice(project.intake.indexOf(item), 1)
+          project.files.push(item)
+        }
         const file = project.files[project.files.length - 1]
         if (!file) return { added: 0 }
         await project.ensureMedia(file.id)
@@ -615,8 +624,12 @@ const scenarios = {
           const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
           const project = pinia.get('project')
           const n = await project.addFilesFromPaths([${JSON.stringify(p)}])
-          const file = project.files[project.files.length - 1]
-          if (!file) return { added: n, imported: false }
+          // 与上面同理：先进 intake，这里手动落进 files 再测媒体管线
+          const item = project.intake[project.intake.length - 1]
+          if (!item) return { added: n, imported: false }
+          project.intake.splice(project.intake.indexOf(item), 1)
+          project.files.push(item)
+          const file = item
           await project.ensureMedia(file.id)
           const m = project.media.get(file.id)
           const out = {
@@ -627,6 +640,8 @@ const scenarios = {
             hasPeaks: !!m?.peaks,
             error: m?.error ?? null,
           }
+          // 探针手动塞进 files 的那条要自己搬走：removeFile 只管 intake 与媒体表
+          project.files.splice(project.files.indexOf(file), 1)
           project.removeFile(file.id)
           return out
         })()`)
@@ -642,7 +657,10 @@ const scenarios = {
         const cleared = await cdp.evaluate(`(() => {
           const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
           const project = pinia.get('project')
-          project.removeFile(${JSON.stringify(media.id)})
+          const id = ${JSON.stringify(media.id)}
+          const at = project.files.findIndex((f) => f.id === id)
+          if (at >= 0) project.files.splice(at, 1)
+          project.removeFile(id)
           return project.files.length
         })()`)
         check('探针导入的临时条目已移出队列', cleared === 0, `剩 ${cleared} 条`)

@@ -19,6 +19,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 import { EngineClient, EngineCanceledError, EngineCrashError } from './engine-client.js'
+import { PlayableCache, needsSystemDecoder } from './media-cache.js'
 import { decodeTextAuto, encodeSubtitle } from './encoding.js'
 import {
   PROJECT_EXT,
@@ -178,6 +179,30 @@ function engineInfo(arch = ARCH_WHISPER) {
     arch,
   })
   return { exe, source }
+}
+
+/**
+ * 「可播放音频」缓存（m4a / mp4 / aac 靠它才能试听与画波形）。
+ *
+ * 懒建：`app.getPath('userData')` 在模块加载阶段还不一定稳（用户可能用
+ * `--user-data-dir` 覆盖过），第一次真正用到时再算。
+ * 引擎路径每次现取 —— 用户可能刚切换模型架构，换来了另一个引擎。
+ */
+let playableCache = null
+function getPlayableCache() {
+  if (!playableCache) {
+    playableCache = new PlayableCache({
+      cacheDir: path.join(app.getPath('userData'), 'media-cache'),
+      engineExe: () => {
+        for (const arch of [ARCH_SHERPA, ARCH_WHISPER]) {
+          const { exe } = engineInfo(arch)
+          if (exe) return exe
+        }
+        return ''
+      },
+    })
+  }
+  return playableCache
 }
 
 /**
@@ -1434,11 +1459,28 @@ function registerIpc() {
       title: '选择音频文件',
       properties: ['openFile', 'multiSelections'],
       filters: [
-        { name: '音频文件', extensions: ['wav', 'mp3', 'flac', 'ogg', 'opus'] },
+        {
+          name: '音频文件',
+          extensions: [
+            'wav',
+            'mp3',
+            'flac',
+            'ogg',
+            'opus',
+            'aif',
+            'aiff',
+            'm4a',
+            'm4b',
+            'mp4',
+            'aac',
+          ],
+        },
         { name: 'WAV', extensions: ['wav'] },
         { name: 'MP3', extensions: ['mp3'] },
         { name: 'FLAC', extensions: ['flac'] },
-        { name: 'OGG / Opus', extensions: ['ogg', 'opus'] },
+        { name: 'OGG / Opus', extensions: ['ogg', 'oga', 'opus'] },
+        // M4A / MP4 / AAC 走 Windows 系统解码器，单独列一项好让用户认出来
+        { name: 'M4A / MP4 / AAC', extensions: ['m4a', 'm4b', 'mp4', 'aac'] },
         { name: '全部文件', extensions: ['*'] },
       ],
     })
@@ -1568,6 +1610,22 @@ function registerIpc() {
     const copy = new ArrayBuffer(buf.byteLength)
     new Uint8Array(copy).set(buf)
     return copy
+  })
+
+  /**
+   * 取一份「Chromium 能播」的音频。
+   *
+   * 包内的 ffmpeg.dll 是非专有构建，解不了 AAC，而试听与波形都走 Chromium 的
+   * 解码链路 —— 所以 m4a / mp4 / aac 这类格式要先由引擎（经系统解码器）解成
+   * WAV 缓存。其余格式原样返回 `path: null`，渲染层继续读源文件，
+   * 不为了「统一」把所有文件都多转一遍。
+   */
+  ipcMain.handle('media:playable', async (_event, srcPath, ext) => {
+    if (typeof srcPath !== 'string' || !srcPath) {
+      return { ok: false, message: '没有音频路径' }
+    }
+    if (!needsSystemDecoder(ext)) return { ok: true, path: null, cached: false }
+    return getPlayableCache().ensure(srcPath)
   })
 
   /**

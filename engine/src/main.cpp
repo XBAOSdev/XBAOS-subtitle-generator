@@ -49,6 +49,7 @@
 #include "whisper.h"
 
 #include "audio.hpp"
+#include "decodecli.hpp"
 #include "mini_json.hpp"
 #include "vad.hpp"
 
@@ -863,6 +864,13 @@ int main(int argc, char **argv) {
 
     whisper_log_set(logSink, nullptr);
 
+    /*
+     * 一次性解码模式：主进程为 m4a / mp4 / aac 准备「可播放的 WAV」时会拉起本 exe，
+     * 跑完即退，不进 JSON-RPC 循环（详见 decodecli.hpp 顶部）。
+     * 放在最前面，避免与 --model 之类的预加载参数互相干扰。
+     */
+    if (const int code = xaudio::runDecodeCli(); code >= 0) return code;
+
     // 允许命令行直接指定模型，方便脱离主进程单独调试
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
@@ -881,6 +889,7 @@ int main(int argc, char **argv) {
             std::fprintf(stderr,
                          "xbaos-engine —— XBAOS 字幕生成器的识别引擎\n"
                          "  --model <path>  预加载模型\n"
+                         "  --decode <源> <目标.wav>  用系统解码器解 m4a / mp4 / aac\n"
                          "  --version       打印版本\n"
                          "无参数时从标准输入读 JSON 命令。\n");
             return 0;

@@ -46,6 +46,27 @@ inline std::wstring utf8ToWide(const std::string &utf8) {
 }
 
 /**
+ * 宽字符 → UTF-8。命令行参数必须走这条：
+ *
+ * `int main(int argc, char **argv)` 拿到的 argv 是**进程的 ANSI 代码页**（简体中文
+ * 系统上是 GBK），不是 UTF-8。把这样的字节交给 pathFromUtf8，等于按 UTF-8 解释 GBK，
+ * 中文路径必然打不开 —— 现象是「无法打开文件：…锟斤拷…」。
+ * 唯一可靠来源是 GetCommandLineW()，它给的是 UTF-16，再转成 UTF-8 即可。
+ */
+inline std::string wideToUtf8(const std::wstring &wide) {
+    if (wide.empty()) return std::string();
+    const int need = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), (int)wide.size(), nullptr, 0,
+                                          nullptr, nullptr);
+    if (need <= 0) return std::string();
+    std::string utf8((size_t)need, '\0');
+    const int got = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), (int)wide.size(), utf8.data(),
+                                         need, nullptr, nullptr);
+    if (got <= 0) return std::string();
+    utf8.resize((size_t)got);
+    return utf8;
+}
+
+/**
  * UTF-8 路径 → 可直接喂给文件流的 path。
  *
  * 转换失败时返回空 path，打开必然失败 —— 这正是想要的：上层会报

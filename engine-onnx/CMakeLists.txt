@@ -113,6 +113,7 @@ set(SHARED_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../engine/src")
 add_executable(xbaos-engine-asr
     src/main.cpp
     "${SHARED_SRC}/decoders/decoders.cpp"
+    "${SHARED_SRC}/decoders/mfdec.cpp"
     "${SHARED_SRC}/decoders/oggopus.cpp")
 
 target_include_directories(xbaos-engine-asr PRIVATE
@@ -122,6 +123,12 @@ target_include_directories(xbaos-engine-asr PRIVATE
     "${SHERPA_DIR}")
 
 target_link_libraries(xbaos-engine-asr PRIVATE sherpa-onnx-c-api)
+
+# AAC / MP4 由 Windows 自带的 Media Foundation 解码（与 whisper 引擎同一份实现）。
+# 系统库，不随包分发，本仓库没有 AAC 解码代码，详见 mfdec.cpp 顶部。
+if(WIN32)
+    target_link_libraries(xbaos-engine-asr PRIVATE mfplat mfreadwrite mfuuid ole32 shlwapi shell32)
+endif()
 
 if(XBAOS_HAS_OPUS)
     target_link_libraries(xbaos-engine-asr PRIVATE opus)

@@ -216,15 +216,15 @@ export const mockFiles: AudioFile[] = [
   },
   {
     id: uid('file'),
-    name: '手机实测录音.m4a',
-    path: 'D:\\Downloads\\手机实测录音.m4a',
+    name: '会议备份录音.wma',
+    path: 'D:\\Downloads\\会议备份录音.wma',
     dir: 'D:\\Downloads',
-    ext: 'm4a',
+    ext: 'wma',
     sizeBytes: 3_902_110,
     durationSec: null,
     status: 'unsupported',
     segments: [],
-    message: 'M4A 使用 AAC 编码，因专利原因本软件未内置该解码器',
+    message: 'WMA 为微软专有编码，本软件尚未接入它的解码器',
   },
 ]
 

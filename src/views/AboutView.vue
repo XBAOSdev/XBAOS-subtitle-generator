@@ -238,9 +238,10 @@ const LIBS = [
             </ul>
 
             <p class="licenses__note">
-              不含需付费授权的组件，只内置可自由分发的开源解码实现
+              不含需付费授权的组件，自带解码器只覆盖可自由分发的开源实现
               （WAV、AIFF、MP3、FLAC、OGG Vorbis、Opus）。
-              AAC、WMA、AMR、DTS 的部分专利仍在保护期内，未内置解码器，请先转换为上列任一格式。
+              M4A、MP4、AAC 由 Windows 自带的解码器完成，本软件不含这些编码的实现代码；
+              WMA、AMR、DTS 尚未支持，请先转换为上列任一格式。
             </p>
 
             <button class="btn btn--sm licenses__open" type="button" @click="openLicenses">

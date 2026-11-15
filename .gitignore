@@ -83,3 +83,14 @@ docs/
 # ===== 日志 =====
 *.log
 npm-debug.log*
+
+# ===== 误建的保留设备名文件 =====
+# 2026-11-15 用 bash 重定向调用 vcvars64.bat 时误生成：`> nul` 在 MSYS 下没有丢进
+# 空设备，而是在仓库根建了一个名叫 nul 的真实文件。Win32 把 nul / con / aux / prn
+# 当设备名，即使加 \\?\ 前缀，DeleteFileW、SetFileInformationByHandle、
+# MoveFileExW 也一律回 ACCESS_DENIED，改不名、删不掉。
+# 只能挡住不提交，别让它被 git add -A 带进来。
+/nul
+/con
+/aux
+/prn
