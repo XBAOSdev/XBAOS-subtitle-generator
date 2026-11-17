@@ -2861,23 +2861,45 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
    * 里，删目录也解释得通（见协议 4.5）。
    */
   const cacheSrc = readSource('electron/media-cache.js')
+  const mainSrcForCache = readSource('electron/main.js')
   check(
     '试听缓存在启动时清理，不挂在转码路径上',
-    /getPlayableCache\(\)\.prune\(\)/.test(readSource('electron/main.js')) &&
-      !/this\.pruned/.test(cacheSrc),
+    /cache\.prune\(\{ exempt \}\)/.test(mainSrcForCache) && !/this\.pruned/.test(cacheSrc),
     '挂在 convert 里的话，「只导入 mp3」的用户永远不会触发清理',
   )
   check(
-    '缓存命中时把 mtime 往前推（否则天天用的那份会被当成过期删掉）',
-    /fs\.utimes\(target/.test(cacheSrc),
-    '清理判据是 mtime，命中不重写文件、mtime 就停在生成那一刻，第 15 天会误删',
+    '缓存保留期是 3 天',
+    /CACHE_TTL_MS = 3 \* 24 \* 60 \* 60 \* 1000/.test(cacheSrc),
+    '保留期拉长到两周时，一天两小时素材就能攒到 9GB，用户会觉得硬盘莫名满了',
+  )
+  check(
+    '缓存命中时把 mtime 往前推（否则常用那份会被当成过期删掉）',
+    /await fs\.utimes\(target/.test(cacheSrc) &&
+      // 不能再按天节流：保留期只有 3 天，节流一天等于把语义改成「最多 4 天」
+      !/TOUCH_INTERVAL_MS/.test(cacheSrc),
+    '清理判据是 mtime，命中不重写文件、mtime 就停在生成那一刻，第 4 天会误删',
+  )
+  check(
+    '转出新缓存后立刻检查上限，不等下次启动',
+    /void this\.enforceLimit\(\)/.test(cacheSrc),
+    '用户导一次大素材，从那一刻起磁盘就压在上限之上，直到下次开软件才回落',
+  )
+  check(
+    '启动清理能豁免「双击打开的那个工程」要用的缓存',
+    /keysOf\(await mediaPathsOfProject\(argvProject\)\)/.test(readSource('electron/main.js')) &&
+      /async keysOf\(paths\)/.test(cacheSrc),
+    '过期判断先于用户打开工程，不豁免的话打开的瞬间就得重新解码一遍',
+  )
+  check(
+    '缓存的源文件路径只由 pathFor 一处换算成键',
+    (cacheSrc.match(/createHash\('sha1'\)/g) ?? []).length === 1,
+    '哈希规则写两遍迟早算出不一样的值，豁免名单就会对不上',
   )
   /*
    * ---- 解码缓存的可见与可清（2026-11-17）
    *
-   * 这份缓存是**源采样率**的单声道 PCM：48kHz 一小时 345MB。只靠 14 天过期
-   * 管不住体积 —— 一天两小时视频，两周就是 9GB，用户会觉得「硬盘莫名其妙满了」。
-   * 所以要有硬上限、有淘汰、有看得见的入口。
+   * 这份缓存是**源采样率**的单声道 PCM：48kHz 一小时 345MB。只靠过期时间
+   * 管不住体积 —— 一天两小时视频就是 700MB。所以要有硬上限、有淘汰、有看得见的入口。
    */
   check(
     '解码缓存有总量上限，且不是形同虚设的大数',
@@ -6733,15 +6755,39 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   )
   check(
     '未保存的工程定期落盘，启动时恢复',
-    /autosave:peek/.test(mainSrc) &&
+    /autosave:list/.test(mainSrc) &&
       /restoreAutosave/.test(appSrc) &&
       /startAutosave/.test(appSrc),
     '睡眠唤醒后渲染进程重载，内存里的成果全没了',
   )
   check(
-    '正式保存成功后清掉自动草稿',
-    /autosave\?\.clear\(\)/.test(projectStoreSrc),
-    '不清的话下次启动会冒出一份旧副本，用户会以为项目被改回去了',
+    '自动草稿一个项目一份，不是只存当前那一个',
+    /for \(const d of pending\)/.test(projectStoreSrc) &&
+      /autosave\.write\(d\.id,/.test(projectStoreSrc) &&
+      /drafts\.value\.filter\(/.test(projectStoreSrc),
+    '同时开三个项目都有改动时，只救回当前那一个等于丢两份',
+  )
+  check(
+    '内容没改动就不重写草稿',
+    /d\.rev !== d\.autosavedRev/.test(projectStoreSrc) &&
+      /autosavedRev = rev/.test(projectStoreSrc),
+    'dirty 一旦为真就一直真：只看它的话，改完一个字后每 15 秒全量重写一遍',
+  )
+  check(
+    '正式保存成功后只清掉这一个项目的草稿',
+    /autosave\?\.clear\(activeDraftId\.value\)/.test(projectStoreSrc),
+    '清全部的话，侧栏里别的项目的未保存内容会被一起删掉',
+  )
+  check(
+    '关掉项目时销毁它的草稿',
+    /autosave\?\.clear\(id\)/.test(projectStoreSrc),
+    '留着的话下次启动又把用户已经关掉的工程端回来',
+  )
+  check(
+    '草稿用临时名替换，不留半截 JSON',
+    /const temp = `\$\{target\}\.\$\{process\.pid\}\.tmp`/.test(mainSrc) &&
+      /fs\.rename\(temp, target\)/.test(mainSrc),
+    '写一半被杀会留下解析不了的草稿，比没有草稿更糟',
   )
 
   const capTokensSrc = readSrc('src/styles/tokens.css')

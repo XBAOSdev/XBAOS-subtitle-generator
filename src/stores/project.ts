@@ -135,6 +135,16 @@ export interface ProjectDraft {
   name: string
   path: string | null
   dirty: boolean
+  /**
+   * 改动计数（只在内存里，不落盘）。
+   *
+   * 自动草稿靠它判断「这一轮到底要不要写盘」：`dirty` 只会从保存成功那一
+   * 刻转回 false，而用户的编辑是连续的 —— 只看 `dirty` 的话，改完一个字
+   * 之后每 15 秒都会把整份工程重写一遍，哪怕内容一个字没再动。
+   */
+  rev: number
+  /** 上次写草稿时的 `rev`。相等 = 这段没改过，不必写 */
+  autosavedRev: number
   /** 有序子项目：数组顺序 = 时间轴顺序 = 侧栏自上而下 */
   files: AudioFile[]
   activeFileId: string | null
@@ -868,9 +878,29 @@ export const useProjectStore = defineStore('project', () => {
    * 那不是用户的改动，不该把刚打开的项目标成脏的。
    */
   let suppressDirty = false
+
+  /**
+   * 把某个项目标脏。
+   *
+   * `drafts` 与本函数都在后面才声明，但这里只是**函数声明**、且只在事件
+   * 回调里被调用（setup 早已跑完），不存在暂时性死区。
+   */
+  function markDraftDirty(d: ProjectDraft): void {
+    d.dirty = true
+    d.rev += 1
+    if (d.id === activeDraftId.value) projectDirty.value = true
+  }
+
+  /** 活动项目标脏。所有写 `projectDirty = true` 的地方都该走这里 */
+  function markDirty(): void {
+    const d = draftOf(activeDraftId.value)
+    if (d) markDraftDirty(d)
+    else projectDirty.value = true
+  }
+
   watch(validationSignature, () => {
     if (suppressDirty) return
-    if (supportedFiles.value.length > 0) projectDirty.value = true
+    if (supportedFiles.value.length > 0) markDirty()
   })
 
   /**
@@ -1394,7 +1424,7 @@ export const useProjectStore = defineStore('project', () => {
     if (activeFileId.value === id) activeFileId.value = files.value[0]?.id ?? null
     // 被删的这个连字幕一起没了；剩下的那些原来伸进它区间的部分要切干净
     trimSegmentsToOwnRange()
-    if (!suppressDirty) projectDirty.value = true
+    if (!suppressDirty) markDirty()
     onQueueChanged()
   }
 
@@ -1406,7 +1436,7 @@ export const useProjectStore = defineStore('project', () => {
     list.splice(to, 0, moved)
     // 换了邻居：原来跨在边界上的字幕要在旧区间下切干净，免得横在两段中间
     trimSegmentsToOwnRange()
-    if (!suppressDirty) projectDirty.value = true
+    if (!suppressDirty) markDirty()
     onQueueChanged()
   }
 
@@ -1644,13 +1674,15 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   /** 建一个空项目并切过去。返回新项目 id */
-  function createDraft(options?: { name?: string; activate?: boolean }): string {
+  function createDraft(options?: { name?: string; activate?: boolean; id?: string }): string {
     stashActive()
     const d: ProjectDraft = {
-      id: newDraftId(),
+      id: options?.id ?? newDraftId(),
       name: options?.name ?? '',
       path: null,
       dirty: false,
+      rev: 0,
+      autosavedRev: 0,
       files: [],
       activeFileId: null,
       collapsed: false,
@@ -1708,6 +1740,12 @@ export const useProjectStore = defineStore('project', () => {
     const at = drafts.value.findIndex((d) => d.id === id)
     if (at < 0) return false
     const d = drafts.value[at]
+    /*
+     * 关掉项目 = 用户主动放弃这一份。草稿跟着销毁：留着它，下次启动又会把
+     * 一个用户已经关掉的工程端回来，那不是「防丢」，是「阴魂不散」。
+     * 崩溃 / 断电不经过这里，草稿照旧留着 —— 两种情形必须分开。
+     */
+    void window.xbaos?.autosave?.clear(id)
     for (const f of draftItems(d)) {
       const m = media.value.get(f.id)
       if (m?.blobUrl) URL.revokeObjectURL(m.blobUrl)
@@ -1873,15 +1911,16 @@ export const useProjectStore = defineStore('project', () => {
     trimSegmentsToOwnRange(dst)
 
     // 两个项目都标脏：跨项目移动不立即写盘（2.5 第 4 条）
-    from.dirty = true
-    to.dirty = true
-    if (activeFrom || activeTo) projectDirty.value = true
+    markDraftDirty(from)
+    markDraftDirty(to)
 
     // 搬空且没落过盘的项目直接回收（2.6），侧栏不留一个空壳。
     // 不走 closeDraft：那个会切换视图，而此刻用户做的是搬走一条，视图不该跳
     if (src.length === 0 && !from.path) {
       const gone = drafts.value.findIndex((d) => d.id === fromDraftId)
       if (gone >= 0) drafts.value.splice(gone, 1)
+      // 它可能写过草稿（本来有几条，被一条条搬走了）：留着下次会恢复出一个空壳
+      void window.xbaos?.autosave?.clear(fromDraftId)
     }
 
     rebuildMerged()
@@ -1932,12 +1971,11 @@ export const useProjectStore = defineStore('project', () => {
         if (activeFileId.value && gone.has(activeFileId.value)) {
           activeFileId.value = rest[0]?.id ?? null
         }
-        projectDirty.value = true
       } else {
         d.files = rest
-        d.dirty = true
         if (d.activeFileId && gone.has(d.activeFileId)) d.activeFileId = rest[0]?.id ?? null
       }
+      markDraftDirty(d)
     }
     if (n > 0) {
       touchMedia()
@@ -1958,8 +1996,7 @@ export const useProjectStore = defineStore('project', () => {
       if (!item) continue
       if (item.name === clean) return true
       item.name = clean
-      if (d.id === activeDraftId.value) projectDirty.value = true
-      else d.dirty = true
+      markDraftDirty(d)
       return true
     }
     return false
@@ -2050,7 +2087,7 @@ export const useProjectStore = defineStore('project', () => {
       for (const item of done) place(list, item, targetDraftId)
       if (activeDraftId.value === targetDraftId) {
         if (!activeFileId.value) activeFileId.value = done[0].id
-        projectDirty.value = true
+        markDraftDirty(d)
         /*
          * 重建波形很贵：合并模式的 `syncMergedMedia` 会把每一段重新解码一遍。
          * 逐条落地（识别跑完一个就搬一个）时由调用方传 `rebuild = false`，
@@ -2061,7 +2098,7 @@ export const useProjectStore = defineStore('project', () => {
           revalidate()
         }
       } else {
-        d.dirty = true
+        markDraftDirty(d)
       }
       return
     }
@@ -2076,12 +2113,8 @@ export const useProjectStore = defineStore('project', () => {
       const d = draftOf(id)
       if (!d) continue
       draftItems(d).push(item)
-      if (activeDraftId.value === id) {
-        activeFileId.value = item.id
-        projectDirty.value = true
-      } else {
-        d.dirty = true
-      }
+      if (activeDraftId.value === id) activeFileId.value = item.id
+      markDraftDirty(d)
     }
     rebuildMerged()
     revalidate()
@@ -2346,7 +2379,7 @@ export const useProjectStore = defineStore('project', () => {
     delete mediaState.value[fileId]
 
     touchMedia()
-    if (!suppressDirty) projectDirty.value = true
+    if (!suppressDirty) markDirty()
     /*
      * 顺序不能换：先把新音频解出峰值与真实时长，再拼合并波形。
      *
@@ -3585,13 +3618,42 @@ const MIME_BY_EXT: Record<string, string> = {
    * `mtimeMs` 要现问主进程：识别与导入阶段只记了字节数，没有修改时间。
    * 拿不到不影响存盘（写 0），它的用途只是将来判断「音频有没有被换过」。
    */
-  async function buildDoc(withMtime = true): Promise<ProjectDoc> {
+  /**
+   * 把**任意一个**项目序列化成 `ProjectDoc`（不必是当前活动的那个）。
+   *
+   * 保存走的是活动项目，自动草稿要能写侧栏里任何一个有改动的项目 —— 两者
+   * 共用这一份实现，落盘格式才不会分叉。
+   *
+   * 讲话人那几张表要分开取：活动项目的真值在 store 里（实时），其余项目的
+   * 只剩切走时快照下来的那一份。
+   */
+  async function buildDocOf(d: ProjectDraft, withMtime = true): Promise<ProjectDoc> {
     const bridge = window.xbaos
+    const active = d.id === activeDraftId.value
+    const items = draftItems(d).filter((f) => f.status !== 'unsupported')
     const speakers = useSpeakerStore()
+    const snap = active
+      ? {
+          shared: speakers.shared,
+          byFile: speakers.byFile,
+          globals: speakers.globals,
+          mapping: speakers.mapping,
+          declared: speakers.declared,
+          confirmed: speakers.mappingConfirmed,
+        }
+      : {
+          shared: d.speakers.shared,
+          byFile: d.speakers.byFile,
+          globals: d.speakers.globals,
+          mapping: d.speakers.mapping,
+          declared: d.speakers.declared,
+          confirmed: d.speakers.confirmed,
+        }
+
     const mtimes = new Map<string, number>()
     if (bridge && withMtime) {
       await Promise.all(
-        supportedFiles.value.map(async (f) => {
+        items.map(async (f) => {
           if (!f.path) return
           try {
             const st = await bridge.fs.stat(f.path)
@@ -3602,21 +3664,40 @@ const MIME_BY_EXT: Record<string, string> = {
         }),
       )
     }
+
     return buildProjectDoc({
-      name: displayProjectName.value,
-      activeItemId: activeFileId.value,
-      shared: speakers.shared,
+      name: draftDisplayName(d),
+      activeItemId: active ? activeFileId.value : d.activeFileId,
+      shared: snap.shared,
       mtimeOf: (p) => mtimes.get(p) ?? 0,
-      items: supportedFiles.value,
+      items,
       appVersion,
       speakers: {
-        byFile: speakers.byFile,
-        globals: speakers.globals,
-        mapping: speakers.mapping,
-        declared: speakers.declared,
-        confirmed: speakers.mappingConfirmed,
+        byFile: snap.byFile,
+        globals: snap.globals,
+        mapping: snap.mapping,
+        declared: snap.declared,
+        confirmed: snap.confirmed,
       },
     })
+  }
+
+  /** 活动项目的序列化（保存项目时用） */
+  async function buildDoc(withMtime = true): Promise<ProjectDoc> {
+    stashActive()
+    const d = draftOf(activeDraftId.value)
+    // 理论上一定有活动项目；没有就按空工程走，不让保存流程崩掉
+    if (!d) {
+      return buildProjectDoc({
+        name: displayProjectName.value,
+        activeItemId: activeFileId.value,
+        shared: useSpeakerStore().shared,
+        mtimeOf: () => 0,
+        items: supportedFiles.value,
+        appVersion,
+      })
+    }
+    return buildDocOf(d, withMtime)
   }
 
   /**
@@ -3663,8 +3744,15 @@ const MIME_BY_EXT: Record<string, string> = {
     stashActive()
     const view = viewFile.value
     if (view) markSaved(MERGED_FILE_ID, view.segments)
-    // 正式落盘了，自动草稿的使命结束 —— 留着它下次启动会冒出一份「旧副本」
-    void bridge.autosave?.clear()
+    /*
+     * 正式落盘了，这一份草稿的使命结束 —— 留着它下次启动会冒出一份「旧副本」。
+     *
+     * 只清**这一个项目**的：别的项目可能还开着、还有没保存的改动。同时把
+     * 改动计数对齐，免得下一轮又白写一份一模一样的内容。
+     */
+    const justSaved = draftOf(activeDraftId.value)
+    if (justSaved) justSaved.autosavedRev = justSaved.rev
+    void bridge.autosave?.clear(activeDraftId.value)
     ui.notify('success', '项目已保存', target)
     return true
   }
@@ -3694,14 +3782,22 @@ const MIME_BY_EXT: Record<string, string> = {
   /* ------------------------------------------------------- 自动草稿（防丢） */
 
   /**
-   * 自动草稿：把「还没保存的工程」定期写到磁盘，下次启动发现就恢复。
+   * 自动草稿是**保险**，不是保存。
    *
    * 要解决的场景很具体：识别完、还没保存，笔记本合盖睡眠，唤醒后界面重载，
-   * 一晚上的成果没了。渲染进程的状态只活在内存里，这是「像浏览器」的代价；
-   * 补法也只能是浏览器那套 —— 定期落到磁盘上。
+   * 一晚上的成果没了。渲染进程的状态只活在内存里，这是「像浏览器的代价」；
+   * 补法也只能是浏览器那套 —— 定期落到 `userData/autosave` 下。
    *
-   * 只存**当前这一份**（用户正在编辑的那个），不存全部草稿：多份并发写盘慢，
-   * 且「恢复哪一个」这个问题的答案对用户来说并不显然。
+   * 四条边界，写在这里免得后来被改回去：
+   *   · **不代替保存**。用户按过保存的文件该是什么样还是什么样：草稿永远是
+   *     另一份临时文件，界面上的「未保存」点也不会因为写了草稿就消失
+   *   · **每个项目各一份**。同时开着三个项目就是三份，互不牵连，恢复时
+   *     也各自回到侧栏自己那一格
+   *   · **只在「这一段真的改过」时才写**。`dirty` 的含义是「自上次保存以来
+   *     改过」，它一旦为真就一直真到下次保存；真正决定写不写的是 `rev`
+   *     （改动计数）—— 用户改完一个字去喝水，不该每 15 秒把整份工程重写一遍
+   *   · 销毁时机只有两个：项目被保存成 `.xbsgp`、或项目被正常关掉。崩溃、
+   *     断电、被杀进程时**不销毁**，那正是它存在的理由
    *
    * 不做「阻止睡眠」：那要改系统电源策略，权限与副作用都比数据落盘大得多。
    */
@@ -3709,17 +3805,42 @@ const MIME_BY_EXT: Record<string, string> = {
   let autosaveTimer = 0
   let autosaveBusy = false
 
+  /**
+   * 这一轮该写哪些项目的草稿。
+   *
+   * 先 `stashActive()`：活动项目的 `rev` 是直接涨在它自己那一格上的，但
+   * `dirty` 之类的标量要写回才能跟别处一致 —— 反正这一步很便宜。
+   */
+  function autosaveTargets(): ProjectDraft[] {
+    stashActive()
+    return drafts.value.filter(
+      (d) => d.dirty && d.rev !== d.autosavedRev && draftItems(d).length > 0,
+    )
+  }
+
   async function writeAutosave(): Promise<void> {
     const bridge = window.xbaos
     if (!bridge?.autosave || autosaveBusy) return
-    if (!projectDirty.value || supportedFiles.value.length === 0) return
+    const pending = autosaveTargets()
+    if (pending.length === 0) return
+
     autosaveBusy = true
     try {
-      // 不查 mtime：`stat` 每个文件一次，自动草稿犯不上，那个字段只用于「素材有没有被换过」
-      const doc = await buildDoc(false)
-      await bridge.autosave.write(toProjectText(doc))
-    } catch {
-      /* 自动草稿失败不打扰用户，下一轮会重试 */
+      for (const d of pending) {
+        const rev = d.rev
+        try {
+          // 不查 mtime：`stat` 每个文件一次，自动草稿犯不上，那个字段只用于「素材有没有被换过」
+          const doc = await buildDocOf(d, false)
+          const ok = await bridge.autosave.write(d.id, toProjectText(doc), {
+            name: draftDisplayName(d),
+            savedPath: d.path ?? '',
+          })
+          // 写成功了才记这个 rev：失败的那份下一轮还会被挑出来重试
+          if (ok) d.autosavedRev = rev
+        } catch {
+          /* 一份失败不影响别的项目，下一轮再来 */
+        }
+      }
     } finally {
       autosaveBusy = false
     }
@@ -3737,29 +3858,55 @@ const MIME_BY_EXT: Record<string, string> = {
   }
 
   /**
-   * 启动时恢复上次未保存的工作。
+   * 启动时恢复上次没来得及保存的工作。
    *
-   * 恢复出来的东西**没有正式落点**：路径清空、标成未保存，名字留着 ——
-   * 用户看到的是「我那个项目回来了，但还没存过」，而不是一个指向
-   * `%APPDATA%` 里某个临时文件的诡异路径。
+   * 每个草稿恢复成侧栏里的一个项目，按最后写盘时间排（最近的在前）。
+   * 恢复出来的**状态是「未保存」**：内容回来了，但要按一次保存才落回原文件 ——
+   * 这一点与记事本一致。按过保存的项目会还原它的路径（用户看到的不是
+   * `%APPDATA%` 里某个临时文件），从没保存过的就是一条新项目。
+   *
+   * 返回恢复了几份。0 表示没有草稿，调用方不必提示。
    */
-  async function restoreAutosave(): Promise<boolean> {
+  async function restoreAutosave(): Promise<number> {
     const bridge = window.xbaos
-    if (!bridge?.autosave) return false
-    const peek = await bridge.autosave.peek()
-    if (!peek.exists) return false
+    if (!bridge?.autosave) return 0
+    let list: Awaited<ReturnType<typeof bridge.autosave.list>> = []
+    try {
+      list = await bridge.autosave.list()
+    } catch {
+      return 0
+    }
 
-    const ok = await openProject(peek.path)
-    if (!ok) return false
-    projectPath.value = null
-    lastProjectDir.value = ''
-    projectDirty.value = true
-    useUiStore().notify(
-      'info',
-      '已恢复未保存的工作',
-      `${displayProjectName.value}，另存为 .xbsgp 才会留下`,
-    )
-    return true
+    let restored = 0
+    for (const item of list) {
+      // 识别中不可能出现在启动阶段；真出现了就停手，别把草稿塞进正在跑的项目
+      if (recognizing.value) break
+      // 同一份草稿不要恢复两遍（双击打开的正好是它的情况）
+      if (draftOf(item.id)) continue
+      /*
+       * 它对应的那个用户文件已经开着（用户双击的就是它）→ 跳过。
+       *
+       * 两份指向同一个 `.xbsgp` 的草稿，谁后保存谁赢，另一份的改动会被静默
+       * 覆盖。宁可这一份先不恢复（文件留在磁盘上，下次启动还会提示），
+       * 也不给用户一个「两扇窗写着同一份工程」的局面。
+       */
+      if (item.savedPath && drafts.value.some((d) => d.path && samePath(d.path, item.savedPath))) {
+        continue
+      }
+      const ok = await openProject(item.path, {
+        autosave: { id: item.id, savedPath: item.savedPath },
+      })
+      if (ok) restored += 1
+    }
+
+    if (restored > 0) {
+      useUiStore().notify(
+        'info',
+        restored === 1 ? '已恢复未保存的工作' : `已恢复 ${restored} 个未保存的项目`,
+        '内容还没保存，确认无误后按「保存项目」',
+      )
+    }
+    return restored
   }
 
   /** 把文档里的子项目转成运行期条目 */
@@ -3796,10 +3943,18 @@ const MIME_BY_EXT: Record<string, string> = {
    * **不再问「当前项目有未保存的改动，要不要先存」**：打开是再开一份，
    * 当前那份还留在侧栏里，一个字都不会丢（2.6）。真正会丢的时机只有一个 ——
    * 关窗，那一步在 5.5 里问。
+   *
+   * @param options.autosave 从自动草稿恢复。此时「打开的东西」是一个临时文件，
+   *   不是用户的工程：路径要还原成用户按过保存的那个、状态标成未保存、
+   *   也不要为了打开它去把别的项目静默保存一遍。
    */
-  async function openProject(target?: string): Promise<boolean> {
+  async function openProject(
+    target?: string,
+    options?: { autosave?: { id: string; savedPath: string } },
+  ): Promise<boolean> {
     const ui = useUiStore()
     const bridge = window.xbaos
+    const fromAutosave = options?.autosave
 
     // 识别中不开新项目：这一批跑完再开。所有打开入口都过这里（按钮 / 双击 / 拖拽）
     if (recognizing.value) {
@@ -3812,8 +3967,9 @@ const MIME_BY_EXT: Record<string, string> = {
       return false
     }
 
-    // 有路径又有改动就顺手存一下：切走之前不静默丢东西，也不用打断用户
-    if (projectDirty.value && projectPath.value && supportedFiles.value.length > 0) {
+    // 有路径又有改动就顺手存一下：切走之前不静默丢东西，也不用打断用户。
+    // 恢复草稿时不走这条：那一份的内容就在草稿里，往上一个项目里写是多余的写盘
+    if (!fromAutosave && projectDirty.value && projectPath.value && supportedFiles.value.length > 0) {
       await saveProjectTo(projectPath.value)
     }
 
@@ -3855,7 +4011,8 @@ const MIME_BY_EXT: Record<string, string> = {
     }
 
     // 新开一份草稿来装它（当前项目先写回，之后还能切回来）
-    createDraft({ activate: true })
+    // 从自动草稿恢复时沿用它原来的 id：之后写草稿落在同一份文件上，不留孤儿
+    createDraft({ activate: true, id: fromAutosave?.id })
 
     // ---- 替换整个工程：先把上一份的媒体地址释放掉，否则内存只增不减
     for (const m of media.value.values()) {
@@ -3872,9 +4029,13 @@ const MIME_BY_EXT: Record<string, string> = {
         ? doc.project.activeItemId
         : (items[0]?.id ?? null)
     projectName.value = doc.project.name
-    projectPath.value = picked
+    /*
+     * 恢复草稿时路径要还原成**用户那个文件**，不是草稿文件本身：用户看到的
+     * 应该是一个正常项目，只是带一个「未保存」的点。从没保存过的仍然空着。
+     */
+    projectPath.value = fromAutosave ? fromAutosave.savedPath || null : picked
     projectDirty.value = false
-    lastProjectDir.value = dirOf(picked)
+    lastProjectDir.value = fromAutosave ? dirOf(fromAutosave.savedPath) : dirOf(picked)
 
     /*
      * 不动批量处理模式：它是会话状态，与"打开哪个项目"无关。编辑器早就
@@ -3915,21 +4076,37 @@ const MIME_BY_EXT: Record<string, string> = {
     // 把整份内容写进这份草稿：`files` 换过数组，草稿那一格还指着创建时的空数组
     stashActive()
 
-    ui.notify(
-      'success',
-      '项目已打开',
-      bad > 0
-        ? `${doc.project.name}：${items.length} 个子项目，其中 ${bad} 个的音频对不上`
-        : `${doc.project.name}：${items.length} 个子项目`,
-    )
+    /*
+     * 恢复草稿：内容回来了，但「还没保存」这件事没变（与记事本一致）。
+     * 同时把改动计数对齐 —— 草稿文件里就是这份内容，没必要立刻重写一遍。
+     */
+    if (fromAutosave) {
+      const d = draftOf(activeDraftId.value)
+      if (d) {
+        markDraftDirty(d)
+        d.autosavedRev = d.rev
+      }
+    }
+
+    // 恢复草稿的提示由 `restoreAutosave` 统一发（可能一次恢复好几份，逐份弹会刷屏）
+    if (!fromAutosave) {
+      ui.notify(
+        'success',
+        '项目已打开',
+        bad > 0
+          ? `${doc.project.name}：${items.length} 个子项目，其中 ${bad} 个的音频对不上`
+          : `${doc.project.name}：${items.length} 个子项目`,
+      )
+    }
     /*
      * 打开就进工作台。
      *
      * 用户点「打开项目」要的就是接着编，停在导入页等于让他再找一个入口；
      * 双击 `.xbsgp`、拖文件进来也走这条路，同样该直接落到字幕上。
      * 空项目（0 个子项目）例外：进去只有一片空态，没有意义。
+     * 恢复草稿也不跳：一次可能恢复好几份，跟着最后一个跳来跳去很蠢。
      */
-    if (items.length > 0) ui.navigate('editor')
+    if (items.length > 0 && !fromAutosave) ui.navigate('editor')
     return true
   }
 
@@ -3971,7 +4148,7 @@ const MIME_BY_EXT: Record<string, string> = {
 
     if (!projectPath.value || !bridge) {
       projectName.value = clean
-      projectDirty.value = true
+      markDirty()
       return true
     }
 

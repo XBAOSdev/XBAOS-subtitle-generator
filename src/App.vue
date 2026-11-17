@@ -610,13 +610,15 @@ onMounted(() => {
    */
   offProjectPending = window.xbaos?.project?.onPending(() => void project.openPendingProject())
   /*
-   * 先让「双击打开」的走完，再谈恢复自动草稿。
+   * 先让「双击打开」的走完，再恢复自动草稿。
    *
-   * 两者都会调 `openProject`，抢同一份状态。用户的显式动作优先：已经打开了
-   * 一个项目就不要再把旧草稿顶上来；只有当前空着才恢复。
+   * 两者都会调 `openProject`，抢同一份状态，所以必须串起来。但**不能因为
+   * 双击了一个项目就把草稿丢掉**：那是两件事，用户没保存的工作不该因为他
+   * 恰好打开了一个别的文件而消失。冲突的情况（草稿对应的正是被双击打开的
+   * 那个文件）由 `restoreAutosave` 自己跳过，免得两份工程指向同一个文件。
    */
   void project.openPendingProject().then(async () => {
-    if (!project.hasFiles) await project.restoreAutosave()
+    await project.restoreAutosave()
     project.startAutosave()
   })
 })

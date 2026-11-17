@@ -1298,6 +1298,24 @@ function queueProjectOpen(pathArg) {
   }
 }
 
+/**
+ * 从一份 `.xbsgp` 里取出它引用的媒体文件路径。
+ *
+ * 只服务于「启动清理时豁免这个工程的缓存」，所以按最宽松的方式读：
+ * 解析失败、字段缺失、版本不认识一律当「没有媒体」。真正的格式校验在
+ * 渲染进程（`fromProjectText`），这里多判一次只会让启动多一条报错路径。
+ */
+async function mediaPathsOfProject(file) {
+  try {
+    const doc = JSON.parse(await fs.readFile(file, 'utf8'))
+    const items = doc?.project?.items
+    if (!Array.isArray(items)) return []
+    return items.map((it) => it?.media?.path).filter((p) => typeof p === 'string' && p)
+  } catch {
+    return []
+  }
+}
+
 // ------------------------------------------------------------------ IPC
 
 function registerIpc() {
@@ -1715,33 +1733,131 @@ function registerIpc() {
   /* ------------------------------------------------------ 自动草稿（防丢） */
 
   /*
-   * 「识别完但还没保存，合盖睡眠，唤醒后界面重载，成果没了」。
+   * 自动草稿是**保险**，不是保存。它要解决的场景只有一个：识别完、还没保存，
+   * 笔记本合盖睡眠 / 断电 / 进程被杀，渲染进程重建后内存里的一切都没了。
    *
-   * 渲染进程的状态只在内存里，系统挂起再恢复时 Electron 可能重建渲染进程。
-   * 补法只有一条：把工程定期写到磁盘。存在 userData 下而不是临时目录 ——
-   * 临时目录会被系统清理，而这正是要保命的东西。
+   * 因此：
+   *   · 一个项目一个文件（`<id>.xbsgp`），另有一份 `index.json` 记元信息。
+   *     用户的工程文件再小也是几十上百 KB，多留几份不构成负担；而「一个文件
+   *     装下所有项目」意味着每 15 秒全量重写一遍，项目一多就是白写
+   *   · 正文用「临时名 + rename」落盘。写一半被杀不会留下半截 JSON 被下次
+   *     当成草稿 —— 那比没有草稿更糟：它会让恢复流程走进解析失败的死路
+   *   · 索引**最后**写：它指向的正文一定已经就位
+   *   · 存在 `userData` 而不是临时目录：临时目录会被系统清理，而这正是要
+   *     保命的东西
    */
-  const autosaveFile = () => path.join(app.getPath('userData'), 'autosave', 'draft.xbsgp')
+  const autosaveDir = () => path.join(app.getPath('userData'), 'autosave')
+  const autosaveIndex = () => path.join(autosaveDir(), 'index.json')
 
-  ipcMain.handle('autosave:peek', async () => {
-    const target = autosaveFile()
+  /**
+   * 草稿文件名。id 来自渲染进程，只放行 `[A-Za-z0-9_-]`：
+   * `../../x` 这种拼法如果直接 join 就能写到目录外面去。
+   */
+  function autosaveFileOf(id) {
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null
+    return path.join(autosaveDir(), `${id}.xbsgp`)
+  }
+
+  async function readAutosaveIndex() {
     try {
-      const st = await fs.stat(target)
-      return { exists: st.isFile() && st.size > 0, path: target, savedAt: st.mtimeMs }
+      const parsed = JSON.parse(await fs.readFile(autosaveIndex(), 'utf8'))
+      const items = Array.isArray(parsed?.items) ? parsed.items : []
+      return items.filter(
+        (it) => it && typeof it.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(it.id),
+      )
     } catch {
-      return { exists: false, path: target, savedAt: 0 }
+      return []
     }
+  }
+
+  async function writeAutosaveIndex(items) {
+    const target = autosaveIndex()
+    const temp = `${target}.${process.pid}.tmp`
+    await fs.mkdir(autosaveDir(), { recursive: true })
+    await fs.writeFile(temp, JSON.stringify({ version: 1, items }, null, 2), 'utf8')
+    await fs.rename(temp, target)
+  }
+
+  /**
+   * 有哪些草稿可以恢复。
+   *
+   * 三条来源合起来看，宁多勿漏：索引里记的、目录里实际存在的 `*.xbsgp`。
+   * 索引丢了（或写着写着被杀）时，后者还能把数据救回来 —— 丢的只是项目名。
+   * 老版本的单个 `draft.xbsgp` 也在这条路上自动变成「id 为 draft 的草稿」，
+   * 不需要迁移代码。
+   */
+  ipcMain.handle('autosave:list', async () => {
+    const dir = autosaveDir()
+    const recorded = new Map()
+    for (const it of await readAutosaveIndex()) recorded.set(it.id, it)
+
+    let names = []
+    try {
+      names = await fs.readdir(dir)
+    } catch {
+      return [] // 目录还不存在：没有草稿
+    }
+
+    const out = []
+    for (const name of names) {
+      if (!name.endsWith('.xbsgp')) continue
+      const id = name.slice(0, -'.xbsgp'.length)
+      const file = autosaveFileOf(id)
+      if (!file) continue
+      try {
+        const st = await fs.stat(file)
+        if (!st.isFile() || st.size === 0) continue
+        const meta = recorded.get(id)
+        out.push({
+          id,
+          path: file,
+          name: typeof meta?.name === 'string' ? meta.name : '',
+          savedPath: typeof meta?.savedPath === 'string' ? meta.savedPath : '',
+          savedAt: st.mtimeMs,
+          bytes: st.size,
+        })
+      } catch {
+        /* 索引里有、文件没了：跳过 */
+      }
+    }
+    // 最近写过的在前：恢复顺序与侧栏顺序都按它排
+    out.sort((a, b) => b.savedAt - a.savedAt)
+    return out
   })
 
-  ipcMain.handle('autosave:write', async (_event, text) => {
-    const target = autosaveFile()
-    await fs.mkdir(path.dirname(target), { recursive: true })
-    await fs.writeFile(target, text, 'utf8')
+  ipcMain.handle('autosave:write', async (_event, id, text, meta = {}) => {
+    const target = autosaveFileOf(id)
+    if (!target || typeof text !== 'string' || !text) return false
+
+    await fs.mkdir(autosaveDir(), { recursive: true })
+    const temp = `${target}.${process.pid}.tmp`
+    await fs.writeFile(temp, text, 'utf8')
+    await fs.rename(temp, target)
+
+    const items = (await readAutosaveIndex()).filter((it) => it.id !== id)
+    items.push({
+      id,
+      name: typeof meta?.name === 'string' ? meta.name : '',
+      savedPath: typeof meta?.savedPath === 'string' ? meta.savedPath : '',
+      updatedAt: Date.now(),
+    })
+    await writeAutosaveIndex(items)
     return true
   })
 
-  ipcMain.handle('autosave:clear', async () => {
-    await fs.rm(autosaveFile(), { force: true }).catch(() => {})
+  /** 不给 id 就全清（「打开项目时发现有脏草稿」之类的兜底用） */
+  ipcMain.handle('autosave:clear', async (_event, id) => {
+    if (id) {
+      const file = autosaveFileOf(id)
+      if (file) await fs.rm(file, { force: true }).catch(() => {})
+      await writeAutosaveIndex((await readAutosaveIndex()).filter((it) => it.id !== id))
+      return true
+    }
+    for (const it of await readAutosaveIndex()) {
+      const file = autosaveFileOf(it.id)
+      if (file) await fs.rm(file, { force: true }).catch(() => {})
+    }
+    await writeAutosaveIndex([])
     return true
   })
 
@@ -2483,19 +2599,31 @@ app.whenReady().then(async () => {
    * 冷启动就是「双击了一个 .xbsgp」：把路径存进待打开槽位。
    * 此刻窗口还没加载完，消息发不出去，等渲染进程挂载后自己来取。
    */
-  queueProjectOpen(projectPathFromArgv(process.argv))
+  const argvProject = projectPathFromArgv(process.argv)
+  queueProjectOpen(argvProject)
   // 系统声音采集必须先把 handler 挂上：不挂的话 getDisplayMedia() 会弹
   // Electron 自带的「选择要共享的内容」窗口。
   installDisplayMediaHandler()
 
   /*
-   * 顺手清一次试听缓存（超过 14 天没用过的那些）。
+   * 顺手清一次试听缓存：过期 3 天没碰过的，以及超过 1 GB 的那部分。
    *
    * 放在启动时而不是「第一次转码时」：后者让「从不导入视频容器」的用户
    * 永远等不到清理，缓存只会越攒越多。这里不阻塞窗口创建，失败也不管。
    * 放在 `gotLock` 之后：多开时只有拿到锁的那个实例动手。
+   *
+   * **双击打开的工程要豁免自己那份缓存**：它可能刚好过了期，但用户马上
+   * 要用 —— 删了就得重新解码，一次打开凭空慢十几秒。豁免的同时会把
+   * 使用时间刷新，3 天从这次算起。从「最近打开」列表点进来时拿不到路径，
+   * 那种情况仍然会清，代价是重新转一份。
    */
-  void getPlayableCache().prune()
+  void (async () => {
+    const cache = getPlayableCache()
+    const exempt = argvProject
+      ? await cache.keysOf(await mediaPathsOfProject(argvProject))
+      : undefined
+    await cache.prune({ exempt })
+  })()
 
   /*
    * 不在这里预启动引擎。

@@ -679,7 +679,8 @@ function reset(): void {
 
                 <p v-if="mediaCache.stats.limit > 0" class="hint">
                   超过 {{ formatBytes(mediaCache.stats.limit) }} 时按最久未用淘汰，
-                  超过 14 天的也会清掉；清理只在启动软件时进行，正在用的那份会跳过。
+                  超过 3 天的也会清掉。过期清理只在启动软件时进行，超上限时转完一份就会淘汰；
+                  正在用的那份会跳过。
                 </p>
               </div>
             </section>

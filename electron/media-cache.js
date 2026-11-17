@@ -20,16 +20,19 @@
  * 缓存策略：
  *   · 键 = 源路径 + 大小 + 修改时间，源文件被替换后自然失效
  *   · 位置 `userData/media-cache`（即 `%APPDATA%\xbaos-subtitle-generator\media-cache`）
- *   · 保留期 14 天，按**最后一次使用**算：命中时把 mtime 往前推，所以
- *     「天天听的那份」不会被误删，「半年前转过一次的」才会走
- *   · **总量上限 `CACHE_MAX_BYTES`**（1 GB）：超了按「最久未用」淘汰。
- *     单靠 14 天是不够的 —— 48kHz 单声道是 345 MB/小时，一天处理两小时视频，
- *     两周就能涨到 9 GB。上限是硬边界，过期是软边界，两个都要
- *   · 淘汰**跳过本次运行中用过的那些**：正在播的那份被删掉，下次点播放就得
- *     重新转一遍，等于让清理变成「卡一下」。跳过之后若仍超限（说明在用的
- *     就超过了上限），留给下次启动再清 —— 那时它们已经不在用
- *   · 清理**只在软件启动时**做一次（`main.js` 的 `whenReady`），不存在常驻定时器。
- *     也就是说软件一直不开，过期缓存就会一直留在磁盘上，需要手动删目录
+ *   · **保留期 3 天**，按**最后一次使用**算：命中一次就把 mtime 刷到当下，
+ *     所以「隔天还听一次的那份」永远不过期，「转过一次就再没碰过的」3 天后走
+ *   · **总量上限 `CACHE_MAX_BYTES`**（1 GB）。上限与保留期是两条独立的线：
+ *     过期看时间，超限看体积，谁先命中谁生效
+ *   · 超限淘汰**随时可能发生**：转完一份新的就检查一次（`enforceLimit`），
+ *     不等下次启动 —— 否则用户导一次大素材，磁盘当场多出几 GB
+ *   · 但淘汰**跳过本次运行中用过的那些**（`touched`）：正在播的那份被删掉，
+ *     下次点播放就得重新转一遍，等于让清理变成「卡一下」。所以「前台项目的
+ *     缓存自己就超过 1 GB」时不删它们，留给下次启动（那时它们已经不在用）
+ *   · 过期清理**只在软件启动时**做一次（`main.js` 的 `whenReady`），不存在常驻
+ *     定时器。也就是说软件一直不开，过期缓存就会一直留在磁盘上，需要手动删目录
+ *   · 启动清理可以带一份**豁免名单**（`exempt`）：双击 `.xbsgp` 打开时，那份
+ *     工程要用的缓存虽然过了期也先留着，并把 mtime 刷新（3 天从头算）
  *   · 同一文件并发请求共享同一个 Promise，不会把引擎拉起来两遍
  */
 
@@ -44,26 +47,18 @@ const SYSTEM_DECODER_EXTS = new Set(['m4a', 'm4b', 'mp4', 'm4v', 'mov', 'aac', '
 /** 单次转换的上限。一小时素材解一遍是秒级，10 分钟足够，超时说明卡死了 */
 const DECODE_TIMEOUT_MS = 10 * 60 * 1000
 
-/** 缓存保留期 */
-const CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000
-
-/**
- * 命中后多久才值得把 mtime 往前推一次。
- *
- * 每次播放都 `utimes` 是没必要的写操作；隔一天一次足够表达「这份还在用」，
- * 而 14 天的保留期是按天算的，精度损失可以忽略。
- */
-const TOUCH_INTERVAL_MS = 24 * 60 * 60 * 1000
+/** 缓存保留期。按「最后一次使用」算，不是「生成时间」 */
+const CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000
 
 /**
  * 缓存总量上限。
  *
- * 14 天保留期管不住体积：这类缓存是**源采样率**的单声道 16 位 PCM，
- * 48kHz 一小时 345 MB。一周处理十小时素材就是 3.4 GB，用户会觉得
- * 「硬盘莫名其妙满了」。所以再加一道硬边界，超了按最久未用淘汰。
+ * 3 天保留期管不住体积：这类缓存是**源采样率**的单声道 16 位 PCM，
+ * 48kHz 一小时 345 MB。一天处理三小时素材就是 1 GB，三天就是 3 GB。
+ * 所以再加一道硬边界，超了按最久未用淘汰。
  *
- * 1 GB 约等于 3 小时的 48kHz 素材（当前开发机上已有 421 MB，留两倍余量）。
- * 定得太小会让功能一上线就开始删用户刚转好的东西 —— 那比占盘更让人恼火。
+ * 1 GB 约等于 3 小时的 48kHz 素材。定得太小会让功能一上线就开始删用户
+ * 刚转好的东西 —— 那比占盘更让人恼火。
  */
 const CACHE_MAX_BYTES = 1024 * 1024 * 1024
 
@@ -124,15 +119,16 @@ export class PlayableCache {
         /*
          * 命中即算「用过」，把 mtime 推到当下。
          *
-         * 这一步是「14 天未用即清」能否成立的前提：清理判据是 mtime，
-         * 而命中不重写文件，mtime 会一直停在生成那一刻 —— 于是
-         * 「天天在听的这份」也会在第 15 天被当成过期删掉。
-         * 隔一天推一次，既省写操作，也不会误删。
+         * 这是「3 天未用即清」能成立的前提：清理判据是 mtime，而命中不重写
+         * 文件，mtime 会一直停在生成那一刻 —— 于是「隔天还在听的那份」也会
+         * 在第 3 天被当成过期删掉。
+         *
+         * **每次命中都刷，不做节流**：这个函数一次加载只调一次（切文件、
+         * 打开工程），不是每帧；一次 `utimes` 是元数据写，比「判断要不要刷」
+         * 省下来的那点 IO 更值钱的是语义清楚 —— 保留期严格从最后一次使用算。
          */
         const now = Date.now()
-        if (now - cached.mtimeMs > TOUCH_INTERVAL_MS) {
-          await fs.utimes(target, new Date(now), new Date(now)).catch(() => {})
-        }
+        await fs.utimes(target, new Date(now), new Date(now)).catch(() => {})
         this.markUsed(target, srcPath)
         return { ok: true, path: target, cached: true }
       }
@@ -183,6 +179,13 @@ export class PlayableCache {
       `[media] 已生成可播放缓存 ${path.basename(target)}（源 ${(stat.size / 1048576).toFixed(1)}MB）`,
     )
     this.markUsed(target, srcPath)
+    /*
+     * 刚多了一份，立刻看有没有超限。
+     *
+     * 不等下次启动：用户导入一个大素材，从这一刻起磁盘就一直压在上限之上，
+     * 而那恰恰是最该看体积的时刻。
+     */
+    void this.enforceLimit()
     return { ok: true, path: target, cached: false }
   }
 
@@ -194,16 +197,18 @@ export class PlayableCache {
   }
 
   /**
-   * 清掉过期与超额的那部分。
+   * 清掉过期的那部分，再压到上限以内。
    *
    * 由 `main.js` 在 `whenReady` 里调一次，**不是定时器**：软件不启动就不会清，
    * 这是可接受的取舍（清理不是功能，攒着只是占盘）。失败一律不报错。
    *
-   * 两轮：先按 14 天过期删，再按总量上限从最久未用开始删。第二轮只看
-   * 未在本次运行中用过的那些 —— 正在播的一份被删掉，用户下次点播放就得
-   * 重新转一遍，清理就成了「卡一下」。
+   * @param {{ exempt?: Iterable<string> }} [options]
+   *   `exempt` 是缓存文件名集合。这些文件**跳过过期判断**，并把 mtime 刷到
+   *   当下（3 天从头算）。用途只有一个：双击 `.xbsgp` 冷启动时，那份工程
+   *   要用的缓存可能刚好过了期，但用户马上要用它 —— 删了就得重新解码，
+   *   打开工程凭空慢十几秒。
    */
-  async prune() {
+  async prune(options = {}) {
     let entries
     try {
       entries = await this.list()
@@ -212,23 +217,45 @@ export class PlayableCache {
     }
 
     const now = Date.now()
-    let removed = 0
-    const keep = []
-    for (const e of entries) {
-      if (this.touched.has(e.name)) {
-        keep.push(e)
-        continue
-      }
-      if (now - e.mtime > CACHE_TTL_MS) {
-        if (await this.rm(e.name)) removed += 1
-      } else {
-        keep.push(e)
+    if (options.exempt) {
+      for (const name of options.exempt) {
+        await fs.utimes(path.join(this.cacheDir, name), new Date(now), new Date(now)).catch(() => {})
+        // 豁免 = 马上要用，等同于「本次运行用过」，后面的淘汰也不许碰
+        this.touched.add(name)
       }
     }
 
-    // 第二轮：超上限就按最久未用删。keep 已按 mtime 升序排
-    let bytes = keep.reduce((sum, e) => sum + e.bytes, 0)
-    for (const e of keep) {
+    let removed = 0
+    for (const e of entries) {
+      if (this.touched.has(e.name)) continue
+      if (now - e.mtime > CACHE_TTL_MS && (await this.rm(e.name))) removed += 1
+    }
+
+    const rest = await this.enforceLimit()
+    return { removed: removed + rest.removed, bytes: rest.bytes, count: rest.count }
+  }
+
+  /**
+   * 压到上限以内：从最久没用的开始，一个一个删，直到不超限或者没有能删的。
+   *
+   * 两处调用：转出新缓存之后（`convert`）与启动清理（`prune`）。
+   *
+   * **跳过 `touched`**：跳过之后仍然超限，说明在用的那些自己就超过了上限 ——
+   * 这时不能删。删了正在播的那份，用户下次点播放就得重新解码；留给下次启动，
+   * 那时它们已经不在用了。这正是「前台项目的缓存大于 1 GB 也不动」的落点。
+   */
+  async enforceLimit() {
+    let entries
+    try {
+      entries = await this.list()
+    } catch {
+      return { removed: 0, bytes: 0, count: 0 }
+    }
+
+    let bytes = entries.reduce((sum, e) => sum + e.bytes, 0)
+    let removed = 0
+    // list() 已按 mtime 升序，顺序扫就是「最老的先删」
+    for (const e of entries) {
       if (bytes <= CACHE_MAX_BYTES) break
       if (this.touched.has(e.name)) continue
       if (await this.rm(e.name)) {
@@ -238,9 +265,32 @@ export class PlayableCache {
     }
 
     if (removed) {
-      console.log(`[media] 清理了 ${removed} 份播放缓存，现占 ${(bytes / 1048576).toFixed(0)}MB`)
+      console.log(
+        `[media] 超出上限，淘汰了 ${removed} 份播放缓存，现占 ${(bytes / 1048576).toFixed(0)}MB`,
+      )
     }
-    return { removed, bytes, count: keep.length }
+    return { removed, bytes, count: entries.length - removed }
+  }
+
+  /**
+   * 把一组源文件路径换算成缓存文件名。
+   *
+   * 冷启动「双击打开的那个工程要豁免自己那份缓存」时用：主进程手里只有
+   * `.xbsgp` 里记的媒体路径，键必须在这里算 —— 哈希规则只此一份，别处
+   * 再实现一遍迟早会算出不一样的值。文件不在了就跳过（本来也不会有缓存）。
+   */
+  async keysOf(paths) {
+    const out = new Set()
+    for (const p of paths ?? []) {
+      if (typeof p !== 'string' || !p) continue
+      try {
+        const st = await fs.stat(p)
+        out.add(path.basename(this.pathFor(p, st)))
+      } catch {
+        /* 文件不在了 */
+      }
+    }
+    return out
   }
 
   /**

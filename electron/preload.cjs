@@ -172,9 +172,9 @@ contextBridge.exposeInMainWorld('xbaos', {
 
   // ---- 自动草稿（防丢）：未保存的工程定期落盘，下次启动恢复
   autosave: {
-    peek: () => ipcRenderer.invoke('autosave:peek'),
-    write: (text) => ipcRenderer.invoke('autosave:write', text),
-    clear: () => ipcRenderer.invoke('autosave:clear'),
+    list: () => ipcRenderer.invoke('autosave:list'),
+    write: (id, text, meta) => ipcRenderer.invoke('autosave:write', id, text, meta),
+    clear: (id) => ipcRenderer.invoke('autosave:clear', id),
   },
 
   // ---- 项目文件（.xbsgp）
