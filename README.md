@@ -81,10 +81,23 @@ Windows 安装包见官网：<https://subtitle.xbaos.com.cn>
 | OGG Vorbis | stb_vorbis |
 | Opus | libopus |
 | M4A / M4B / MP4 / AAC | Windows 自带的解码器（Media Foundation） |
+| M4V / MOV / MKV | 同上，只读第一条音轨 |
 
-最后一栏不是本软件自带的库：AAC 的解码由 Windows 的媒体组件完成，本软件不含
-任何 AAC 实现，只做「取音轨 → 拿 PCM」的搬运。因此这类格式要求系统具备媒体功能
+最后一栏不是本软件自带的库：这类容器里的音轨由 Windows 的媒体组件解码，本软件
+不含任何音轨实现，只做「取音轨 → 拿 PCM」的搬运。因此这类格式要求系统具备媒体功能
 （Windows N 版或精简系统需安装媒体功能包），且不支持 xHE-AAC。
+
+视频容器（MP4 / M4V / MOV / MKV）只读**第一条音轨**，视频轨不解码 —— 也就
+不涉及视频编码的许可。能否解出来取决于音轨编码是否为系统内置：AAC / MP3 / PCM /
+AC-3 / FLAC 可以，DTS / Opus / xHE-AAC 不行；解不了会明确报错，不会给出错误字幕。
+
+自带的 Opus 解码器（`libopus`）只认 **Ogg 容器**里的 Opus（`.opus`）；Ogg 容器里的
+Vorbis（`.ogg` / `.oga`）则由 `stb_vorbis` 解。内置的是「码流解码器」，不是 WebM 容器
+（EBML）的解析器：容器拆不开，就取不出里面的音频包，解码器再全也用不上。这是 `.opus`
+能支持、而 WebM 不支持的真正原因，与「有没有 Opus 解码能力」无关。
+
+AVI 与 WebM 不在支持之列：前者系统能解析容器，但纯音频 AVI 的取值验不通；后者
+的容器不解析、整段交系统解码，而系统通常没装 WebM 的 Opus / Vorbis 组件。
 
 **字幕**：可读入 SRT / WebVTT / ASS / SSA，可导出 SRT / WebVTT / ASS。
 
@@ -92,10 +105,12 @@ Windows 安装包见官网：<https://subtitle.xbaos.com.cn>
 
 | 格式 | 原因 |
 |---|---|
+| AVI | 系统能解析这种容器，但纯音频 AVI 的兼容性不稳定，暂不接入 |
+| WebM | 容器不解析、整段交系统解码，而系统通常没有 WebM 的 Opus / Vorbis 组件；同一段音频封装成 `.opus` 即可导入 |
 | WMA | 微软专有编码，尚未接入系统解码器 |
 | AMR / AMR-WB | 包含多项专利的语音编码标准 |
 | DTS | 专有技术，专利保护期可能持续到 2040 年前后 |
-| AC-3 / E-AC-3 | **专利已到期**（AC-3 为 2017 年，E-AC-3 为 2026 年初），**无法律障碍**，只是尚未接入解码器 |
+| AC-3 / E-AC-3 | **专利已到期**（AC-3 为 2017 年，E-AC-3 为 2026 年初），**无法律障碍**，只是尚未接入解码器；作为视频容器内的音轨时可以随容器一起导入 |
 
 ---
 

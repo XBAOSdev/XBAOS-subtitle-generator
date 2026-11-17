@@ -11,9 +11,11 @@
  * 「界面能听」是两条独立的路，前者靠系统解码器，后者只能靠一份 Chromium
  * 认得出来的数据。
  *
- * 所以这里做一件事：需要系统解码器的格式（m4a / m4b / mp4 / aac），在导入后
- * 让引擎（同样调系统解码器）解成一份 WAV 缓存，界面拿这份 WAV 试听与画波形。
- * 原始文件仍是识别源，一个字都不改。
+ * 所以这里做一件事：需要系统解码器的格式（m4a / m4b / mp4 / m4v / mov / aac /
+ * mkv），在导入后让引擎（同样调系统解码器）解成一份 WAV 缓存，界面拿这份
+ * WAV 试听与画波形。原始文件仍是识别源，一个字都不改。
+ *
+ * 视频容器走这条路还有个附带好处：只解音轨，视频轨根本不碰。
  *
  * 缓存策略：
  *   · 键 = 源路径 + 大小 + 修改时间，源文件被替换后自然失效
@@ -27,7 +29,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 /** 这些扩展名的音频，Chromium 解不了，必须先转（键一律小写） */
-const SYSTEM_DECODER_EXTS = new Set(['m4a', 'm4b', 'mp4', 'aac'])
+const SYSTEM_DECODER_EXTS = new Set(['m4a', 'm4b', 'mp4', 'm4v', 'mov', 'aac', 'mkv'])
 
 /** 单次转换的上限。一小时素材解一遍是秒级，10 分钟足够，超时说明卡死了 */
 const DECODE_TIMEOUT_MS = 10 * 60 * 1000

@@ -2,6 +2,7 @@
  * 繁体到简体的单字对照表。
  * 数据来源 OpenCC（Apache-2.0）的 TSCharacters 表，经 opencc-js（MIT）的打包格式提取，可商用。
  * whisper 中文识别在部分权重下会输出繁体，识别结果入库前用此表统一转简。
+ * 许可原文见 licenses/Apache-2.0.LICENSE.txt，署名见 licenses/THIRD-PARTY.md。
  */
 
 export const T2S_TABLE: Readonly<Record<string, string>> = {

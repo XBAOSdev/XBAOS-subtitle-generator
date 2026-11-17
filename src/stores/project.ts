@@ -200,6 +200,21 @@ export const useProjectStore = defineStore('project', () => {
    */
   const intakeOrigin = new Map<string, { draftId: string; index: number }>()
   /**
+   * 批次（＝一次导入）。
+   *
+   * 「一次导入的全部内容算一个项目，下一次导入默认是新项目」这条规则要落地，
+   * 就必须在收进队列时记住「它和谁是同一次进来的」—— 落地那一刻只看得到单个
+   * 条目，看不出它属于哪一次导入。
+   *
+   * 以前没有这个概念，后果很具体：项目 A 已经在工作台里，再导一个字幕文件，
+   * 它会挂到 A 后面；而同一批里的音频因为要识别，走的是另一条路，于是
+   * 「同一次导入」被拆成了两个项目。
+   */
+  let batchSeq = 0
+  const batchOf = new Map<string, string>()
+  /** 批次 → 它已经建出来的项目（延迟创建：落第一个条目时才建） */
+  const batchDraft = new Map<string, string>()
+  /**
    * 批量处理模式：决定「这一批建几个项目」，不影响编辑器怎么显示。
    *
    * 它是**会话状态**（2.2）：识别中禁止切换（进度单元的前缀和是启动时算好的），
@@ -1203,7 +1218,60 @@ export const useProjectStore = defineStore('project', () => {
    * 它们要等识别落地，或者用户直接打开项目之后才有归属。
    */
   function addFiles(list: AudioFile[]): void {
+    if (list.length === 0) return
+    /*
+     * 一次调用 = 一批。同批条目共用一个批次号，落地时才认得出「它们是一起
+     * 进来的」—— 空调用不占号，免得批号和用户数得出来的导入次数对不上。
+     */
+    batchSeq += 1
+    const batch = `b${batchSeq}`
+    for (const f of list) batchOf.set(f.id, batch)
     intake.value.push(...list)
+  }
+
+  /**
+   * 取这一批的项目，没有就建一个。
+   *
+   * 必须延迟创建：字幕不需要识别，落地时立刻要有项目；音频要走识别，项目在
+   * 识别开始或第一条落地时才建。两条路共用这张表，「一批 = 一个项目」才守得住。
+   */
+  function draftForBatch(batch: string, activate: boolean): string {
+    const known = batchDraft.get(batch)
+    if (known && draftOf(known)) return known
+    const id = createDraft({ activate })
+    if (batch) batchDraft.set(batch, id)
+    return id
+  }
+
+  /**
+   * 按路径造一条「待识别」的条目，**不写队列**。
+   *
+   * 与写入分开，是为了让一次拖入能按用户看到的顺序把音频和字幕混排成一个
+   * 队列再统一收进来 —— 边造边写会让「一次导入 = 一个项目」这条规则失效。
+   */
+  async function makeQueuedAudio(p: string): Promise<AudioFile> {
+    const bridge = window.xbaos
+    const ext = extOfPath(p)
+    let size = 0
+    if (bridge) {
+      try {
+        const stat = await bridge.fs.stat(p)
+        if (stat.ok && stat.isFile) size = stat.size ?? 0
+      } catch {
+        /* stat 失败不拦导入 */
+      }
+    }
+    return {
+      id: `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      name: nameOf(p),
+      path: p,
+      dir: dirOf(p),
+      ext,
+      sizeBytes: size,
+      durationSec: null,
+      status: 'queued',
+      segments: [],
+    }
   }
 
   /**
@@ -1211,34 +1279,11 @@ export const useProjectStore = defineStore('project', () => {
    * 最终都汇到这里。大小从主进程的 stat 拿，拿不到就算 0（不影响识别）。
    */
   async function addFilesFromPaths(paths: string[]): Promise<number> {
-    const bridge = window.xbaos
     const created: AudioFile[] = []
 
     for (const p of paths) {
-      const ext = extOfPath(p)
-      if (!isSupported(ext)) continue
-
-      let size = 0
-      if (bridge) {
-        try {
-          const stat = await bridge.fs.stat(p)
-          if (stat.ok && stat.isFile) size = stat.size ?? 0
-        } catch {
-          /* stat 失败不拦导入 */
-        }
-      }
-
-      created.push({
-        id: `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-        name: nameOf(p),
-        path: p,
-        dir: dirOf(p),
-        ext,
-        sizeBytes: size,
-        durationSec: null,
-        status: 'queued',
-        segments: [],
-      })
+      if (!isSupported(extOfPath(p))) continue
+      created.push(await makeQueuedAudio(p))
     }
 
     if (created.length > 0) addFiles(created)
@@ -1246,11 +1291,46 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   /**
+   * 解析一个字幕文件成队列条目，**不写队列、不提示**。
+   *
+   * 与 `addSubtitleFromPath` 分开的理由：混合拖入时它要和音频按拖入顺序排进
+   * 同一个队列，「解析」与「收进队列」必须是两步，否则字幕会插到音频前面去。
+   */
+  async function parseSubtitleItem(p: string): Promise<AudioFile | null> {
+    const bridge = window.xbaos
+    if (!bridge) return null
+    const ext = extOfPath(p)
+    if (!isSubtitleExt(ext)) return null
+
+    const { text, encoding } = await bridge.fs.readTextAuto(p)
+    const parsed = parseSubtitle(text, ext)
+    if (parsed.segments.length === 0) return null
+
+    // 时长取最后一条的结束时间，让编辑器的时间轴与校验有界可用
+    const duration = Math.max(...parsed.segments.map((s) => s.end))
+    return {
+      id: `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      name: nameOf(p),
+      path: p,
+      dir: dirOf(p),
+      ext,
+      sizeBytes: 0,
+      durationSec: Number(duration.toFixed(2)),
+      status: 'pending',
+      segments: parsed.segments,
+      subtitleFormat: parsed.format,
+      sourceEncoding: encoding,
+      // 记一份「字幕从哪来」：`path` 之后可能被映射成音频
+      subtitlePath: p,
+    }
+  }
+
+  /**
    * 导入一个字幕文件（SRT / VTT / ASS）。
    *
    * 与音频导入共用同一条目结构：解析出的字幕直接作为识别结果呈现，
-   * 状态置为 pending（处理完成），用户在编辑器里改完可以覆盖保存回
-   * 原文件或另存。没有音频，波形与播放相关能力自然不可用。
+   * 状态置为 pending（处理完成），用户在编辑器里改完可以导出或另存。
+   * 没有音频，波形与播放相关能力自然不可用。
    *
    * @returns 是否成功导入
    */
@@ -1258,41 +1338,21 @@ export const useProjectStore = defineStore('project', () => {
     const bridge = window.xbaos
     if (!bridge) return false
     const ui = useUiStore()
-    const ext = extOfPath(p)
-    if (!isSubtitleExt(ext)) return false
+    if (!isSubtitleExt(extOfPath(p))) return false
 
     try {
-      const { text, encoding } = await bridge.fs.readTextAuto(p)
-      const parsed = parseSubtitle(text, ext)
-      if (parsed.segments.length === 0) {
+      const item = await parseSubtitleItem(p)
+      if (!item) {
         ui.notify('warning', '没有解析到字幕', '文件里没有可用的字幕条目')
         return false
       }
-
-      // 时长取最后一条的结束时间，让编辑器的时间轴与校验有界可用
-      const duration = Math.max(...parsed.segments.map((s) => s.end))
-      const file: AudioFile = {
-        id: `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-        name: nameOf(p),
-        path: p,
-        dir: dirOf(p),
-        ext,
-        sizeBytes: 0,
-        durationSec: Number(duration.toFixed(2)),
-        status: 'pending',
-        segments: parsed.segments,
-        subtitleFormat: parsed.format,
-        sourceEncoding: encoding,
-        // 记一份「字幕从哪来」：`path` 之后可能被映射成音频
-        subtitlePath: p,
-      }
-      addFiles([file])
+      addFiles([item])
       // 队列里没有音频在等识别时，字幕直接落地（它不需要识别）
       landReadySubtitles()
       ui.notify(
         'success',
         '字幕文件已导入',
-        `${nameOf(p)}：${parsed.segments.length} 条（${parsed.format.toUpperCase()}，编码 ${encoding}）`,
+        `${item.name}：${item.segments.length} 条（${(item.subtitleFormat ?? '').toUpperCase()}，编码 ${item.sourceEncoding}）`,
       )
       return true
     } catch (err) {
@@ -1474,7 +1534,13 @@ export const useProjectStore = defineStore('project', () => {
   function timelineViewOf(draftId: string): { zoom: number; startSec: number; playheadSec: number } {
     const hit = timelineViews.get(draftId)
     // 副本：调用方拿到的是「当时的快照」，不能反过来改到记忆里
-    return hit ? { ...hit } : { zoom: 1, startSec: 0, playheadSec: 0 }
+    /*
+     * 没记过时 `zoom` 给 **0** 而不是 1 —— 这是个哨兵：0 表示「这个项目还没被
+     * 摆过视窗」，交给时间轴按总长算一个初始缩放（一屏一分钟）。
+     * 给 1 的话，十几分钟的音频初次加载会是全览，字幕块挤成一条白线，
+     * 用户根本看不出那是什么。
+     */
+    return hit ? { ...hit } : { zoom: 0, startSec: 0, playheadSec: 0 }
   }
 
   function rememberTimelineView(
@@ -1595,14 +1661,6 @@ export const useProjectStore = defineStore('project', () => {
     drafts.value.push(d)
     if (options?.activate !== false) loadDraft(d)
     return d.id
-  }
-
-  /** 保证有一个能放东西的项目（导入第一批文件时用） */
-  function ensureActiveDraft(): ProjectDraft {
-    const current = draftOf(activeDraftId.value)
-    if (current) return current
-    const id = createDraft({ activate: true })
-    return draftOf(id)!
   }
 
   /**
@@ -1969,10 +2027,12 @@ export const useProjectStore = defineStore('project', () => {
    *
    * 条目对象**直接搬**（不复制）：字幕、时长、状态都在它身上，搬过去就是它的。
    */
-  function landBatch(done: AudioFile[], targetDraftId: string): void {
+  function landBatch(done: AudioFile[], targetDraftId: string, rebuild = true): void {
     if (done.length === 0) return
     const ids = new Set(done.map((f) => f.id))
     intake.value = intake.value.filter((f) => !ids.has(f.id))
+    // 落地即离开队列，批次映射没用了；同批后面的条目还各有一份，不受影响
+    for (const id of ids) batchOf.delete(id)
 
     const place = (list: AudioFile[], item: AudioFile, draftId: string): void => {
       const origin = intakeOrigin.get(item.id)
@@ -1990,8 +2050,15 @@ export const useProjectStore = defineStore('project', () => {
       if (activeDraftId.value === targetDraftId) {
         if (!activeFileId.value) activeFileId.value = done[0].id
         projectDirty.value = true
-        rebuildMerged()
-        revalidate()
+        /*
+         * 重建波形很贵：合并模式的 `syncMergedMedia` 会把每一段重新解码一遍。
+         * 逐条落地（识别跑完一个就搬一个）时由调用方传 `rebuild = false`，
+         * 等整批结束再统一重建一次 —— 否则十个文件要全量解码十遍。
+         */
+        if (rebuild) {
+          rebuildMerged()
+          revalidate()
+        }
       } else {
         d.dirty = true
       }
@@ -2020,24 +2087,41 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   /**
-   * 把队列里**已经就绪的字幕**直接落地。
+   * 把队列里**已经轮到它**的字幕直接落地。
    *
-   * 字幕不需要识别：解析完就是成品。但只要有音频还在等识别，它就得留在队列里
-   * 跟着那一批走 —— 否则合并出来的时间轴顺序会和导入顺序对不上。
-   * 队列里只剩字幕时立刻落地，与以往"导入字幕马上能看到内容"一致。
+   * 字幕不需要识别，解析完就是成品，所以走的是「漏斗」而不是「排队」：从队首
+   * 往后看，遇到字幕就漏下去，遇到还没识别完的音频就停 —— 它得等那段识别完，
+   * 不能插队，否则合并出来的时间轴顺序会和导入顺序对不上。
+   *
+   * 不支持的格式**不挡路**：它留在列表里原地不动，后面的字幕照漏。
+   *
+   * 以前写的是「队列里只要还有待识别音频，所有字幕一律不许落地」，混合导入时
+   * 字幕会一直卡在导入页直到整批音频跑完 —— 用户看到的就是「音频成了子项目，
+   * 字幕文件却没影了」。
    */
   function landReadySubtitles(): void {
-    if (pendingIntake.value.length > 0) return
-    const ready = intake.value.filter((f) => f.subtitleFormat && f.status === 'pending')
+    const list = intake.value
+    // 屏障 = 第一条还没识别完的音频；它前面（不含）的字幕都可以落地
+    const barrier = list.findIndex(
+      (f) => f.status === 'queued' || f.status === 'processing' || f.status === 'failed',
+    )
+    const limit = barrier < 0 ? list.length : barrier
+    const ready = list.slice(0, limit).filter((f) => f.subtitleFormat && f.status === 'pending')
     if (ready.length === 0) return
-    const d = ensureActiveDraft()
-    const list = draftItems(d)
-    for (const item of ready) list.push(item)
-    intake.value = intake.value.filter((f) => !ready.includes(f))
-    if (!activeFileId.value) activeFileId.value = ready[0].id
-    if (!suppressDirty) projectDirty.value = true
-    rebuildMerged()
-    revalidate()
+
+    // 按批次分组：同一次导入的字幕进同一个项目，不同批次各建各的
+    const byBatch = new Map<string, AudioFile[]>()
+    for (const item of ready) {
+      const batch = batchOf.get(item.id) ?? ''
+      const arr = byBatch.get(batch)
+      if (arr) arr.push(item)
+      else byBatch.set(batch, [item])
+    }
+    for (const [batch, items] of byBatch) {
+      // 独立模式下每条各建一个项目，交给 landBatch 的默认分支处理
+      const draftId = isMerge.value && batch ? draftForBatch(batch, true) : ''
+      landBatch(items, draftId)
+    }
   }
 
   /**
@@ -2242,6 +2326,14 @@ export const useProjectStore = defineStore('project', () => {
     if (old?.blobUrl) URL.revokeObjectURL(old.blobUrl)
     media.value.delete(fileId)
     mediaJobs.delete(fileId)
+    /*
+     * 拼接视图那条**也必须删**。
+     *
+     * 它的波形是「各段峰值按偏移拼起来」的一份缓存，只删子项目那条的话，
+     * 合并那条还留着上一个文件的形状 —— 换完音频波形一动不动，就是这个原因。
+     * 播放之所以看着正常，是因为播放器按段取各自 src，不走这份缓存。
+     */
+    media.value.delete(MERGED_FILE_ID)
 
     file.path = nextPath
     file.dir = dirOf(nextPath)
@@ -2254,8 +2346,16 @@ export const useProjectStore = defineStore('project', () => {
 
     touchMedia()
     if (!suppressDirty) projectDirty.value = true
-    void ensureMedia(fileId)
-    // 拼接播放流也换了，重建一次
+    /*
+     * 顺序不能换：先把新音频解出峰值与真实时长，再拼合并波形。
+     *
+     * 拼接的每一段都是按「起点偏移 + 该段时长」定位的，而时长要等解码完才回填
+     * （上面刚置成 null）。不等就拼，各段时长会被当成 0，拼出来的长度是错的，
+     * 波形不是缺一截就是整体错位。
+     */
+    await ensureMedia(fileId)
+    await nextTick()
+    // 拼接波形跟着重建；试听流同样变了
     void syncMergedMedia()
     return true
   }
@@ -2333,11 +2433,14 @@ const MIME_BY_EXT: Record<string, string> = {
   opus: 'audio/ogg',
   aiff: 'audio/aiff',
   aif: 'audio/aiff',
-  // 下面四个正常走不到：主进程会把它们转成 WAV 再交过来（MIME 固定 audio/wav）。
+  // 下面这些正常走不到：主进程会把它们转成 WAV 再交过来（MIME 固定 audio/wav）。
   // 留在这里是为了「万一没转成功」时 Blob 类型仍然说得对，便于排查。
   m4a: 'audio/mp4',
   m4b: 'audio/mp4',
   mp4: 'audio/mp4',
+  m4v: 'video/x-m4v',
+  mov: 'video/quicktime',
+  mkv: 'video/x-matroska',
   aac: 'audio/aac',
 }
 
@@ -2498,7 +2601,10 @@ const MIME_BY_EXT: Record<string, string> = {
     if (!explicit && isMerge.value) {
       // 失败项重试：还回它原来那个项目（项目已关闭才新建）
       const back = queue.map((f) => intakeOrigin.get(f.id)?.draftId).find((id) => id && draftOf(id))
-      targetDraftId = back ? back : createDraft({ activate: true })
+      const batch = batchOf.get(queue[0].id) ?? ''
+      targetDraftId = back ? back : draftForBatch(batch, true)
+      // 这一批的项目定了：字幕跟着进同一个，否则它落地时会自己再建一个新项目
+      if (batch) batchDraft.set(batch, targetDraftId)
       if (back && back !== activeDraftId.value) await switchDraft(back)
     }
 
@@ -3099,6 +3205,20 @@ const MIME_BY_EXT: Record<string, string> = {
         file.message = undefined
         doneItems.push(file)
 
+        /*
+         * 落地一个就走一个。
+         *
+         * 以前是整批跑完再统一搬：识别第五个的时候，前四个还挂在导入页，
+         * 侧栏那个项目一直显示「正在识别、0 项」，用户不知道跑到哪了。
+         * 搬的时候不重建波形（第三参 false）—— 逐条重建会把每段音频重复解码，
+         * 收尾时统一做一次就够。
+         */
+        if (!explicit && targetDraftId) {
+          landBatch([file], targetDraftId, false)
+          // 排在它后面的字幕这下可以接着往下漏了
+          landReadySubtitles()
+        }
+
         if (termFixed.hits.length > 0) {
           // 只报前几组：几十处全列出来没人看，但「改了哪些词」必须能一眼看到
           const grouped = new Map<string, number>()
@@ -3265,7 +3385,16 @@ const MIME_BY_EXT: Record<string, string> = {
          * 重试成功时会插回原处。
          */
         if (!explicit) {
-          landBatch(doneItems, targetDraftId)
+          /*
+           * 合并模式的条目在识别过程中已经逐个落地了（见 `doneItems.push` 之后
+           * 那段），这里**不能再 landBatch 一次** —— 那会把同一批条目重复塞进项目。
+           *
+           * 只补一次统一重建：逐条落地时为了不做 N 遍全量解码跳过了它。
+           * 独立模式没有预建项目，走不到逐条那一支，仍然在这里统一落地。
+           */
+          if (!targetDraftId) landBatch(doneItems, '')
+          rebuildMerged()
+          revalidate()
           // 合并模式的项目一个条目都没落上（全失败）→ 回收空壳
           const batch = targetDraftId ? draftOf(targetDraftId) : null
           if (batch && draftItems(batch).length === 0) closeDraft(batch.id)
@@ -3347,7 +3476,7 @@ const MIME_BY_EXT: Record<string, string> = {
   }
 
   /** 接收拖入的文件：Electron 里取真实路径入库，浏览器里退回演示数据 */
-  function receiveDroppedFiles(list: File[]): void {
+  async function receiveDroppedFiles(list: File[]): Promise<void> {
     const ui = useUiStore()
     const bridge = window.xbaos
 
@@ -3373,10 +3502,9 @@ const MIME_BY_EXT: Record<string, string> = {
       return
     }
 
-    // Electron：webUtils 取真实绝对路径。音频与字幕分两路：
-    // 音频进识别队列，字幕文件解析后直接进编辑器。
-    const accepted: string[] = []
-    const subtitles: string[] = []
+    // Electron：webUtils 取真实绝对路径。音频与字幕按**拖入顺序**混排进同一个
+    // 队列 —— 混排是为了让「一次导入 = 一个项目」在混合批次里也成立。
+    const queued: AudioFile[] = []
     const projects: string[] = []
     const rejected: { name: string; ext: string; reason: string }[] = []
 
@@ -3387,9 +3515,26 @@ const MIME_BY_EXT: Record<string, string> = {
         // 拖进一个 `.xbsgp` 就是「打开这个项目」，不该报「格式不支持」
         projects.push(realPath)
       } else if (isSubtitleExt(extOf(file.name))) {
-        subtitles.push(realPath)
+        /*
+         * 字幕在这里**只解析、不落地**。
+         *
+         * 以前是一边解析一边 `addFiles` + `landReadySubtitles`，而音频那边还在
+         * 异步 stat，队列里暂时没有音频 —— 于是字幕抢在音频之前落地，落到
+         * 「当前项目」头上。项目 A 已经在工作台时再拖字幕进来，它就会挂到 A
+         * 后面，看起来像「同一次导入被拆成了两个项目」。
+         */
+        const item = await parseSubtitleItem(realPath).catch(() => null)
+        if (item) {
+          queued.push(item)
+        } else {
+          rejected.push({
+            name: file.name,
+            ext: extOf(file.name),
+            reason: '没有解析到可用的字幕条目',
+          })
+        }
       } else if (isSupported(file.name)) {
-        accepted.push(realPath)
+        queued.push(await makeQueuedAudio(realPath))
       } else {
         rejected.push({
           name: file.name,
@@ -3407,8 +3552,11 @@ const MIME_BY_EXT: Record<string, string> = {
         void openProject(projects[0])
       }
     }
-    if (accepted.length > 0) void addFilesFromPaths(accepted)
-    for (const p of subtitles) void addSubtitleFromPath(p)
+    if (queued.length > 0) {
+      // 整批一次性收进队列 = 一个批次；队首若是字幕就立刻漏下去
+      addFiles(queued)
+      landReadySubtitles()
+    }
     if (rejected.length > 0) ui.openDialog('unsupported-format', { items: rejected })
   }
 
@@ -3431,11 +3579,11 @@ const MIME_BY_EXT: Record<string, string> = {
    * `mtimeMs` 要现问主进程：识别与导入阶段只记了字节数，没有修改时间。
    * 拿不到不影响存盘（写 0），它的用途只是将来判断「音频有没有被换过」。
    */
-  async function buildDoc(): Promise<ProjectDoc> {
+  async function buildDoc(withMtime = true): Promise<ProjectDoc> {
     const bridge = window.xbaos
     const speakers = useSpeakerStore()
     const mtimes = new Map<string, number>()
-    if (bridge) {
+    if (bridge && withMtime) {
       await Promise.all(
         supportedFiles.value.map(async (f) => {
           if (!f.path) return
@@ -3509,6 +3657,8 @@ const MIME_BY_EXT: Record<string, string> = {
     stashActive()
     const view = viewFile.value
     if (view) markSaved(MERGED_FILE_ID, view.segments)
+    // 正式落盘了，自动草稿的使命结束 —— 留着它下次启动会冒出一份「旧副本」
+    void bridge.autosave?.clear()
     ui.notify('success', '项目已保存', target)
     return true
   }
@@ -3535,9 +3685,79 @@ const MIME_BY_EXT: Record<string, string> = {
     return saveProjectTo(picked)
   }
 
+  /* ------------------------------------------------------- 自动草稿（防丢） */
+
+  /**
+   * 自动草稿：把「还没保存的工程」定期写到磁盘，下次启动发现就恢复。
+   *
+   * 要解决的场景很具体：识别完、还没保存，笔记本合盖睡眠，唤醒后界面重载，
+   * 一晚上的成果没了。渲染进程的状态只活在内存里，这是「像浏览器」的代价；
+   * 补法也只能是浏览器那套 —— 定期落到磁盘上。
+   *
+   * 只存**当前这一份**（用户正在编辑的那个），不存全部草稿：多份并发写盘慢，
+   * 且「恢复哪一个」这个问题的答案对用户来说并不显然。
+   *
+   * 不做「阻止睡眠」：那要改系统电源策略，权限与副作用都比数据落盘大得多。
+   */
+  const AUTOSAVE_MS = 15000
+  let autosaveTimer = 0
+  let autosaveBusy = false
+
+  async function writeAutosave(): Promise<void> {
+    const bridge = window.xbaos
+    if (!bridge?.autosave || autosaveBusy) return
+    if (!projectDirty.value || supportedFiles.value.length === 0) return
+    autosaveBusy = true
+    try {
+      // 不查 mtime：`stat` 每个文件一次，自动草稿犯不上，那个字段只用于「素材有没有被换过」
+      const doc = await buildDoc(false)
+      await bridge.autosave.write(toProjectText(doc))
+    } catch {
+      /* 自动草稿失败不打扰用户，下一轮会重试 */
+    } finally {
+      autosaveBusy = false
+    }
+  }
+
+  function startAutosave(): void {
+    if (autosaveTimer) return
+    autosaveTimer = window.setInterval(() => void writeAutosave(), AUTOSAVE_MS)
+  }
+
+  function stopAutosave(): void {
+    if (!autosaveTimer) return
+    window.clearInterval(autosaveTimer)
+    autosaveTimer = 0
+  }
+
+  /**
+   * 启动时恢复上次未保存的工作。
+   *
+   * 恢复出来的东西**没有正式落点**：路径清空、标成未保存，名字留着 ——
+   * 用户看到的是「我那个项目回来了，但还没存过」，而不是一个指向
+   * `%APPDATA%` 里某个临时文件的诡异路径。
+   */
+  async function restoreAutosave(): Promise<boolean> {
+    const bridge = window.xbaos
+    if (!bridge?.autosave) return false
+    const peek = await bridge.autosave.peek()
+    if (!peek.exists) return false
+
+    const ok = await openProject(peek.path)
+    if (!ok) return false
+    projectPath.value = null
+    lastProjectDir.value = ''
+    projectDirty.value = true
+    useUiStore().notify(
+      'info',
+      '已恢复未保存的工作',
+      `${displayProjectName.value}，另存为 .xbsgp 才会留下`,
+    )
+    return true
+  }
+
   /** 把文档里的子项目转成运行期条目 */
-  function itemsFromDoc(doc: ProjectDoc): AudioFile[] {
-    return doc.project.items.map((it) => {
+  function itemsFromDoc(doc: ProjectDoc): AudioFile[] {    return doc.project.items.map((it) => {
       // 打开时不可能有"正在识别"：那些状态在进程里才有意义，一律回到 pending
       const status: FileStatus =
         it.status === 'queued' || it.status === 'processing' || it.status === 'unsupported'
@@ -3892,6 +4112,10 @@ const MIME_BY_EXT: Record<string, string> = {
     defaultProjectFile,
     saveProject,
     saveProjectTo,
+    startAutosave,
+    stopAutosave,
+    writeAutosave,
+    restoreAutosave,
     openProject,
     openPendingProject,
     renameProject,

@@ -1,13 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useProjectStore, type ExportRecord } from '@/stores/project'
+import { useProjectStore } from '@/stores/project'
 import { useEditorStore } from '@/stores/editor'
 import { useUiStore } from '@/stores/ui'
 import { useSettingsStore } from '@/stores/settings'
 import { useHistoryStore } from '@/stores/history'
-import { useSpeakerStore } from '@/stores/speakers'
 import { formatDuration } from '@/utils/format'
-import { serializeSubtitle, applyLineEnding } from '@/utils/subtitle'
 import { mergeSelected } from '@/utils/segmentOps'
 import { countIssues, visibleIssues } from '@/utils/validate'
 import { isTypingTarget } from '@/utils/typing'
@@ -30,7 +28,6 @@ const ui = useUiStore()
 const editor = useEditorStore()
 const history = useHistoryStore()
 const settings = useSettingsStore()
-const speakerStore = useSpeakerStore()
 
 /**
  * 当前视图条目。独立模式下是选中的那个文件，合并模式下是拼接产物 ——
@@ -85,10 +82,15 @@ function onKeydown(event: KeyboardEvent): void {
     return
   }
 
-  // Ctrl+S 就地保存：字幕来源的条目，或导出过的条目（编辑文本时也允许保存）
+  /*
+   * Ctrl+S 保存工程。
+   *
+   * 以前这里按「有没有导出过」分岔：有导出记录就覆盖写回字幕文件。底栏去掉
+   * 那个按钮之后，Ctrl+S 只能有一件事可做 —— 存工程。字幕的落地交给导出。
+   */
   if (mod && !event.shiftKey && (key === 's' || key === 'S')) {
     event.preventDefault()
-    if (canSaveInPlace.value) void saveInPlace()
+    saveProjectFile()
     return
   }
 
@@ -552,117 +554,14 @@ function openExport(): void {
   ui.openDialog('export')
 }
 
-/* ---------------------------------------------------- 字幕文件的保存 */
-
-/**
- * 只有一个子项目时，视图与那一份文件完全重合。
+/*
+ * 这里原本有一套「就地保存」：把当前视图的字幕覆盖写回上次导出的文件。
  *
- * 拼接视图本身不携带 `subtitleFormat` / 导出落点（那两样都属于具体文件），
- * 但项目里只有一份的时候，「这条时间轴」和「那个文件」是同一件事 —— 不认这
- * 一层，导出一个单文件项目之后底栏不会出现「保存」，用户只能再走一遍导出。
- * 多子项目时刻意**不认**：那时底栏保存写的是整条拼接时间轴，往其中任意一份
- * 的路径上写会把别人的内容盖掉。
+ * 2026-11-16 移除。理由是底栏同时出现「保存项目 / 保存 / 导出字幕」三个按钮，
+ * 后两个的差别只在于「写回老文件」还是「另选位置」，用户看不出为什么要分两个。
+ * 现在底栏只留两件事：保存项目（本软件的工程）、导出字幕（交出去就不归我们管）。
  */
-const soloFile = computed(() => (project.files.length === 1 ? project.files[0] : null))
 
-/** 来源是字幕文件（而非音频识别）的条目 */
-const isSubtitleSource = computed(
-  () => !!(activeFile.value?.subtitleFormat ?? soloFile.value?.subtitleFormat),
-)
-
-/**
- * 当前条目上一次导出的文件（内存记录，清空队列即释放）。
- *
- * 有了它，「导出完又改了几个字」就不必重走一遍导出对话框 —— 直接覆盖写回原位。
- * 可能是**多个**文件：「分别导出」会把原文与译文写成两个。
- */
-const exportedRecords = computed(() => {
-  const own = project.exportRecordsOf(project.viewFileId)
-  if (own.length > 0) return own
-  return soloFile.value ? project.exportRecordsOf(soloFile.value.id) : []
-})
-
-/**
- * 能否就地保存。
- *
- * 合并产物是个例外：它的 `path` 借用的是第一个音频，拿它当保存目标会把字幕
- * 写到那个音频旁边，看起来像是另一个文件的产物。所以合并模式下只有「明确
- * 导出过」才提供保存。
- *
- * （原来的「另存为」已去掉：它和「导出字幕」功能重叠，而导出能选目录、格式、
- * 编码与文件名模板，能力更全。）
- */
-const canSaveInPlace = computed(() => {
-  if (project.isMerge) return exportedRecords.value.length > 0
-  return isSubtitleSource.value || exportedRecords.value.length > 0
-})
-
-const saveHint = computed(() => {
-  const list = exportedRecords.value
-  if (list.length === 1) return `覆盖保存到上次导出的文件：${list[0].path}`
-  if (list.length > 1) {
-    return `覆盖保存到上次导出的 ${list.length} 个文件：${list.map((r) => r.path).join('、')}`
-  }
-  return `覆盖保存回原字幕文件：${activeFile.value?.path ?? ''}`
-})
-
-/**
- * 把当前视图的条目写成字幕文件。
- *
- * 格式优先跟随源文件（字幕导入的条目带 `subtitleFormat`）；音频识别出来的条目
- * 没有「原格式」，就跟随导出设置。编码同理：字幕导入时检测到的编码优先，
- * 保证不悄悄换码。
- */
-async function writeSubtitleTo(path: string, record?: ExportRecord): Promise<void> {
-  const file = activeFile.value
-  const bridge = window.xbaos
-  if (!file || !bridge) return
-  const fmt = file.subtitleFormat ?? settings.exportFormat
-  // 带 record 时要**照它原来导出的样子重写**：一份中英对照的字幕，
-  // 不该因为按了一次保存就变成纯中文
-  const body = serializeSubtitle(fmt, file.segments, {
-    lang: record?.bundle ?? 'source',
-    translationLang: record?.lang ?? '',
-    sourceFirst: settings.exportLangSourceFirst,
-    // 导出时带了讲话人标签，就地保存也必须带 —— 否则按一次保存就把标签抹掉了
-    speakerPrefix: settings.speakerPrefixEffective,
-    speakerNames: speakerStore.namesOf(file.id),
-    // 编号是子项目本地的：按条目自己的来源查称呼，别拿一张平表硬套
-    speakerNameOf: (seg) =>
-      speakerStore.nameOf(seg.originFileId ?? file.id, seg.speaker ?? -1),
-  })
-  const content = applyLineEnding(body, settings.exportLineEnding)
-  await bridge.fs.writeSubtitle(path, content, file.sourceEncoding ?? settings.exportEncoding)
-}
-
-/** 就地保存：优先写回上次导出的那些文件，没有就写回字幕源文件 */
-async function saveInPlace(): Promise<void> {
-  const file = activeFile.value
-  if (!file || !canSaveInPlace.value) return
-
-  // 有导出记录就照记录整份重写（分别导出时是多个文件，都要跟上）；
-  // 没有记录时走的是「字幕文件导入」那条路径，写回它自己的原文件
-  const records = exportedRecords.value
-  const targets: ExportRecord[] =
-    records.length > 0 ? records : [{ path: file.path } as ExportRecord]
-  const valid = targets.filter((t) => t.path)
-  if (valid.length === 0) return
-
-  try {
-    for (const target of valid) {
-      await writeSubtitleTo(target.path, records.length > 0 ? target : undefined)
-    }
-    // 登记「这一版内容已经落盘」，关窗时才不会误报未保存
-    project.markSaved(file.id, file.segments)
-    ui.notify(
-      'success',
-      '已保存',
-      valid.length === 1 ? valid[0].path : `${valid.length} 个文件`,
-    )
-  } catch (err) {
-    ui.notify('error', '保存失败', err instanceof Error ? err.message : String(err))
-  }
-}
 </script>
 
 <template>
@@ -847,16 +746,6 @@ async function saveInPlace(): Promise<void> {
           <Icon name="chevron-down" :size="12" />
         </button>
       </span>
-      <button
-        v-if="canSaveInPlace"
-        class="btn"
-        type="button"
-        :title="saveHint"
-        @click="saveInPlace"
-      >
-        <Icon name="check" :size="14" />
-        <span>保存</span>
-      </button>
       <button class="btn" type="button" @click="openExport">
         <Icon name="download" :size="14" />
         <span>导出字幕</span>

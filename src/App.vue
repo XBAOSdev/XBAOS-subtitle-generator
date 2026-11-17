@@ -85,7 +85,7 @@ function onDrop(event: DragEvent): void {
   dragDepth = 0
   dragActive.value = false
   const list = [...(event.dataTransfer?.files ?? [])]
-  if (list.length > 0) project.receiveDroppedFiles(list)
+  if (list.length > 0) void project.receiveDroppedFiles(list)
 }
 
 /** 开发预览用：?demo=1 载入演示数据，?view=editor 进入指定页面，?theme=dark 切换主题 */
@@ -609,7 +609,16 @@ onMounted(() => {
    * 所以两条路同时存在也不会打开两次）。
    */
   offProjectPending = window.xbaos?.project?.onPending(() => void project.openPendingProject())
-  void project.openPendingProject()
+  /*
+   * 先让「双击打开」的走完，再谈恢复自动草稿。
+   *
+   * 两者都会调 `openProject`，抢同一份状态。用户的显式动作优先：已经打开了
+   * 一个项目就不要再把旧草稿顶上来；只有当前空着才恢复。
+   */
+  void project.openPendingProject().then(async () => {
+    if (!project.hasFiles) await project.restoreAutosave()
+    project.startAutosave()
+  })
 })
 
 onBeforeUnmount(() => {
@@ -617,6 +626,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('dragover', onDragOver)
   window.removeEventListener('dragleave', onDragLeave)
   window.removeEventListener('drop', onDrop)
+  // 卸掉定时器前补写一次：窗口正在关，这一笔可能就是最后的机会
+  void project.writeAutosave()
+  project.stopAutosave()
   offAssistResult?.()
   offEngineLog?.()
   offProjectPending?.()

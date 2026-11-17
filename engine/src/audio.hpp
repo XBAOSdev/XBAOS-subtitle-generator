@@ -1,11 +1,25 @@
 // 音频读取与解码 —— 统一入口。
 //
-// 支持格式与解码方式：
-//   WAV / AIFF   本文件直接解析（PCM 不经第三方库）
-//   MP3          dr_mp3      （decoders/decoders.cpp）
-//   FLAC         dr_flac     （decoders/decoders.cpp）
-//   OGG Vorbis   stb_vorbis  （decoders/decoders.cpp）
-//   OGG Opus     libopus     （decoders/oggopus.cpp）
+// 两条完全不同的解码路径，边界必须写清楚：
+//
+//   A) 自带实现（代码在本仓库，均可免费商用）
+//     WAV / AIFF   本文件直接解析（PCM 不经第三方库）
+//     MP3          dr_mp3      （decoders/decoders.cpp）
+//     FLAC         dr_flac     （decoders/decoders.cpp）
+//     OGG Vorbis   stb_vorbis  （decoders/decoders.cpp）
+//     OGG Opus     libopus     （decoders/oggopus.cpp）
+//
+//   B) 交给 Windows 自带的解码器（Media Foundation，decoders/mfdec.cpp）
+//     M4A / M4B / MP4 / M4V / MOV   容器是 ISO BMFF（ftyp）
+//     AAC                            裸 ADTS 流
+//     MKV / WebM                     容器是 EBML，取第一条音轨
+//     本软件**不含这些容器里音轨的解码实现**：容器解析与音频解码都由系统
+//     的 MFT 完成。若依赖组件缺失（Windows N 版缺「媒体功能包」），会明确
+//     报错，不会静默出错。
+//
+// 视频容器只读**第一条音轨**，视频轨一律不解码 —— 也就不涉及视频编码的许可。
+// AVI 不在其列：系统的 AVI 处理器虽然存在，但纯音频 AVI 的取值始终验不通
+// （2026-11-16 实测），宁可少支持一个边缘容器，也不宣称支持却解不出来。
 //
 // 硬性前提：任何解码都发生在「整个文件读进内存」之后。不使用
 // 「按文件名打开」的第三方接口 —— 中文路径必须走 xbaos::pathFromUtf8()
@@ -16,7 +30,7 @@
 // 多声道混合为单声道，非 16k 采样率线性插值重采样。
 //
 // 不支持（会明确报错，不静默出错）：压缩 WAV（ADPCM / μ-law 等）、
-// AAC / M4A（专利与许可风险，产品层面刻意不支持）。
+// WMA / AMR / DTS（专利或专有技术，且没有接系统解码器）。
 
 #pragma once
 
@@ -58,6 +72,16 @@ inline uint32_t rd_u32be(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
+/**
+ * 单个文件的上限。
+ *
+ * 视频文件动辄上 GB，而这里是把整个文件读进内存、再整段解码成 float PCM ——
+ * 2 GB 的输入配 4 GB 的中间结果，直接 new 失败。上限挡在「读」之前，
+ * 报一句能照做的提示，比抛 bad_alloc 崩掉强。
+ * 256 MB 大致相当于 4~5 小时 64 kbps 的音频，常见的录音与会议远到不了。
+ */
+constexpr std::streamsize kMaxFileBytes = static_cast<std::streamsize>(256) * 1024 * 1024;
+
 inline bool readFile(const std::string &path, std::vector<uint8_t> &out, std::string &err) {
     // 必须走 pathFromUtf8 —— 传 std::string 会走窄字符重载，中文路径打不开。
     // 详见 platform.hpp 顶部记录的实测结果。
@@ -69,6 +93,10 @@ inline bool readFile(const std::string &path, std::vector<uint8_t> &out, std::st
     std::streamsize size = f.tellg();
     if (size <= 0) {
         err = "文件为空：" + path;
+        return false;
+    }
+    if (size > kMaxFileBytes) {
+        err = "文件超过 256 MB，请先提取其中的音轨再导入：" + path;
         return false;
     }
     f.seekg(0, std::ios::beg);
@@ -576,6 +604,13 @@ inline bool loadAudio16k(const std::string &path, AudioData &out, std::string &e
      */
     const bool isAdts = d[0] == 0xFF && (d[1] & 0xF6) == 0xF0;
     const bool isMp3Sync = d[0] == 0xFF && (d[1] & 0xE0) == 0xE0 && (d[1] & 0x06) != 0;
+    /*
+     * MKV / WebM 同属 EBML 家族，文件头恒以这四个字节开头。
+     * AVI（RIFF/"AVI "）刻意不接：系统的 AVI 处理器在，但纯音频 AVI 的
+     * 取值始终验不通（见 DEVLOG 2026-11-16），宁可少支持一个边缘容器，
+     * 也不做「宣称支持却解不出来」的事。
+     */
+    const bool isEbml = n >= 4 && d[0] == 0x1A && d[1] == 0x45 && d[2] == 0xDF && d[3] == 0xA3;
 
     xdec::DecodedAudio dec;
     if (isWav) {
@@ -601,18 +636,22 @@ inline bool loadAudio16k(const std::string &path, AudioData &out, std::string &e
         return detail::finishAudio(std::move(dec.pcm), dec.channels, dec.sample_rate, out, err);
     }
     /*
-     * AAC 家族交给系统解码器（Windows Media Foundation）。
+     * 交给系统解码器的容器，顺序放在最后：上面几个都是自带实现，能自己解就不去碰系统。
      *
-     * 顺序放在最后：上面几个都是自带实现，能自己解就不去碰系统。反过来 MP4 里
-     * 的音轨到底是不是 AAC 由容器说了算，这里不做猜测 —— 也许是 ALAC，也许是
-     * AC-3，但都只是「交给系统」而已，本软件仍然没有自带任何解码实现。
+     * 容器识别只看魔数，不看扩展名 —— 扩展名是用户随手改得动的东西：
+     *   ISO BMFF  ftyp 恒在偏移 4（mp4 / m4a / m4b / m4v / mov 同族）
+     *   ADTS      0xFF 同步字 + layer 位 00
+     *   EBML      1A 45 DF A3（mkv / webm / mka 同族）
+     * 容器里到底装的是 AAC 还是 AC-3 由系统解析，本软件不做假设 —— 它也没有
+     * 任何一路解码实现可以假设。
      */
-    if (isMp4 || isAdts) {
+    if (isMp4 || isAdts || isEbml) {
         if (!xdec::decodeMediaFoundation(d, n, dec, err)) return false;
         return detail::finishAudio(std::move(dec.pcm), dec.channels, dec.sample_rate, out, err);
     }
 
-    err = "无法识别的音频格式。支持 WAV / AIFF / MP3 / FLAC / OGG / Opus / M4A / MP4 / AAC";
+    err = "无法识别的音频格式。支持 WAV / AIFF / MP3 / FLAC / OGG / Opus / "
+          "M4A / AAC / MP4 / MOV / MKV";
     return false;
 }
 

@@ -87,11 +87,12 @@ std::string mfErrorText(HRESULT hr, const char *stage) {
     case MF_E_TOPO_CODEC_NOT_FOUND:
     case MF_E_UNSUPPORTED_BYTESTREAM_TYPE:
     case MF_E_INVALIDMEDIATYPE:
-        // 这三条最常见的成因是两个：系统媒体功能被裁掉（N 版 / 精简镜像），
-        // 或者音轨用了系统没有实现的编码（典型是 xHE-AAC）。
-        return std::string("系统解码器无法解这条音轨（") + stage + "，错误码 " + code +
-               "）。若系统是 Windows N 版，请安装「媒体功能包」；"
-               "若文件用 xHE-AAC 编码，请先转为 AAC-LC。";
+        // 两条最常见成因：音轨用了系统没有实现的编码（DTS、Opus、xHE-AAC 等），
+        // 或者系统媒体功能被裁掉（Windows N 版 / 精简镜像）。
+        // 这里不能替用户猜是哪一条 —— 只能把两个可能都摆出来。
+        return std::string("系统的解码器解不了这条音轨（") + stage + "，错误码 " + code +
+               "）。可能是音轨编码系统没有内置（如 DTS、Opus、xHE-AAC），"
+               "也可能是系统缺少「媒体功能包」（Windows N 版）。";
     default:
         return std::string("系统解码器失败（") + stage + "，错误码 " + code + "）。";
     }

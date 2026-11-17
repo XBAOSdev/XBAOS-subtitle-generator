@@ -20,6 +20,7 @@ import { promisify } from 'node:util'
 
 import { EngineClient, EngineCanceledError, EngineCrashError } from './engine-client.js'
 import { PlayableCache, needsSystemDecoder } from './media-cache.js'
+import { concatWav } from './wav-export.js'
 import { decodeTextAuto, encodeSubtitle } from './encoding.js'
 import {
   PROJECT_EXT,
@@ -1456,31 +1457,36 @@ function registerIpc() {
   ipcMain.handle('dialog:pickAudio', async () => {
     if (!mainWindow) return []
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: '选择音频文件',
+      title: '选择音频或视频文件',
       properties: ['openFile', 'multiSelections'],
       filters: [
         {
-          name: '音频文件',
+          name: '音频与视频文件',
           extensions: [
             'wav',
             'mp3',
             'flac',
             'ogg',
+            'oga',
             'opus',
             'aif',
             'aiff',
             'm4a',
             'm4b',
-            'mp4',
             'aac',
+            'mp4',
+            'm4v',
+            'mov',
+            'mkv',
           ],
         },
         { name: 'WAV', extensions: ['wav'] },
         { name: 'MP3', extensions: ['mp3'] },
         { name: 'FLAC', extensions: ['flac'] },
         { name: 'OGG / Opus', extensions: ['ogg', 'oga', 'opus'] },
-        // M4A / MP4 / AAC 走 Windows 系统解码器，单独列一项好让用户认出来
-        { name: 'M4A / MP4 / AAC', extensions: ['m4a', 'm4b', 'mp4', 'aac'] },
+        // 下面两组走 Windows 系统解码器，单独列出来好让用户认出来
+        { name: 'M4A / MP4 / AAC', extensions: ['m4a', 'm4b', 'aac', 'mp4', 'm4v'] },
+        { name: '视频文件（只取音轨）', extensions: ['mp4', 'm4v', 'mov', 'mkv'] },
         { name: '全部文件', extensions: ['*'] },
       ],
     })
@@ -1647,6 +1653,73 @@ function registerIpc() {
     await fs.mkdir(dir, { recursive: true })
     await fs.writeFile(target, content, { encoding: 'utf8' })
     return target
+  })
+
+  /**
+   * 导出音频的中间段。
+   *
+   * 渲染层逐段解码后把 WAV 字节交过来，这里落到系统临时目录。不让渲染层
+   * 自己拼临时路径，是因为它拿不到 `app.getPath('temp')`，硬拼 `%TEMP%`
+   * 在改过环境变量的机器上会写到一个不存在的位置。
+   *
+   * 中间文件由 `audio:concatWav` 收尾时删掉，渲染层不用管。
+   */
+  ipcMain.handle('audio:writeChunk', async (_event, bytes, seq) => {
+    const dir = path.join(app.getPath('temp'), 'xbaos-audio-export')
+    await fs.mkdir(dir, { recursive: true })
+    const target = path.join(dir, `chunk-${String(seq).padStart(4, '0')}.wav`)
+    await fs.writeFile(target, Buffer.from(bytes))
+    return target
+  })
+
+  /**
+   * 按顺序拼接 WAV。
+   *
+   * 规格校验（采样率 / 声道 / 位深必须一致）放在主进程：渲染层虽然负责把每段
+   * 都解成同一规格，但漏一段就会拼出一份时快时慢的音频，这里挡一道更省事。
+   * 无论成败都清掉中间文件 —— 一小时 48kHz 立体声有 690MB，留着就是垃圾。
+   */
+  ipcMain.handle('audio:concatWav', async (_event, parts, outPath) => {
+    try {
+      return concatWav(parts, outPath)
+    } finally {
+      for (const p of parts) {
+        await fs.rm(p, { force: true }).catch(() => {})
+      }
+    }
+  })
+
+  /* ------------------------------------------------------ 自动草稿（防丢） */
+
+  /*
+   * 「识别完但还没保存，合盖睡眠，唤醒后界面重载，成果没了」。
+   *
+   * 渲染进程的状态只在内存里，系统挂起再恢复时 Electron 可能重建渲染进程。
+   * 补法只有一条：把工程定期写到磁盘。存在 userData 下而不是临时目录 ——
+   * 临时目录会被系统清理，而这正是要保命的东西。
+   */
+  const autosaveFile = () => path.join(app.getPath('userData'), 'autosave', 'draft.xbsgp')
+
+  ipcMain.handle('autosave:peek', async () => {
+    const target = autosaveFile()
+    try {
+      const st = await fs.stat(target)
+      return { exists: st.isFile() && st.size > 0, path: target, savedAt: st.mtimeMs }
+    } catch {
+      return { exists: false, path: target, savedAt: 0 }
+    }
+  })
+
+  ipcMain.handle('autosave:write', async (_event, text) => {
+    const target = autosaveFile()
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    await fs.writeFile(target, text, 'utf8')
+    return true
+  })
+
+  ipcMain.handle('autosave:clear', async () => {
+    await fs.rm(autosaveFile(), { force: true }).catch(() => {})
+    return true
   })
 
   ipcMain.handle('fs:reveal', async (_event, target) => {

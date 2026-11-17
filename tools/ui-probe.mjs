@@ -3775,9 +3775,8 @@ const scenarios = {
     /**
      * 按文字点按钮。
      *
-     * `exact` 是必须的：底栏同时有「保存项目」和「保存」，模糊匹配会先命中
-     * 前者 —— 那样测的就不是「就地覆盖」了，而且会弹出一个保存对话框把
-     * 后面几步全带偏。
+     * `exact` 用于「文字是另一个按钮的前缀」的场合：底栏有「保存为项目文件」
+     * 这样的图标按钮，模糊匹配会先命中它而不是想点的那个。
      */
     const clickByText = async (selector, text, exact = false) => {
       const pos = await centerOf(
@@ -4079,24 +4078,19 @@ const scenarios = {
       )`,
     )
     check('底栏有保存项目的入口', hasProjectSave === true, String(hasProjectSave))
-    check('导出后底部出现「保存」按钮', labels.includes('保存'), labels.join(' / '))
-    check('「保存」排在「导出字幕」左侧', labels.indexOf('保存') < labels.indexOf('导出字幕'), labels.join(' / '))
-
-    // 保存必须写回上次导出的那个位置，而不是随手挑一个。
-    // 精确匹配「保存」：底栏还有「保存项目」，模糊匹配会点到它。
-    await clickByText('.editor__foot button', '保存', true)
-    await sleep(400)
-    const writes2 = await cdp.evaluate(`window.__writes`)
-    check(
-      '「保存」覆盖写回了上次导出的文件',
-      writes2.length === 2 && writes2[1]?.p === SRT_PATH,
-      String(writes2[1]?.p),
-    )
+    /*
+     * 2026-11-16 起底栏不再有第二个「保存」。
+     *
+     * 它做的是「覆盖写回上次导出的字幕文件」，与「导出字幕」只差一个落点，
+     * 用户看不出为什么要有两个按钮。现在底栏只有两件事：存工程、导出字幕。
+     */
+    check('导出后不再冒出第二个「保存」按钮', !labels.includes('保存'), labels.join(' / '))
+    check('底栏仍有「导出字幕」', labels.includes('导出字幕'), labels.join(' / '))
 
     /* ---- 关窗闸门（P0-1）
      *
-     * 「保存字幕」写的是字幕文件，不是工程（`.xbsgp`）。工程只活在内存里，
-     * 关窗就没了 —— 所以刚刚覆盖保存过字幕，关窗**仍然要问一句**。
+     * 导出的字幕写的是字幕文件，不是工程（`.xbsgp`）。工程只活在内存里，
+     * 关窗就没了 —— 所以刚刚导出过字幕，关窗**仍然要问一句**。
      * 桩回答「取消」，于是流程停在这里、不关窗。
      */
     const closeExported = await cdp.evaluate(`(async () => {
@@ -4362,19 +4356,15 @@ const scenarios = {
       JSON.stringify(recs),
     )
 
-    // 保存必须把**两个**文件都照原样重写，不能把英文那份改成中文
-    await cdp.evaluate(`(window.__writes = [], true)`)
-    // 精确匹配「保存」：底栏还有「保存项目」，模糊匹配会点到它
-    await clickByText('.editor__foot button', '保存', true)
-    await sleep(600)
-    const writes4 = await cdp.evaluate(`window.__writes`)
-    check('「保存」把两个文件都写回去了', writes4.length === 2, `写入 ${writes4.length} 次`)
-    const enBack = writes4.find((w) => String(w.p).endsWith('.en.srt'))
-    check(
-      '保存保留双语形态：英文文件写回去还是英文',
-      !!enBack && enBack.content.includes('First probe line') && !enBack.content.includes('第一句探针字幕'),
-      JSON.stringify(enBack?.content ?? null),
-    )
+    /*
+     * 2026-11-16 起没有「就地保存」这一步。
+     *
+     * 它做的是「把上次导出的文件原地重写一遍」，与「导出字幕」只差一个落点；
+     * 底栏留着两个长得一样的按钮，用户分不清哪个是存工程。现在导完就完事，
+     * 这里只守住「导出过之后底栏没有多出第二个按钮」。
+     */
+    const labels3 = await footLabels()
+    check('分别导出之后底栏也没有「保存」', !labels3.includes('保存'), labels3.join(' / '))
 
     // ---- 清空队列 → 落点释放、保存按钮隐藏 ----
     /*

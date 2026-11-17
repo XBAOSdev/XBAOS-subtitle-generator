@@ -557,6 +557,19 @@ export interface XbaosBridge {
     readTextAuto: (p: string) => Promise<{ text: string; encoding: 'utf-8' | 'utf-8-bom' | 'gbk' }>
     /** 读取整个文件的二进制内容，用于音频解码与播放 */
     readArrayBuffer: (p: string) => Promise<ArrayBuffer>
+    /**
+     * 导出音频的中间段：字节落到系统临时目录，返回临时文件路径。
+     * 路径由主进程决定，渲染层拿不到 `app.getPath('temp')`。
+     */
+    writeAudioChunk: (bytes: Uint8Array, seq: number) => Promise<string>
+    /**
+     * 按顺序拼接若干 WAV。规格（采样率 / 声道 / 位深）必须一致，
+     * 不一致会 reject。收尾会删掉 `parts` 里的中间文件。
+     */
+    concatWav: (
+      parts: string[],
+      outPath: string,
+    ) => Promise<{ path: string; bytes: number; seconds: number }>
     /** 返回真正写入的路径 */
     writeText: (p: string, content: string) => Promise<string>
     /**
@@ -572,6 +585,19 @@ export interface XbaosBridge {
     openPath: (p: string) => Promise<string>
     basename: (p: string) => Promise<string>
     dirname: (p: string) => Promise<string>
+  }
+
+  /**
+   * 自动草稿（防丢）。
+   *
+   * 未保存的工程定期写到 `userData/autosave/draft.xbsgp`，下次启动发现就恢复。
+   * 存的是标准 `.xbsgp` 文本，恢复时走正常打开流程，不另立格式。
+   */
+  autosave: {
+    /** 有没有可恢复的草稿。path 给的是主进程算出的位置，渲染层不拼路径 */
+    peek: () => Promise<{ exists: boolean; path: string; savedAt: number }>
+    write: (text: string) => Promise<boolean>
+    clear: () => Promise<boolean>
   }
 
   /**

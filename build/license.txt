@@ -26,6 +26,15 @@ Belle 中文微调版、SenseVoice 等多种模型。模型文件不随本软件
 专名。词条仅在字幕折行时用于判断词边界，不参与识别，也不改变识别结果。裁剪规则
 与生成脚本随源代码一并提供，许可原文见 licenses 文件夹下的 jieba.LICENSE.txt。
 
+软件另内置两份查表文件：繁简字表取自 OpenCC 的 TSCharacters（Apache License 2.0，
+版权归 BYVoid 与 OpenCC 贡献者），用于统一 whisper 部分权重输出的繁体字形；带调拼音表
+取自 Unicode Unihan 数据库的 kMandarin 字段，经 mozillazg/pinyin-data 整理（MIT 许可），
+Unihan 数据本身适用 Unicode License v3，该表仅在用户填写了热词时用于近音纠正。
+两者都只保留映射本身，不参与识别，也不改变没有命中时的识别结果。
+
+本软件随 Electron 分发的 ffmpeg.dll 是 Electron 官方提供的非专有构建，未作修改，
+其对应源码可从 Electron 官方发布页获取；详见 licenses 文件夹下的 THIRD-PARTY.md。
+
 二、开源许可
 本软件的源代码依照 Apache License 2.0（https://www.apache.org/licenses/LICENSE-2.0）
 开源发布。就源代码而言，你可以在遵循该许可的前提下使用、修改与再分发。

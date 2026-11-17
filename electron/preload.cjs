@@ -154,6 +154,10 @@ contextBridge.exposeInMainWorld('xbaos', {
     /** 编码自适应读取（BOM / UTF-8 / GBK），返回 { text, encoding } */
     readTextAuto: (p) => ipcRenderer.invoke('fs:readTextAuto', p),
     readArrayBuffer: (p) => ipcRenderer.invoke('fs:readArrayBuffer', p),
+    /** 导出音频的中间段：字节交给主进程落到系统临时目录，返回临时文件路径 */
+    writeAudioChunk: (bytes, seq) => ipcRenderer.invoke('audio:writeChunk', bytes, seq),
+    /** 按顺序拼接若干 WAV：校验规格一致后追加 data 段，收尾会删掉中间文件 */
+    concatWav: (parts, outPath) => ipcRenderer.invoke('audio:concatWav', parts, outPath),
     writeText: (p, content) => ipcRenderer.invoke('fs:writeText', p, content),
     writeSubtitle: (p, content, encoding) =>
       ipcRenderer.invoke('fs:writeSubtitle', p, content, encoding),
@@ -161,6 +165,13 @@ contextBridge.exposeInMainWorld('xbaos', {
     openPath: (p) => ipcRenderer.invoke('fs:openPath', p),
     basename: (p) => ipcRenderer.invoke('fs:basename', p),
     dirname: (p) => ipcRenderer.invoke('fs:dirname', p),
+  },
+
+  // ---- 自动草稿（防丢）：未保存的工程定期落盘，下次启动恢复
+  autosave: {
+    peek: () => ipcRenderer.invoke('autosave:peek'),
+    write: (text) => ipcRenderer.invoke('autosave:write', text),
+    clear: () => ipcRenderer.invoke('autosave:clear'),
   },
 
   // ---- 项目文件（.xbsgp）

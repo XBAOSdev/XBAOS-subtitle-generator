@@ -2798,6 +2798,53 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     /CommandLineToArgvW/.test(readSource('engine/src/decodecli.hpp')),
     'main 的 argv 是 ANSI 代码页（GBK），中文路径到这里已经是乱码',
   )
+  /*
+   * ---- 视频容器（2026-11-16）
+   *
+   * 只承诺验通过的：MOV / M4V 是 ISO BMFF 同族（mbrand 不同），MKV 是 EBML，
+   * 三者都实测能解出 PCM。AVI 停在「容器能解析、音频取值验不通」这一步；
+   * WebM 的容器同样是 EBML，但音轨必是 Opus / Vorbis，而这两类只有 Ogg 容器
+   * 那份才由自带解码器接手（libopus / stb_vorbis），WebM 只能整段交系统，
+   * 系统又多半没装它的组件。两个都不进支持清单，宁可少支持也不要宣布了却解不出来。
+   */
+  const supportedText = formatsText.slice(
+    formatsText.indexOf('SUPPORTED_FORMATS'),
+    formatsText.indexOf('UNSUPPORTED_FORMATS'),
+  )
+  const unsupportedText = formatsText.slice(formatsText.indexOf('UNSUPPORTED_FORMATS'))
+  check(
+    'MOV / M4V / MKV 在支持清单里，且写明是系统解码器',
+    ['m4v', 'mov', 'mkv'].every((e) =>
+      new RegExp(`ext: '${e}'[\\s\\S]{0,120}?impl: '系统解码器'`).test(supportedText),
+    ),
+    '这三个容器里的音轨由系统解，本软件没有可写的库名；写作别的值等于宣称自带实现',
+  )
+  check(
+    'AVI / WebM 停在「不支持」里，并写清真实原因',
+    /ext: 'avi'[\s\S]{0,160}?supported: false/.test(unsupportedText) &&
+      /ext: 'webm'[\s\S]{0,160}?supported: false/.test(unsupportedText),
+    '把没验通的说成支持，用户会遇到「能导入、报错、再问为什么」；原因也不能写成专利，那是不实',
+  )
+  check(
+    '引擎认得 EBML 魔数，但没有接手 AVI',
+    /0x1A && d\[1\] == 0x45/.test(readSource('engine/src/audio.hpp')) &&
+      !/isAvi/.test(readSource('engine/src/audio.hpp')),
+    'EBML 是 MKV / WebM 的共同头；AVI 一旦被认下就会走到「解析成功、取不到音频」那条路',
+  )
+  check(
+    '读文件前先挡体积上限',
+    /kMaxFileBytes/.test(readSource('engine/src/audio.hpp')) &&
+      /文件超过 256 MB/.test(readSource('engine/src/audio.hpp')),
+    '视频文件动辄上 GB，整份读进内存再整段解码，不挡就是 bad_alloc 直接崩',
+  )
+  const cacheExts =
+    readSource('electron/media-cache.js').match(/SYSTEM_DECODER_EXTS = new Set\(\[([^\]]*)\]\)/)?.[1] ??
+    ''
+  check(
+    '试听缓存也认 MKV / MOV / M4V（否则进了编辑器放不出声）',
+    ['mkv', 'mov', 'm4v'].every((e) => cacheExts.includes(`'${e}'`)),
+    'Chromium 解不了这些容器里的音轨，不转 WAV 就是「认得出、听不见、没波形」',
+  )
   check(
     '渲染层读的是转好的那份音频',
     /bridge\.media\.playable\(/.test(readSource('src/stores/project.ts')),
@@ -5284,9 +5331,9 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '直接绑原值的话，勾选显示与导出内容会对不上',
   )
   check(
-    '就地保存与导出用同一口径',
-    editorSrc.includes('settings.speakerPrefixEffective'),
-    '两处各判一次，会出现「导出带标签、按一次保存就把标签抹掉」',
+    '底栏不再有「就地保存」这条第三路',
+    !editorSrc.includes('saveInPlace') && !editorSrc.includes('canSaveInPlace'),
+    '底栏同时摆「保存项目 / 保存 / 导出字幕」时，用户分不清后两个的区别',
   )
 }
 
@@ -6535,10 +6582,95 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
 
   const followTimelineSrc = readSrc('src/components/TimelineTrack.vue')
   check(
-    '播放时的视窗跟随走平滑平移，不是瞬移',
-    /const FOLLOW_HOLD = 0\.86/.test(followTimelineSrc) &&
-      /panGoalSec = t - span \* FOLLOW_HOLD[\s\S]{0,160}startAnim\(\)/.test(followTimelineSrc),
-    '到 90% 处 jumpTo 一次，波形和游标一起「啪」地换位，看着像卡帧',
+    '播放时的视窗是换页，不是被游标推着走',
+    /const FOLLOW_EDGE = 0\.86/.test(followTimelineSrc) &&
+      /const FOLLOW_RETURN = 0\.15/.test(followTimelineSrc) &&
+      /panGoalSec = t - span \* \(jump >= FOLLOW_MIN_JUMP_SEC \? FOLLOW_RETURN : FOLLOW_EDGE\)/.test(
+        followTimelineSrc,
+      ) &&
+      /panGoalSec[\s\S]{0,200}startAnim\(\)/.test(followTimelineSrc),
+    '退回「游标钉在 86% 不动」就是被推着走：画面一刻不停，没有停顿节奏',
+  )
+  check(
+    '视窗太窄时换页退化为连续跟随',
+    /FOLLOW_MIN_JUMP_SEC = 3/.test(followTimelineSrc),
+    '视窗只有几秒宽时每 0.3 秒抽一次，细调会晕',
+  )
+  check(
+    '初次加载按总长给缩放，不硬编 100%',
+    /INITIAL_SPAN_SEC = 60/.test(followTimelineSrc) &&
+      /function initialZoom/.test(followTimelineSrc),
+    '十几分钟的音频用适应宽度，字幕块会挤成一条白线',
+  )
+
+  /*
+   * 2026-11-16 晚的七项修正。
+   *
+   * 共同点：**不报错，但行为不对**。抹掉之后程序照样跑，只有用户会发现
+   * 「波形没变」「字幕卡在导入页」「睡眠后东西没了」。
+   */
+  const projectStoreSrc = readSrc('src/stores/project.ts')
+  const exportDialogSrc = readSrc('src/components/dialogs/ExportDialog.vue')
+  const appSrc = readSrc('src/App.vue')
+
+  check(
+    '重新映射音频后，拼接视图的波形缓存也要作废',
+    /media\.value\.delete\(fileId\)[\s\S]{0,500}media\.value\.delete\(MERGED_FILE_ID\)/.test(
+      projectStoreSrc,
+    ),
+    '只删子项目那条，合并那条还留着上一个文件的形状，波形一动不动',
+  )
+  check(
+    '重新映射后先等新时长回填再拼波形',
+    /await ensureMedia\(fileId\)[\s\S]{0,160}await nextTick\(\)[\s\S]{0,160}syncMergedMedia/.test(
+      projectStoreSrc,
+    ),
+    '时长还是 null 时拼出来的长度是 0，波形会缺一截',
+  )
+  check(
+    '字幕落地按队列顺序，不被待识别音频整体拦住',
+    !/if \(pendingIntake\.value\.length > 0\) return/.test(projectStoreSrc) &&
+      /const barrier = list\.findIndex/.test(projectStoreSrc),
+    '整批拦住就是「混合导入时纯字幕卡在导入页」',
+  )
+  check(
+    '一次导入 = 一个批次，落地时按批次归项目',
+    /batchOf\.set\(f\.id, batch\)/.test(projectStoreSrc) &&
+      /function draftForBatch/.test(projectStoreSrc),
+    '没有批次，同一次导入会被拆成两个项目，或者挂到上一个项目后面',
+  )
+  check(
+    '识别完一个就落地一个，且不逐条重建波形',
+    /landBatch\(\[file\], targetDraftId, false\)/.test(projectStoreSrc),
+    '整批跑完才搬，前几个一直挂在导入页；逐条重建会把每段音频重复解码',
+  )
+  check(
+    '导出弹窗有「连带导出项目音频」，默认关',
+    /const withAudio = ref\(false\)/.test(exportDialogSrc) &&
+      /连带导出项目音频/.test(exportDialogSrc),
+    '默认开会让人莫名其妙多等几十秒',
+  )
+  check(
+    '音频拼接在主进程做，中间文件收尾即删',
+    /concatWav/.test(mainSrc) && /fs\.rm\(p, \{ force: true \}\)/.test(mainSrc),
+    '一小时 48kHz 立体声 690MB，留在临时目录就是垃圾',
+  )
+  check(
+    'WAV 拼接前校验规格一致',
+    /sampleRate !== head\.sampleRate/.test(readSrc('electron/wav-export.js')),
+    '规格不同的段拼在一起会时快时慢，而且不报错',
+  )
+  check(
+    '未保存的工程定期落盘，启动时恢复',
+    /autosave:peek/.test(mainSrc) &&
+      /restoreAutosave/.test(appSrc) &&
+      /startAutosave/.test(appSrc),
+    '睡眠唤醒后渲染进程重载，内存里的成果全没了',
+  )
+  check(
+    '正式保存成功后清掉自动草稿',
+    /autosave\?\.clear\(\)/.test(projectStoreSrc),
+    '不清的话下次启动会冒出一份旧副本，用户会以为项目被改回去了',
   )
 
   const capTokensSrc = readSrc('src/styles/tokens.css')

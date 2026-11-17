@@ -13,6 +13,8 @@ import type {
   TextEncoding,
 } from '@/types'
 import { serializeSubtitle, applyLineEnding } from '@/utils/subtitle'
+import { isSupported } from '@/utils/formats'
+import { encodeWav } from '@/utils/wav'
 import { planExport, translationLangsOf, type PlanSource } from '@/utils/exportPlan'
 import { useSpeakerStore } from '@/stores/speakers'
 import ModalDialog from './ModalDialog.vue'
@@ -45,6 +47,17 @@ const format = ref<SubtitleFormat>(settings.exportFormat)
 const encoding = ref<TextEncoding>(settings.exportEncoding)
 const lineEnding = ref<LineEnding>(settings.exportLineEnding)
 const openAfter = ref(settings.openFolderAfterExport)
+
+/**
+ * 连带导出项目音频。
+ *
+ * 默认关。打开后按子项目顺序把整条时间轴的音频拼成一个 WAV，落在字幕同一个
+ * 目录 —— 用户在剪辑软件里还要按同样的顺序拼一遍，这一步能省掉。
+ *
+ * **不记进设置**：它是「这一次要不要」的问题，不是长期偏好。每次默认关，
+ * 想带就勾一下。
+ */
+const withAudio = ref(false)
 
 /** 语言维度。默认沿用上次的选择（没选过时是「双语」，见 DEFAULT_SETTINGS 的说明） */
 const langMode = ref<ExportLangMode>(settings.exportLangMode)
@@ -451,6 +464,53 @@ async function resolveConflict(dir: string, name: string): Promise<string> {
   return candidate
 }
 
+/** 导出音频统一到这个采样率：48k 是剪辑软件的通用值，也不会把 48k 源降采样 */
+const AUDIO_RATE = 48000
+
+/**
+ * 把项目里的音频按时间轴顺序拼成一个 WAV。
+ *
+ * 逐段「解码 → 编码 → 落临时文件」，不在内存里攒整条：一小时 48kHz 立体声是
+ * 690MB，攒完再写出去会让轻薄本直接开始换页。中间文件由主进程收尾时删掉。
+ *
+ * 声道数跟随第一段（最多 2）：单声道源保持单声道，立体声源保持立体声，
+ * 后面的段按这个规格对齐 —— 单声道补成双轨，多声道只取前两轨。
+ * 规格不一致会导致拼出来有时快时慢，所以对齐这件事必须在编码前做掉。
+ */
+async function exportProjectAudio(dir: string): Promise<string | null> {
+  const bridge = window.xbaos
+  if (!bridge) return null
+  const parts = project.supportedFiles.filter((f) => f.path && isSupported(f.ext))
+  if (parts.length === 0) return null
+
+  const ctx = new AudioContext({ sampleRate: AUDIO_RATE })
+  const chunks: string[] = []
+  let channels = 1
+  try {
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i]
+      // AAC / M4A 这类 Chromium 解不了的，先让主进程用系统解码器转一份 WAV 出来
+      const playable = await bridge.media.playable(part.path, part.ext)
+      if (!playable.ok) throw new Error(`${part.name}：${playable.message}`)
+      const bytes = await bridge.fs.readArrayBuffer(playable.path ?? part.path)
+      const buf = await ctx.decodeAudioData(bytes)
+      if (i === 0) channels = buf.numberOfChannels >= 2 ? 2 : 1
+      const left = buf.getChannelData(0)
+      const second = buf.numberOfChannels > 1 ? buf.getChannelData(1) : left
+      const body =
+        channels === 2
+          ? encodeWav({ channels: [left, second], sampleRate: AUDIO_RATE })
+          : encodeWav({ channels: [left], sampleRate: AUDIO_RATE })
+      chunks.push(await bridge.fs.writeAudioChunk(body, i))
+    }
+    const target = await resolveConflict(dir, `${project.displayProjectName}.wav`)
+    const res = await bridge.fs.concatWav(chunks, target)
+    return res.path
+  } finally {
+    void ctx.close()
+  }
+}
+
 const exporting = ref(false)
 
 async function doExport(): Promise<void> {
@@ -519,6 +579,24 @@ async function doExport(): Promise<void> {
   // 同时登记内容签名：「落点」用来就地覆盖保存，「签名」用来判断关窗时会不会丢东西。
   // 只记落点是不够的 —— 导出之后又改了字，两者表现完全不同。
   for (const [fileId, segments] of segmentsOf) project.markSaved(fileId, segments)
+
+  /*
+   * 连带导出音频放在字幕之后：字幕是本职，音频是顺手带的。
+   * 音频失败不回滚已经写好的字幕，只单独报一条 —— 让用户为了一个附加项
+   * 重导一遍字幕没有道理。
+   */
+  let audioPath = ''
+  if (withAudio.value) {
+    const audioDir = outputs.value[0]?.outputDir
+    if (audioDir) {
+      try {
+        audioPath = (await exportProjectAudio(audioDir)) ?? ''
+      } catch (err) {
+        ui.notify('warning', '音频未导出', err instanceof Error ? err.message : String(err))
+      }
+    }
+  }
+
   exporting.value = false
 
   const dirs = new Set(written.map((p) => p.replace(/\\[^\\]+$/, '')))
@@ -528,6 +606,7 @@ async function doExport(): Promise<void> {
 
   ui.closeDialog()
   const detail = [dirs.size > 1 ? `分布在 ${dirs.size} 个目录` : written[0]]
+  if (audioPath) detail.push(`音频 ${audioPath}`)
   if (missing > 0) detail.push(`${missing} 条缺译文，已以原文补齐`)
   ui.notify('success', `已导出 ${written.length} 个字幕文件`, detail.join('；'))
 }
@@ -826,6 +905,14 @@ function close(): void {
         <label class="checkbox export__open">
           <input v-model="openAfter" type="checkbox" />
           <span>导出后打开所在文件夹</span>
+        </label>
+
+        <label class="checkbox export__open">
+          <input v-model="withAudio" type="checkbox" />
+          <span>连带导出项目音频</span>
+          <span class="export__open-note">
+            按子项目顺序拼成一个 WAV，放到字幕所在目录
+          </span>
         </label>
       </section>
     </div>
@@ -1205,5 +1292,15 @@ function close(): void {
 
 .export__open {
   margin-top: var(--space-4);
+}
+
+/* 第二个选项紧贴上一行：每行都空一大截会让它们看起来像两个分组 */
+.export__open + .export__open {
+  margin-top: var(--space-2);
+}
+
+.export__open-note {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
 }
 </style>

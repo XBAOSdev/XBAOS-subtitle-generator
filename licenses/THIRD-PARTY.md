@@ -52,6 +52,23 @@
 - 生成脚本 `tools/build-wrap-dict.mjs` 与裁剪规则一并开源，结果可复现。
 - 许可原文见本目录下的 `jieba.LICENSE.txt`。
 
+### 随产物分发的数据表
+
+另有两个查表文件随前端产物一起分发。它们不是代码组件，也不参与识别推理，
+但字表本身来自第三方，按各自许可的要求在这里署名：
+
+| 文件 | 来源 | 许可证 | 版权方 | 用途 |
+|---|---|---|---|---|
+| `src/utils/t2sTable.ts` | OpenCC 的 `TSCharacters` 表，经 opencc-js（MIT）的打包格式提取 | Apache-2.0 | BYVoid 与 OpenCC 贡献者 | 繁转简（whisper 的部分中文权重会输出繁体） |
+| `src/data/pinyin.ts` | Unicode Unihan Database 的 `kMandarin` 字段，经 [mozillazg/pinyin-data](https://github.com/mozillazg/pinyin-data) 整理 | MIT（pinyin-data）与 Unicode License v3（Unihan） | mozillazg；Unicode, Inc. | 热词近音纠正（按带调拼音反查同音字） |
+
+两者都只保留了映射本身（「繁体字 → 简体字」与「音节 → 该音节的汉字」），
+不含释义、例句、词性体系，也不影响识别结果：繁简表只统一字形，拼音表只在
+「用户自己填了热词」时才用于近音纠正，都没有命中时行为与未引入时完全一致。
+
+许可原文见本目录下的 `Apache-2.0.LICENSE.txt`、`pinyin-data.LICENSE.txt`
+与 `Unicode-LICENSE.txt`。
+
 ### 随包分发的模型权重
 
 下面两个模型不是代码组件，而是**模型权重**，和识别模型一样由各自的发布者提供、
@@ -88,19 +105,31 @@
 **独立 `ffmpeg.dll`** 的形式分发，使用者可以自行替换，符合 LGPL 对动态链接的要求；
 许可证全文见 `FFmpeg.LICENSE.txt`。
 
-**关于 AAC / M4A / MP4**：本软件**不含任何 AAC 编解码实现**，也不随包分发任何 AAC
-解码库（这正是上面那份 non-proprietary 构建的意义）。导入 m4a / m4b / mp4 / aac 时，
-解码交给 **Windows 自带的 Media Foundation 解码器**（`mfplat.dll` / `mfreadwrite.dll`，
-随 Windows 提供，不由本软件分发）：容器解析与 AAC 解码都由系统组件完成，实现者与
-分发者均为微软。本软件只做「选流 → 取 PCM」的搬运，并在此基础之上生成 16kHz 单声道
-音频供识别、生成一份单声道 WAV 供试听与波形。同理，本软件**不具备任何 AAC 编码能力**。
+该 `ffmpeg.dll` **未作任何修改**，由 Electron 官方在发布时随包提供。LGPL-2.1 第 6 条
+要求的对应源码，可从 Electron 的官方发布页取得：
+`https://github.com/electron/electron/releases`（选对应版本的 `chromium` 源码包，
+其中 `third_party/ffmpeg` 即为该构建的源码，构建参数见同目录的 `ffmpeg/BUILD.gn`）。
+本软件不修改该库，因此不需要另行提供自己的修改；如果你需要一份可离线获取的源码副本，
+可以到 `https://www.xbaos.com.cn/` 留言索取。
+
+**关于 AAC / M4A / MP4 / MOV / MKV**：本软件**不含任何音轨编解码实现**，也不随包
+分发任何音轨解码库（这正是上面那份 non-proprietary 构建的意义）。导入 m4a / m4b / mp4 /
+m4v / mov / aac / mkv 时，解码交给 **Windows 自带的 Media Foundation 解码器**
+（`mfplat.dll` / `mfreadwrite.dll`，随 Windows 提供，不由本软件分发）：容器解析与音轨解码
+都由系统组件完成，实现者与分发者均为微软。本软件只做「选流 → 取 PCM」的搬运，并在此基础
+之上生成 16kHz 单声道音频供识别、生成一份单声道 WAV 供试听与波形。同理，本软件**不具备
+任何音频编码能力**。
+
+**视频轨不解码**：上述容器一律只取第一条音轨，视频流既不选择也不解码，因此不涉及
+H.264 / H.265 等视频编码的许可。
 
 **识别引擎的运行库**：两个引擎（`xbaos-engine.exe` 与 `xbaos-engine-asr.exe`）都使用
 MSVC `/MT` 静态链接 C 运行时与各自全部第三方依赖，不依赖 `vcruntime140.dll` /
 `msvcp140.dll` 等微软运行时，也不依赖任何第三方 DLL（onnxruntime 亦为静态库版本）。
 
 **许可原文的文件对应关系**：`sherpa-onnx`、`kaldi-native-fbank`、`kaldi-decoder`、
-`kaldifst`、`OpenFst`、`simple-sentencepiece` 六项均采用 Apache License 2.0，
+`kaldifst`、`OpenFst`、`simple-sentencepiece` 六项，以及上表里的 OpenCC
+`TSCharacters` 字表与 3D-Speaker 声纹模型，均采用 Apache License 2.0，
 共用本目录下的 `Apache-2.0.LICENSE.txt`；其余各项各有同名文件
 （`eigen.LICENSE.txt`、`kissfft.LICENSE.txt`、`utf8proc.LICENSE.txt`、
 `nlohmann-json.LICENSE.txt`、`onnxruntime.LICENSE.txt` 等）。
@@ -143,7 +172,8 @@ MSVC `/MT` 静态链接 C 运行时与各自全部第三方依赖，不依赖 `v
 | 组件 | 原因 |
 |---|---|
 | FFmpeg（含专有编解码器的版本） | 相关编解码器受专利约束，许可情况复杂；本项目的 ffmpeg 是非专有构建 |
-| AAC / M4A 解码器（如 fdk-aac、FFmpeg 的 AAC 模块） | 本软件**不含**任何 AAC 实现：这类格式交由 Windows 自带的 Media Foundation 解码器处理，实现与分发者均为微软 |
+| AAC / M4A 等音轨解码器（如 fdk-aac、FFmpeg 的 AAC 模块） | 本软件**不含**任何音轨实现：这类格式交由 Windows 自带的 Media Foundation 解码器处理，实现与分发者均为微软 |
+| 任何视频解码器（H.264 / H.265 等） | 本软件只取容器里的音轨，不解码视频轨，也就不进入视频编码的许可范围 |
 | AAC 编码器（任何实现） | 本软件只做字幕与音频处理，不需要编码 AAC，也就不必进入「制造编码器产品」的范围 |
 | 任何商业语音识别 SDK | 不可免费商用；其中一部分还要求把音频上传到厂商服务器 |
 | 任何联网 API | 需由本软件代使用者把内容发往第三方服务器，并承担密钥保管、按量计费与内容合规责任 |
