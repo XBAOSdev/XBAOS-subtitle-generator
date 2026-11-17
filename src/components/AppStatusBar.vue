@@ -1,16 +1,38 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
 import { useLogStore } from '@/stores/logs'
-import { formatDuration } from '@/utils/format'
+import { useMediaCacheStore } from '@/stores/mediaCache'
+import { formatBytes, formatDuration } from '@/utils/format'
 import Icon from '@/components/Icon.vue'
 
 const project = useProjectStore()
 const settings = useSettingsStore()
 const ui = useUiStore()
 const logs = useLogStore()
+const cache = useMediaCacheStore()
+
+/*
+ * 解码缓存的占用，就摆在「N 个文件处理完成」左边。
+ *
+ * 为什么要让它在底栏：这份缓存是**源采样率**的单声道 PCM，48kHz 一小时
+ * 345MB，是软件里唯一会自己长大的目录。用户不该是在硬盘报警时才发现它。
+ * 点一下直接跳到设置里那块，不用自己去翻。
+ *
+ * 「常驻」的含义是**有缓存时一直在**，不是「恒显示一行 0 B」—— 后者对
+ * 刚装好的人只是一个看不懂的数字。
+ */
+const cacheText = computed(() => formatBytes(cache.stats.bytes))
+
+function openCacheSettings(): void {
+  ui.navigate('settings', 'sec-cache')
+}
+
+onMounted(() => {
+  void cache.refresh()
+})
 
 const backendLabel = computed(() => {
   if (settings.backend === 'cpu') return 'CPU'
@@ -203,6 +225,16 @@ watch(issueText, (next, prev) => {
     </div>
 
     <div class="statusbar__side statusbar__side--right">
+      <button
+        v-if="cache.hasCache"
+        class="statusbar__cache"
+        type="button"
+        :title="`解码缓存 ${cacheText}（${cache.stats.count} 份），点击查看与清理`"
+        @click="openCacheSettings"
+      >
+        <span>缓存</span>
+        <span class="mono">{{ cacheText }}</span>
+      </button>
       <span v-if="project.allPendingReview > 0" class="statusbar__pending">
         {{ project.allPendingReview }} 个文件处理完成
       </span>
@@ -440,6 +472,22 @@ watch(issueText, (next, prev) => {
 }
 
 .statusbar__pending {
+  color: var(--color-text-secondary);
+}
+
+/* 缓存占用：长相与「N 个文件处理完成」同一档，但它是可点的 */
+.statusbar__cache {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.statusbar__cache:hover {
+  background: var(--color-bg-subtle);
   color: var(--color-text-secondary);
 }
 

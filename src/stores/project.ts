@@ -49,6 +49,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useModelStore } from '@/stores/model'
 import { useHistoryStore, type HistorySnapshot } from '@/stores/history'
 import { useSpeakerStore, type SpeakerSnapshot } from '@/stores/speakers'
+import { useMediaCacheStore } from '@/stores/mediaCache'
 import { buildProjectDoc, fromProjectText, toProjectText } from '@/utils/xbsgp'
 import { appVersion } from '@/branding'
 import {
@@ -2550,6 +2551,11 @@ const MIME_BY_EXT: Record<string, string> = {
     } finally {
       m.loading = false
       touchMedia()
+      /*
+       * 这次可能刚转出一份缓存（也可能是命中），底栏与设置页的占用数字要跟着走。
+       * 放在 finally：读失败时没新增，但刷新一下也无害，省得再分情况。
+       */
+      void useMediaCacheStore().refresh()
     }
   }
 

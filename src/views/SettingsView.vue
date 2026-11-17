@@ -24,10 +24,52 @@ import {
 } from '@/data/settingsMap'
 import Icon from '@/components/Icon.vue'
 import WordbookDialog from '@/components/dialogs/WordbookDialog.vue'
+import { useMediaCacheStore } from '@/stores/mediaCache'
+import { formatBytes } from '@/utils/format'
 
 const settings = useSettingsStore()
 const model = useModelStore()
 const ui = useUiStore()
+const mediaCache = useMediaCacheStore()
+
+/* ------------------------------------------------------- 解码缓存 */
+
+/** 进入设置页就取一次：用户从底栏点进来时，数字必须是当下的 */
+onMounted(() => {
+  void mediaCache.refresh()
+})
+
+onActivated(() => {
+  void mediaCache.refresh()
+})
+
+/** 打开缓存目录。目录还没建出来时系统会报错，这里把原因照实转给用户 */
+async function openCacheDir(): Promise<void> {
+  if (!bridge?.fs || !mediaCache.stats.dir) return
+  const message = await bridge.fs.openPath(mediaCache.stats.dir)
+  if (message) ui.notify('error', '打不开缓存文件夹', message)
+}
+
+async function removeCacheFile(name: string): Promise<void> {
+  const removed = await mediaCache.clear([name])
+  if (removed === 0) ui.notify('warning', '没有删掉', '这份缓存可能正被占用，稍后再试')
+}
+
+async function clearAllCache(): Promise<void> {
+  if (!mediaCache.hasCache) return
+  if (!window.confirm('清除全部解码缓存？\n\n不影响已识别的字幕与项目文件，只是下次播放这些音频时要重新解码一次。')) {
+    return
+  }
+  const removed = await mediaCache.clear()
+  ui.notify('info', '已清除解码缓存', `共删掉 ${removed} 份`)
+}
+
+/** 缓存文件的时间：只到分钟。这是「最后用过」的时间，不是创建时间 */
+function cacheWhen(ms: number): string {
+  const d = new Date(ms)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
 
 /** 词表里能解析出多少条可用规则。给个即时反馈，免得手滑写了不生效还不知道 */
 const dictRuleCount = computed(() => parseReplaceDict(settings.dictReplacements).length)
@@ -261,17 +303,45 @@ onMounted(() => {
 })
 
 /**
+ * 消费待处理的跳转锚点。
+ *
+ * `consuming` 是防重入用的：视图切换的那一刻 `onActivated` 与下面的 watch
+ * 会同时到达，没有它就会对同一个锚点滚两次（画面先跳一下再跳回来）。
+ */
+let consuming: string | null = null
+
+function consumeAnchor(): void {
+  const anchor = ui.settingsAnchor
+  if (!anchor || consuming === anchor) return
+  ui.settingsAnchor = null
+  consuming = anchor
+  void nextTick(async () => {
+    await jumpToDomId(anchor)
+    consuming = null
+  })
+}
+
+/**
  * 从模型管理页点「模型存储位置」跳进来时，直接切到对应分组并滚到章节。
  * 设置页被 KeepAlive 缓存着，切回来**不会**重新挂载 —— 所以跳转只能靠
  * `ui.settingsAnchor` 这个状态触发，不能只写在 onMounted 里。
  */
 onActivated(() => {
   void refreshModelsDir()
-  const anchor = ui.settingsAnchor
-  if (!anchor) return
-  ui.settingsAnchor = null
-  void nextTick(() => jumpToDomId(anchor))
+  consumeAnchor()
 })
+
+/*
+ * 已经在设置页时也要认这个锚点。
+ *
+ * 底栏那个「缓存 421 MB」在设置页也可见，点它时视图没有变化 —— `onActivated`
+ * 不会触发，光靠上面那段就会出现「点了没反应」。watch 管这件事，
+ * `consumeAnchor` 里用 `consuming` 防重入：视图切换时这两条路径会同时到达。
+ */
+watch(
+  () => ui.settingsAnchor,
+  () => consumeAnchor(),
+)
 
 /**
  * 更改模型存储位置。
@@ -526,6 +596,90 @@ function reset(): void {
                 </div>
                 <p class="hint">
                   更改后<strong>只会</strong>从新位置查找，原位置已下载的模型需自行复制过去。
+                </p>
+              </div>
+            </section>
+
+            <!-- 解码缓存：试听与波形用的那份中间文件，会让目录自己长大 -->
+            <section id="sec-cache" class="block">
+              <div class="block__head">
+                <Icon name="layers" :size="14" />
+                <span class="block__title">解码缓存</span>
+              </div>
+              <div class="block__body">
+                <p class="hint">
+                  M4A、MP4 这类需要系统解码器的音频，试听与波形读的是转出来的一份 WAV。
+                  它是可再生的中间物：删掉不影响已识别的字幕，只是下次播放时重新解一遍。
+                </p>
+
+                <div class="cache__meter" :class="{ 'is-over': mediaCache.ratio >= 1 }">
+                  <span
+                    class="cache__fill"
+                    :style="{ width: `${Math.round(mediaCache.ratio * 100)}%` }"
+                  />
+                </div>
+                <p class="cache__stat">
+                  <span>
+                    已用 <strong>{{ formatBytes(mediaCache.stats.bytes) }}</strong>
+                    <template v-if="mediaCache.stats.limit > 0">
+                      ，上限 {{ formatBytes(mediaCache.stats.limit) }}
+                    </template>
+                  </span>
+                  <span>{{ mediaCache.stats.count }} 份</span>
+                </p>
+
+                <div class="row-actions">
+                  <button
+                    class="btn btn--sm"
+                    type="button"
+                    :disabled="mediaCache.busy"
+                    @click="mediaCache.refresh()"
+                  >
+                    <Icon name="refresh" :size="13" />
+                    <span>刷新</span>
+                  </button>
+                  <button
+                    class="btn btn--sm"
+                    type="button"
+                    :disabled="!mediaCache.hasCache"
+                    @click="openCacheDir"
+                  >
+                    <Icon name="folder-open" :size="13" />
+                    <span>打开文件夹</span>
+                  </button>
+                  <button
+                    class="btn btn--sm"
+                    type="button"
+                    :disabled="!mediaCache.hasCache || mediaCache.busy"
+                    @click="clearAllCache"
+                  >
+                    <Icon name="trash" :size="13" />
+                    <span>全部清除</span>
+                  </button>
+                </div>
+
+                <ul v-if="mediaCache.stats.files.length > 0" class="cache__list">
+                  <li v-for="item in mediaCache.stats.files" :key="item.name" class="cache__row">
+                    <span class="cache__from" :title="item.name">
+                      {{ item.source || '来源未知（本次启动前生成）' }}
+                    </span>
+                    <span class="cache__size mono">{{ formatBytes(item.bytes) }}</span>
+                    <span class="cache__when mono">{{ cacheWhen(item.mtime) }}</span>
+                    <button
+                      class="btn btn--sm btn--ghost"
+                      type="button"
+                      :disabled="mediaCache.busy"
+                      @click="removeCacheFile(item.name)"
+                    >
+                      删除
+                    </button>
+                  </li>
+                </ul>
+                <p v-else class="hint">还没有缓存。</p>
+
+                <p v-if="mediaCache.stats.limit > 0" class="hint">
+                  超过 {{ formatBytes(mediaCache.stats.limit) }} 时按最久未用淘汰，
+                  超过 14 天的也会清掉；清理只在启动软件时进行，正在用的那份会跳过。
                 </p>
               </div>
             </section>
@@ -1268,6 +1422,95 @@ function reset(): void {
   gap: var(--space-2);
   flex-wrap: wrap;
   margin-top: var(--space-3);
+}
+
+/* ---------- 解码缓存 ---------- */
+
+/*
+ * 占用条。只表达「离上限还有多远」，不做分段配色：
+ * 超限时主进程已经动手淘汰了，用户看到的永远是 ≤100%，
+ * 变红反而会让人以为自己坏了。
+ */
+.cache__meter {
+  margin-top: var(--space-3);
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-subtle);
+  overflow: hidden;
+}
+
+.cache__fill {
+  display: block;
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: var(--radius-pill);
+  transition: width var(--dur-base) var(--ease-out);
+}
+
+.cache__meter.is-over .cache__fill {
+  background: var(--color-warning);
+}
+
+.cache__stat {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.cache__stat strong {
+  color: var(--color-text-secondary);
+  font-weight: var(--weight-medium);
+}
+
+/*
+ * 列表自己滚：缓存可能有几十份，摊开会把整个设置页顶长，
+ * 而这块的正文只是「谁在占地方」，不需要一次看全。
+ */
+.cache__list {
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.cache__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.cache__row + .cache__row {
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+/* 源文件名可能很长：让它吃剩余宽度并省略，别把大小和时间挤走 */
+.cache__from {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cache__size {
+  flex: none;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.cache__when {
+  flex: none;
+  color: var(--color-text-tertiary);
 }
 
 .punct-intro {

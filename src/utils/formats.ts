@@ -163,7 +163,7 @@ export const UNSUPPORTED_FORMATS: FormatSpec[] = [
     label: 'WebM',
     supported: false,
     reason:
-      'Windows 系统解码不支持 Opus/Vorbis 组件',
+      'Windows 系统解码不支持 Opus/Vorbis',
   },
   {
     ext: 'wma',

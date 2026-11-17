@@ -90,6 +90,13 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
     keywords: ['语言', '推理深度', '领域词库', '热词提示', '音质前处理', '导入页'],
     note: '位于导入页',
   },
+  {
+    id: 'cache',
+    label: '解码缓存',
+    section: 'sec-cache',
+    group: 'engine',
+    keywords: ['缓存', '占用', '清理', '磁盘空间', '硬盘', 'media-cache', '试听', '波形'],
+  },
 
   // ---- 字幕处理
   {

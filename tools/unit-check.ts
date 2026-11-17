@@ -2815,7 +2815,10 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   check(
     'MOV / M4V / MKV 在支持清单里，且写明是系统解码器',
     ['m4v', 'mov', 'mkv'].every((e) =>
-      new RegExp(`ext: '${e}'[\\s\\S]{0,120}?impl: '系统解码器'`).test(supportedText),
+      // 只要求「impl 里出现『系统解码器』」——具体写「系统解码器」还是
+      // 「Windows 系统解码器」是文案自由，但绝不能写成某个自带库的名字：
+      // 写了库名就等于宣称自己实现了这条路
+      new RegExp(`ext: '${e}'[\\s\\S]{0,120}?impl: '[^']*系统解码器`).test(supportedText),
     ),
     '这三个容器里的音轨由系统解，本软件没有可写的库名；写作别的值等于宣称自带实现',
   )
@@ -2849,6 +2852,74 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     '渲染层读的是转好的那份音频',
     /bridge\.media\.playable\(/.test(readSource('src/stores/project.ts')),
     '少了这一步，m4a 的 <audio> 会报 DEMUXER_ERROR_NO_SUPPORTED_STREAMS',
+  )
+  /*
+   * ---- 试听缓存的清理时机（2026-11-17）
+   *
+   * 原来 `prune()` 挂在 `convert()` 里，等于「只有真的转一次码才顺手清一下」：
+   * 从不导入视频容器的用户永远等不到清理，缓存只增不减。现在挪到 `whenReady`
+   * 里，删目录也解释得通（见协议 4.5）。
+   */
+  const cacheSrc = readSource('electron/media-cache.js')
+  check(
+    '试听缓存在启动时清理，不挂在转码路径上',
+    /getPlayableCache\(\)\.prune\(\)/.test(readSource('electron/main.js')) &&
+      !/this\.pruned/.test(cacheSrc),
+    '挂在 convert 里的话，「只导入 mp3」的用户永远不会触发清理',
+  )
+  check(
+    '缓存命中时把 mtime 往前推（否则天天用的那份会被当成过期删掉）',
+    /fs\.utimes\(target/.test(cacheSrc),
+    '清理判据是 mtime，命中不重写文件、mtime 就停在生成那一刻，第 15 天会误删',
+  )
+  /*
+   * ---- 解码缓存的可见与可清（2026-11-17）
+   *
+   * 这份缓存是**源采样率**的单声道 PCM：48kHz 一小时 345MB。只靠 14 天过期
+   * 管不住体积 —— 一天两小时视频，两周就是 9GB，用户会觉得「硬盘莫名其妙满了」。
+   * 所以要有硬上限、有淘汰、有看得见的入口。
+   */
+  check(
+    '解码缓存有总量上限，且不是形同虚设的大数',
+    (() => {
+      const m = cacheSrc.match(/CACHE_MAX_BYTES = ([\d *]+)/)
+      if (!m) return false
+      const bytes = m[1]
+        .split('*')
+        .map((s) => Number(s.trim()))
+        .reduce((a, b) => a * b, 1)
+      // 上限本身要合理：小于 256MB 会一上线就删用户刚转的东西，大于 4GB 等于没设
+      return bytes >= 256 * 1024 * 1024 && bytes <= 4 * 1024 * 1024 * 1024
+    })(),
+    '没有上限时缓存只增不减；写成 512GB 这种量级等于根本没设',
+  )
+  check(
+    '超限按最久未用淘汰，且跳过本次运行用过的',
+    /if \(bytes <= CACHE_MAX_BYTES\) break/.test(cacheSrc) &&
+      /this\.touched\.has\(e\.name\)\) continue/.test(cacheSrc),
+    '正在播的那份被删掉，用户下次点播放就得等重新解码一遍',
+  )
+  check(
+    '删缓存只接受 basename 与 .wav 后缀',
+    /base !== name \|\| !base\.endsWith\('\.wav'\)/.test(cacheSrc),
+    '文件名来自渲染进程，../../Windows/System32/x.wav 这种拼法能删到目录外面',
+  )
+  check(
+    '底栏显示缓存占用，点击跳到设置里的解码缓存',
+    /statusbar__cache/.test(readSource('src/components/AppStatusBar.vue')) &&
+      /navigate\('settings', 'sec-cache'\)/.test(readSource('src/components/AppStatusBar.vue')),
+    '这个目录会自己长大，用户不该在硬盘报警时才发现它',
+  )
+  check(
+    '设置页有解码缓存区块，且能按锚点反查到「识别与性能」',
+    /id="sec-cache"/.test(readSource('src/views/SettingsView.vue')) &&
+      groupOfDomId('sec-cache') === 'engine',
+    '反查不到分组时，jumpToDomId 不会切分组，区块被 v-show 藏着 → 点了没反应',
+  )
+  check(
+    '搜索「缓存」能搜到这一项',
+    searchSettings('缓存').some((e) => e.section === 'sec-cache'),
+    '设置页有搜索框，新增的设置项不进索引就等于藏起来了',
   )
   /*
    * ---- 下载完整性（2026-11-04）

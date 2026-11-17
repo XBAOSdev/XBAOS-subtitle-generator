@@ -1634,6 +1634,29 @@ function registerIpc() {
     return getPlayableCache().ensure(srcPath)
   })
 
+  /*
+   * 解码缓存的查看与清理。
+   *
+   * 为什么需要有这两个口子：这份缓存是**源采样率**的单声道 PCM，48kHz 一小时
+   * 345MB，光靠 14 天过期管不住体积（上限在 `media-cache.js` 里）。用户至少
+   * 得能看见它占了多少、能自己动手删。
+   */
+  ipcMain.handle('media:cache-stats', async () => getPlayableCache().stats())
+
+  ipcMain.handle('media:cache-clear', async (_event, names) => {
+    const cache = getPlayableCache()
+    // 不给名字 = 全部清除；给数组 = 只删这几个
+    if (Array.isArray(names)) {
+      let removed = 0
+      for (const name of names) {
+        if (await cache.rm(name)) removed += 1
+      }
+      return { removed, stats: await cache.stats() }
+    }
+    const removed = await cache.clearAll()
+    return { removed, stats: await cache.stats() }
+  })
+
   /**
    * 写字幕文件，带编码选择。目录不存在就建，避免用户手填了一个
    * 还不存在的路径时直接失败。返回真实写入的路径。
@@ -2464,6 +2487,15 @@ app.whenReady().then(async () => {
   // 系统声音采集必须先把 handler 挂上：不挂的话 getDisplayMedia() 会弹
   // Electron 自带的「选择要共享的内容」窗口。
   installDisplayMediaHandler()
+
+  /*
+   * 顺手清一次试听缓存（超过 14 天没用过的那些）。
+   *
+   * 放在启动时而不是「第一次转码时」：后者让「从不导入视频容器」的用户
+   * 永远等不到清理，缓存只会越攒越多。这里不阻塞窗口创建，失败也不管。
+   * 放在 `gotLock` 之后：多开时只有拿到锁的那个实例动手。
+   */
+  void getPlayableCache().prune()
 
   /*
    * 不在这里预启动引擎。

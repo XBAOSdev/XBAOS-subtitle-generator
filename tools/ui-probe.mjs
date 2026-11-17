@@ -139,24 +139,40 @@ async function goto(cdp, url) {
   // 是同一个根因，bringToFront 一并解决。
   await cdp.send('Page.bringToFront').catch(() => {})
   const loaded = cdp.once('Page.loadEventFired')
+  const t0 = Date.now()
   await cdp.send('Page.navigate', { url })
   await loaded
-  // 等演示数据与图表绘制完成
-  await sleep(1200)
 
-  // 导航失败时 Chromium 会渲染自己的错误页，而错误页同样会触发 load 事件、
-  // 同样能截图成功。后面的选择器却会全部落空，表现出来是一堆莫名其妙的
-  // 「找不到第 3 条字幕行」，排查方向完全跑偏 —— 曾经真的被这个骗过一次：
-  // 服务没起来，6 张截图全是通过状态，里面全是 ERR_CONNECTION_REFUSED。
-  // 所以每次导航后先确认页面确实进了我们的应用。
-  const state = await cdp.evaluate(`(() => {
-    const app = document.querySelector('#app')
-    return {
-      chromeError: !!document.querySelector('#main-frame-error'),
-      appMounted: !!app && app.children.length > 0,
-      title: document.title,
-    }
-  })()`)
+  /*
+   * 等应用挂上。
+   *
+   * 原来是一句固定 `sleep(1200)` 就断言 `#app` 有子节点。Vite 的开发服务器是
+   * 按需编译的：全量跑几十个场景时，某个路由第一次被访问要现编一份 chunk，
+   * 1200ms 不一定够 —— 表现是随机某个场景报「页面未加载成功」，
+   * 而单独跑它必过（那次编译已经缓存了）。这种抖动最耗排查时间。
+   *
+   * 改成轮询：快则立刻往下走，慢则最多等 15 秒。Chromium 错误页仍是立刻失败 ——
+   * 那是真的没起来，等多久都没用。
+   *
+   * 顺便记一句：错误页也会触发 load 事件、也能截图成功，如果这里不查，
+   * 后面全是「找不到某个元素」，排查方向会完全跑偏（曾经因为服务没起，
+   * 6 张截图全是「通过」，里面却是 ERR_CONNECTION_REFUSED）。
+   */
+  const deadline = Date.now() + 15000
+  let state = { chromeError: false, appMounted: false, title: '' }
+  for (;;) {
+    state = await cdp.evaluate(`(() => {
+      const app = document.querySelector('#app')
+      return {
+        chromeError: !!document.querySelector('#main-frame-error'),
+        appMounted: !!app && app.children.length > 0,
+        title: document.title,
+      }
+    })()`)
+    if (state.chromeError || state.appMounted) break
+    if (Date.now() > deadline) break
+    await sleep(100)
+  }
 
   if (state.chromeError || !state.appMounted) {
     throw new Error(
@@ -165,6 +181,9 @@ async function goto(cdp, url) {
         '  通常是开发服务器没起来，先执行 npm run dev:ui',
     )
   }
+
+  // 挂上之后仍要给演示数据与图表留出绘制时间：总等待不少于原来的 1200ms
+  await sleep(Math.max(0, 1200 - (Date.now() - t0)))
 }
 
 const scenarios = {
@@ -2961,6 +2980,80 @@ const scenarios = {
       Object.keys(localStorage).filter((k) => k.startsWith('xbaos.settings')).forEach((k) => localStorage.removeItem(k))
       return true
     })()`)
+  },
+
+  /**
+   * 解码缓存的设置区块（2026-11-17）。
+   *
+   * 这份缓存是源采样率的单声道 PCM，48kHz 一小时 345MB —— 它是软件里唯一会
+   * 自己长大的目录，所以必须有可见的占用与可点的清除。浏览器预览里没有主进程、
+   * 也没有 `media.cacheStats`，正好测「空态」这一支：区块在、三个按钮在、
+   * 全部清除是禁用的。
+   */
+  async 'cache-settings'(cdp) {
+    await goto(cdp, BASE + '/?demo=1&view=settings&theme=light')
+
+    const navPoint = await cdp.evaluate(`(() => {
+      const b = [...document.querySelectorAll('.setnav__item')].find((x) => x.textContent.includes('识别与性能'))
+      if (!b) return null
+      const r = b.getBoundingClientRect()
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+    })()`)
+    check('设置页能找到「识别与性能」分组', !!navPoint)
+    if (navPoint) await cdp.click(navPoint.x, navPoint.y)
+    await sleep(320)
+
+    const section = await cdp.evaluate(`(() => {
+      const el = document.getElementById('sec-cache')
+      if (!el) return null
+      return {
+        visible: el.offsetParent !== null,
+        title: el.querySelector('.block__title')?.textContent?.trim() ?? '',
+        meter: !!el.querySelector('.cache__meter'),
+        stat: el.querySelector('.cache__stat')?.textContent?.replace(/\\s+/g, '') ?? '',
+        buttons: [...el.querySelectorAll('.row-actions button')].map((b) => ({
+          text: b.textContent.replace(/\\s+/g, ''),
+          disabled: b.disabled,
+        })),
+        hint: el.querySelector('.hint')?.textContent?.replace(/\\s+/g, '') ?? '',
+      }
+    })()`)
+
+    check('「识别与性能」里有解码缓存区块', !!section && section.visible, JSON.stringify(section))
+    check('区块标题是「解码缓存」', section?.title === '解码缓存', section?.title)
+    check('有占用条与用量数字', !!section?.meter && (section?.stat ?? '').includes('已用'), section?.stat)
+    check(
+      '三个操作齐了：刷新 / 打开文件夹 / 全部清除',
+      (section?.buttons ?? []).map((b) => b.text).join(',') === '刷新,打开文件夹,全部清除',
+      JSON.stringify(section?.buttons ?? []),
+    )
+    check(
+      '浏览器预览没有缓存 → 清除与打开都禁用，且说明它是可再生中间物',
+      (section?.buttons ?? []).slice(1).every((b) => b.disabled) &&
+        (section?.hint ?? '').includes('可再生的中间物'),
+      JSON.stringify({ buttons: section?.buttons, hint: section?.hint }),
+    )
+
+    // 从底栏那一行点进来也必须是同一块：锚点对不上就会滚到设置页顶部
+    const jumps = await cdp.evaluate(`(async () => {
+      const holder = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+      const ui = holder.get('ui')
+      ui.navigate('settings', 'sec-cache')
+      await new Promise((r) => setTimeout(r, 420))
+      const el = document.getElementById('sec-cache')
+      return {
+        group: document.querySelector('.setnav__item.is-active')?.textContent?.replace(/\\s+/g, '') ?? '',
+        flashed: el?.classList.contains('is-flash') ?? false,
+        top: el ? Math.round(el.getBoundingClientRect().top) : -9999,
+      }
+    })()`)
+    check(
+      '按锚点 sec-cache 跳转：切到「识别与性能」并高亮该块',
+      (jumps?.group ?? '').startsWith('识别与性能') && jumps?.flashed === true,
+      JSON.stringify(jumps),
+    )
+
+    await shot(cdp, 'probe-settings-cache.png')
   },
 
   async 'accuracy-settings'(cdp) {

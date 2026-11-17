@@ -144,6 +144,9 @@ contextBridge.exposeInMainWorld('xbaos', {
   // 否则试听没声音、波形也是空的。其余格式返回 path:null，渲染层直接读源文件。
   media: {
     playable: (p, ext) => ipcRenderer.invoke('media:playable', p, ext),
+    // 解码缓存的占用与清理（设置页的「解码缓存」、底栏的占用提示都用它）
+    cacheStats: () => ipcRenderer.invoke('media:cache-stats'),
+    clearCache: (names) => ipcRenderer.invoke('media:cache-clear', names),
   },
 
   // ---- 文件系统（受限：只暴露这几个操作）

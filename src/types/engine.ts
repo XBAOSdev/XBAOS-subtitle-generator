@@ -540,6 +540,19 @@ export interface XbaosBridge {
       | { ok: true; path: string | null; cached: boolean }
       | { ok: false; message: string }
     >
+    /**
+     * 解码缓存的占用情况。
+     *
+     * 这份缓存是**源采样率**的单声道 PCM（48kHz 一小时 345MB），所以它能长到
+     * 用户看得见的程度。`limit` 是主进程里那道硬上限（512MB），
+     * `files` 按时间倒序，只带删文件与显示所需的最小信息。
+     */
+    cacheStats: () => Promise<MediaCacheStats>
+    /** 不给名字 = 全部清除；给数组 = 只删这几个。返回删掉几份与最新统计 */
+    clearCache: (names?: string[]) => Promise<{
+      removed: number
+      stats: MediaCacheStats
+    }>
   }
 
   fs: {
@@ -912,4 +925,35 @@ export interface UpdateCheckResult {
   /** HTTP 状态码。网络层失败（连不上、超时）时为 null */
   code?: number | null
   message?: string
+}
+
+/**
+ * 解码缓存的统计（主进程 `media-cache.js` 的 `stats()`）。
+ *
+ * 为什么需要它：这份缓存是**源采样率**的单声道 PCM，48kHz 一小时 345MB，
+ * 光靠 14 天过期管不住体积 —— 所以有 `limit` 那道硬上限，也要让用户看得见。
+ */
+export interface MediaCacheStats {
+  /** 当前总占用（字节） */
+  bytes: number
+  /** 缓存文件数 */
+  count: number
+  /** 总容量上限（字节），超了主进程按最久未用淘汰 */
+  limit: number
+  /** 缓存目录的绝对路径，设置页显示与「打开文件夹」用 */
+  dir: string
+  /** 文件列表，按时间**倒序**（最近转的在前） */
+  files: MediaCacheFile[]
+}
+
+export interface MediaCacheFile {
+  /** 文件名（sha1 前 24 位 + .wav） */
+  name: string
+  bytes: number
+  /** 修改时间戳（毫秒）。这就是「最后一次使用」的判据 */
+  mtime: number
+  /** 源文件名。只在本进程内转过才有值，重启后为空 */
+  source: string
+  /** 本次运行中用过 —— 自动清理会跳过它 */
+  inUse: boolean
 }
