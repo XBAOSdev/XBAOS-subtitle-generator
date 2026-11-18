@@ -354,7 +354,7 @@ function goModelsDirSetting(): void {
             将模型放入模型文件夹后点击「重新扫描」。支持单个
             <span class="mono">.bin</span> 文件，或含
             <span class="mono">model.int8.onnx</span> 与
-            <span class="mono">tokens.txt</span> 的文件夹，架构按内容自动判定。
+            <span class="mono">tokens.txt</span> 的文件夹。架构按模型内容判定，无法判定时可在设置的「识别架构」中指定。
           </p>
           <p class="own__path mono">{{ storageDir || '正在读取' }}</p>
 
@@ -367,7 +367,13 @@ function goModelsDirSetting(): void {
               </div>
               <div class="own__item-actions">
                 <span v-if="isActiveId(m.id)" class="tag tag--ok">使用中</span>
-                <span v-else-if="unsupported(m)" class="tag tag--idle">不支持</span>
+                <span
+                  v-else-if="unsupported(m)"
+                  class="tag tag--idle"
+                  title="ONNX 引擎目前只支持 SenseVoice 的权重"
+                >
+                  不支持
+                </span>
                 <button
                   v-else
                   class="btn btn--sm"

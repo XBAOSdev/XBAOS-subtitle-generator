@@ -474,6 +474,19 @@ function close(row: Row): void {
   // 带未保存确认：有改动时问一句「保存并关闭 / 不保存关闭 / 取消」
   void project.closeDraftsSafely([row.id])
 }
+
+/**
+ * 关闭全部项目。
+ *
+ * 一个都不少地交给 `closeDraftsSafely`：它自己会挑出有未保存改动的那些、
+ * 弹一次「保存并关闭 / 不保存关闭 / 取消」，弃掉的那份连自动草稿一起销毁
+ * （`closeDraft` 里做的）。全部已保存时不弹窗，直接关。
+ */
+function closeAll(): void {
+  const ids = project.drafts.map((d) => d.id)
+  if (ids.length === 0) return
+  void project.closeDraftsSafely(ids)
+}
 </script>
 
 <template>
@@ -488,6 +501,46 @@ function close(row: Row): void {
         aria-label="搜索项目或子项目"
       />
       <span class="filetree__count">{{ viewRows.length }}</span>
+    </div>
+
+    <!--
+      项目级操作：新建 / 打开 / 全部关闭。
+      只留图标 + 悬浮提示 —— 三个中文按钮竖排会占掉两行 26px，而它们的使用
+      频率远低于下面那些项目条本身。放在搜索框下方而不是底部，是因为它们
+      属于「这一列怎么长」而不是「列表末尾还有什么」。
+    -->
+    <div class="filetree__tools">
+      <button
+        class="filetree__tool"
+        :class="{ 'is-drop': dropOnNew }"
+        type="button"
+        title="新建项目"
+        aria-label="新建项目"
+        @click="newDraft"
+        @dragover="onNewDragOver"
+        @drop="onNewDrop"
+      >
+        <Icon name="plus" :size="14" />
+      </button>
+      <button
+        class="filetree__tool"
+        type="button"
+        title="打开项目文件（.xbsgp）"
+        aria-label="打开项目"
+        @click="openFromFile"
+      >
+        <Icon name="folder-open" :size="14" />
+      </button>
+      <button
+        class="filetree__tool filetree__tool--end"
+        type="button"
+        :disabled="project.drafts.length === 0"
+        title="关闭全部项目"
+        aria-label="关闭全部项目"
+        @click="closeAll"
+      >
+        <Icon name="x-square" :size="14" />
+      </button>
     </div>
 
     <div class="filetree__body scroll-y" @dragend="cleanupDrag" @click="onBlankClick">
@@ -538,9 +591,10 @@ function close(row: Row): void {
             <Icon name="alert" :size="11" />
           </span>
           <span class="filetree__proj-count">{{ row.items.length }}</span>
-          <!-- 关闭 = 只从列表移出，不删磁盘上的 .xbsgp（2.6） -->
+          <!-- 关闭 = 只从列表移出，不删磁盘上的 .xbsgp（2.6）。
+               单项目也常显：只开着一个时，关闭是唯一能让列表变空的路，
+               藏起来就只剩右键菜单一条暗道 -->
           <button
-            v-if="rows.length > 1"
             class="filetree__close"
             type="button"
             title="从列表移出这个项目（不删除磁盘文件）"
@@ -627,7 +681,7 @@ function close(row: Row): void {
                 title="重新识别这一条"
                 @click.stop="recognize(entry.file)"
               >
-                <Icon name="wand" :size="12" />
+                <Icon name="refresh" :size="12" />
               </button>
               <button
                 v-if="canReload(entry.file)"
@@ -657,29 +711,6 @@ function close(row: Row): void {
         </p>
       </section>
       </TransitionGroup>
-
-      <button
-        class="filetree__new"
-        :class="{ 'is-drop': dropOnNew }"
-        type="button"
-        title="新建一个空项目"
-        @click="newDraft"
-        @dragover="onNewDragOver"
-        @drop="onNewDrop"
-      >
-        <Icon name="plus" :size="12" />
-        <span>新建项目</span>
-      </button>
-
-      <button
-        class="filetree__new"
-        type="button"
-        title="打开磁盘上的 .xbsgp 项目文件"
-        @click="openFromFile"
-      >
-        <Icon name="folder-open" :size="12" />
-        <span>打开项目</span>
-      </button>
 
       <p v-if="query.trim() && totalItems > 0" class="filetree__hint">
         匹配 {{ matchedItems }} / {{ totalItems }} 个子项目
@@ -743,6 +774,51 @@ function close(row: Row): void {
 
 .filetree__search:focus {
   border-color: var(--color-accent-border);
+}
+
+/* 项目级操作条：三个图标按钮，24px 见方，与项目条的 26px 同档视觉重量 */
+.filetree__tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 var(--space-4) var(--space-2);
+}
+
+.filetree__tool {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-tertiary);
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.filetree__tool:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.filetree__tool:disabled {
+  color: var(--color-text-disabled);
+  cursor: default;
+}
+
+/* 拖到「新建项目」上 = 建一个空项目把它装进去（与旧版底部按钮同一语义） */
+.filetree__tool.is-drop {
+  background: var(--color-accent-subtle);
+  color: var(--color-text-primary);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+/* 关闭全部与前两个之间多留一点：它是不可逆的方向（会一次关掉所有项目），
+   紧贴着「新建」排在一起容易被指到。但它仍然跟这一组走 —— 推到最右会让
+   中间空出一大段，看起来像这一行还缺东西 */
+.filetree__tool--end {
+  margin-left: var(--space-2);
 }
 
 /* 行内改名：直接在原来的名字位置变成输入框 */
@@ -870,7 +946,8 @@ function close(row: Row): void {
   place-items: center;
   border-radius: var(--radius-sm);
   color: var(--color-text-tertiary);
-  opacity: 0;
+  /* 常显但压得很淡：它是「移出列表」，不是主操作；hover 到这一行才提上来 */
+  opacity: 0.55;
   transition: opacity var(--dur-fast) var(--ease-out);
 }
 
@@ -1055,31 +1132,7 @@ function close(row: Row): void {
   color: var(--color-text-primary);
 }
 
-/* ---------- 新建 / 空态 ---------- */
-
-.filetree__new {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  margin-top: 6px;
-  padding: 0 8px;
-  border-radius: var(--radius-md);
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  box-shadow: inset 0 0 0 1px transparent;
-}
-
-.filetree__new:hover {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
-
-.filetree__new.is-drop {
-  background: var(--color-accent-subtle);
-  box-shadow: inset 0 0 0 1px var(--color-accent);
-  color: var(--color-text-primary);
-}
+/* ---------- 空态 ---------- */
 
 .filetree__empty {
   margin: 0 0 4px 20px;

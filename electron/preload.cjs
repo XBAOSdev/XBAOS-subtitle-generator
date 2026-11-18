@@ -276,11 +276,14 @@ contextBridge.exposeInMainWorld('xbaos', {
     /** 在系统文件管理器里打开模型文件夹 */
     openDir: () => ipcRenderer.invoke('model:openDir'),
     /**
-     * 当前生效模型与架构 `{ entry, arch, archLabel, caps }`。
+     * 当前生效模型与架构 `{ entry, arch, archLabel, caps, archForced }`。
      * 传设置里存的模型标识；主进程负责判定架构并记住 ——
      * 界面不要自己按文件名猜架构。
+     *
+     * 第二个参数是用户在设置里手动指定的架构（`auto` / `whisper` / `sherpa`）：
+     * 只用于「自己放的模型自动判定不出来」，传 `auto` 或空值即完全交给主进程。
      */
-    active: (id) => ipcRenderer.invoke('models:active', id),
+    active: (id, arch) => ipcRenderer.invoke('models:active', id, arch),
     /** 重新扫一遍模型目录（用户在资源管理器里动了文件之后用） */
     refresh: () => ipcRenderer.invoke('models:refresh'),
     /**

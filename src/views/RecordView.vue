@@ -1083,7 +1083,7 @@ watch(joinedSec, () => requestDraw())
             <Icon name="minus" :size="14" />
           </button>
           <button class="rbar__icon" type="button" title="最大化" @click="windowControl('maximize')">
-            <Icon name="square" :size="12" />
+            <Icon name="window-max" :size="12" />
           </button>
           <button class="rbar__icon rbar__icon--close" type="button" title="关闭" @click="forceClose()">
             <Icon name="x" :size="14" />

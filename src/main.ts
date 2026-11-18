@@ -6,6 +6,7 @@ import './styles/tokens.css'
 import './styles/theme-light.css'
 import './styles/theme-dark.css'
 import './styles/global.css'
+import './styles/recog.css'
 
 import App from './App.vue'
 import { segThumb } from './directives/segThumb'

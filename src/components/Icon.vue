@@ -1,7 +1,19 @@
 <script setup lang="ts">
 /**
  * 内联 SVG 图标集
- * 全部为几何线条自绘，不使用第三方图标库素材，不使用 emoji。
+ *
+ * 全部按 **24×24 网格 + 1.6 笔画**手工绘制：圆角半径、端点、连接处都取整数或
+ * 半整数，不引用任何图标库的 path 数据（不拷贝 Lucide / Feather / Material /
+ * Remix 等成套素材，也不描摹其具名图标）。图形只用通用隐喻 —— 三角、圆形、
+ * 方框、箭头、齿轮、话筒这类符号本身不构成独创性表达，具体坐标是本项目自绘的。
+ * 不使用 emoji（字体缺字时会变成彩色方块，且各平台观感不一）。
+ *
+ * 尺寸只用 12 / 14 / 16 三档（11 留给项目条那种极小角标，22 留给空态大图）。
+ * 同一行里的图标必须同档 —— 混档会让基线看起来高低不齐。
+ *
+ * 命名按语义不按形状：`trash` 是「删除」、`x` 是「关闭这一项 / 移除」、
+ * `x-square` 是「关掉一整块」。新增之前先看有没有能复用的语义，
+ * 不要为「看起来更配」再造一个同义图标 —— 同一功能在软件里必须永远是同一个。
  */
 
 withDefaults(
@@ -86,6 +98,12 @@ withDefaults(
     <template v-else-if="name === 'x'">
       <path d="M6.5 6.5 17.5 17.5M17.5 6.5 6.5 17.5" />
     </template>
+    <!-- 方框 + 叉：关掉「一整块」而不是某一项（关闭全部项目）。
+         不用「圆 + 叉」，那个和 ban（禁止）在 14px 下分不开 -->
+    <template v-else-if="name === 'x-square'">
+      <path d="M4.5 6.5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2Z" />
+      <path d="M9.4 9.4 14.6 14.6M14.6 9.4 9.4 14.6" />
+    </template>
     <template v-else-if="name === 'plus'">
       <path d="M12 5.5v13M5.5 12h13" />
     </template>
@@ -130,6 +148,9 @@ withDefaults(
     <template v-else-if="name === 'arrow-down'">
       <path d="M12 5v14M6.5 13.5 12 19l5.5-5.5" />
     </template>
+    <template v-else-if="name === 'arrow-right'">
+      <path d="M5 12h14M13.5 6.5 19 12l-5.5 5.5" />
+    </template>
 
     <!-- 文件与目录 -->
     <template v-else-if="name === 'file-audio'">
@@ -150,6 +171,17 @@ withDefaults(
       <path d="M12 3.5 20.5 8 12 12.5 3.5 8Z" />
       <path d="M4.5 12.4 12 16.4l7.5-4" />
       <path d="M4.5 16.4 12 20.4l7.5-4" />
+    </template>
+    <!-- 存储/缓存：圆柱体。与 layers（层叠）区分开 -->
+    <template v-else-if="name === 'database'">
+      <ellipse cx="12" cy="6.4" rx="7" ry="2.7" />
+      <path d="M5 6.4v11.2c0 1.5 3.1 2.7 7 2.7s7-1.2 7-2.7V6.4" />
+      <path d="M5 12c0 1.5 3.1 2.7 7 2.7s7-1.2 7-2.7" />
+    </template>
+    <!-- 标点：一对开口向右的引号 -->
+    <template v-else-if="name === 'quote'">
+      <path d="M8.2 7.4c1.5 0 2.5 1 2.5 2.5 0 2.1-1.4 3.7-3.5 4.7" />
+      <path d="M15 7.4c1.5 0 2.5 1 2.5 2.5 0 2.1-1.4 3.7-3.5 4.7" />
     </template>
 
     <!-- 工具 -->

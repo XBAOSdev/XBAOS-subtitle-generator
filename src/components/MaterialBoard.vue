@@ -239,7 +239,7 @@ const SUBTITLE_LABELS = SUBTITLE_EXTS.map((ext) => ext.toUpperCase())
 <template>
   <section class="col board">
     <header class="col__head">
-      <Icon name="layers" :size="14" class="board__headicon" />
+      <Icon name="import" :size="14" class="board__headicon" />
       <span class="col__title">素材</span>
       <span v-if="project.intake.length > 0" class="hint">
         {{ project.intake.length }} 个文件

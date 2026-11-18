@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useSettingsStore } from './settings'
 import type { ActiveModelInfo, ArchCaps } from '@/types/engine'
 
@@ -23,6 +23,11 @@ export const useModelStore = defineStore('model', () => {
   const archLabel = ref('')
   const entry = ref<ActiveModelInfo['entry']>(null)
   const caps = ref<ArchCaps>({ ...ALL_CAPS })
+  /**
+   * 架构是用户手动指定、且与模型内容判定不一致。
+   * 界面据此说明「按指定架构运行」—— 否则用户会以为软件认错了模型。
+   */
+  const archForced = ref(false)
   /** 是否已成功拿到主进程的结果（浏览器预览下永远为 false） */
   const ready = ref(false)
 
@@ -30,20 +35,29 @@ export const useModelStore = defineStore('model', () => {
     const api = window.xbaos?.models
     if (!api?.active) return
     try {
-      const info = await api.active(settings.modelFile)
+      const info = await api.active(settings.modelFile, settings.arch)
       arch.value = info.arch
       archLabel.value = info.archLabel
       entry.value = info.entry
       caps.value = info.caps ?? { ...ALL_CAPS }
+      archForced.value = info.archForced === true
       ready.value = true
     } catch {
       /* 读不到就保持上一次的结论，别把界面突然全锁上 */
     }
   }
 
-  // 切换模型后所有依赖能力的控件都要跟着变 —— 在 store 里监听一次，
+  // 切换模型、切换架构后所有依赖能力的控件都要跟着变 —— 在 store 里监听一次，
   // 免得每个页面各自 watch 设置
-  watch(() => settings.modelFile, () => void refresh())
+  watch([() => settings.modelFile, () => settings.arch], () => void refresh())
 
-  return { arch, archLabel, entry, caps, ready, refresh }
+  /**
+   * 确实没有可用模型。
+   *
+   * 必须等主进程答过一次才成立：浏览器预览没有桥，`entry` 永远是 null，
+   * 若直接拿它判「没有模型」，预览与探针里整页都会变成空态。
+   */
+  const missing = computed(() => ready.value && entry.value === null)
+
+  return { arch, archLabel, entry, caps, archForced, ready, missing, refresh }
 })

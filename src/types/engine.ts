@@ -204,6 +204,11 @@ export interface TranscribeOptions {
   /** 音频文件绝对路径 */
   audio: string
   model?: string
+  /**
+   * 手动指定的识别架构。缺省 / `auto` 时由主进程按模型内容判定 ——
+   * 与设置里的「识别架构」是同一个值，只服务自己放置的未知模型。
+   */
+  arch?: ArchChoice
   backend?: InferenceBackend
   /** 'auto' 或 ISO 639-1 语言码 */
   language?: string
@@ -295,6 +300,21 @@ export interface EngineLocation {
 export type ModelKind = 'file' | 'dir'
 
 /**
+ * 引擎架构标识。取值与主进程 `model-catalog.js` 的两个常量一致：
+ * 字符串会存进设置、写进日志，改一处就要连迁移一起想。
+ */
+export type ArchId = 'whisper' | 'sherpa'
+
+/**
+ * 用户可选的识别架构。
+ *
+ * `auto` 表示由主进程读取模型内容判定。手动值只给「自己放置的模型」用：
+ * 自动判定认不出的权重（例如非 SenseVoice 的 ONNX 目录）需要用户自己指定
+ * 该交给哪套引擎，否则那个模型在软件里永远用不上。
+ */
+export type ArchChoice = 'auto' | ArchId
+
+/**
  * 架构能力开关。界面按它决定控件可用与否 —— 不要在组件里各写一套判断，
  * 换一种模型类型就要改三四个地方是上一版的真实教训。
  */
@@ -327,6 +347,11 @@ export interface ActiveModelInfo {
   /** 展示用，如「sherpa-onnx（ONNX Runtime）」 */
   archLabel: string
   caps: ArchCaps
+  /**
+   * 架构是否来自用户手动指定（设置里没选「自动」）。
+   * 手动值与模型内容不一致时界面要说明「按指定架构运行」。
+   */
+  archForced: boolean
 }
 
 /** `models.catalog` 的条目：可下载模型及其公示信息 */
@@ -751,7 +776,7 @@ export interface XbaosBridge {
      * 当前生效模型与架构。传设置里存的标识，主进程负责判定架构并记住 ——
      * 界面不要自己按文件名猜架构。没有可用模型时 entry 为 null。
      */
-    active: (id: string) => Promise<ActiveModelInfo>
+    active: (id: string, arch?: ArchChoice) => Promise<ActiveModelInfo>
     /** 重新扫一遍模型目录（用户在资源管理器里动了文件之后用） */
     refresh: () => Promise<ModelFileInfo[]>
     /**
@@ -784,7 +809,7 @@ export interface XbaosBridge {
 
   engine: {
     status: () => Promise<EngineStatusResult>
-    load: (opts?: { model?: string; backend?: InferenceBackend }) => Promise<
+    load: (opts?: { model?: string; backend?: InferenceBackend; arch?: ArchChoice }) => Promise<
       EngineLoaded & { ok: boolean; backend: EngineActiveBackend }
     >
     unload: () => Promise<{ ok: boolean }>

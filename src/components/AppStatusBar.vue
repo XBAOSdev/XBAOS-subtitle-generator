@@ -15,7 +15,7 @@ const logs = useLogStore()
 const cache = useMediaCacheStore()
 
 /*
- * 解码缓存的占用，就摆在「N 个文件处理完成」左边。
+ * 解码缓存的占用，摆在底栏最右侧「推理后端」左边。
  *
  * 为什么要让它在底栏：这份缓存是**源采样率**的单声道 PCM，48kHz 一小时
  * 345MB，是软件里唯一会自己长大的目录。用户不该是在硬盘报警时才发现它。
@@ -235,9 +235,6 @@ watch(issueText, (next, prev) => {
         <span>缓存</span>
         <span class="mono">{{ cacheText }}</span>
       </button>
-      <span v-if="project.allPendingReview > 0" class="statusbar__pending">
-        {{ project.allPendingReview }} 个文件处理完成
-      </span>
       <span class="statusbar__sep" aria-hidden="true">|</span>
       <span class="statusbar__backend" :title="'推理后端：' + backendLabel">
         <Icon name="cpu" :size="12" />
@@ -471,21 +468,26 @@ watch(issueText, (next, prev) => {
   }
 }
 
-.statusbar__pending {
-  color: var(--color-text-secondary);
-}
-
-/* 缓存占用：长相与「N 个文件处理完成」同一档，但它是可点的 */
+/* 缓存占用：长相与右侧「自动」同一档，但它是可点的 */
 .statusbar__cache {
   display: flex;
   align-items: center;
   gap: var(--space-1);
   padding: 1px var(--space-1);
   border-radius: var(--radius-sm);
-  color: var(--color-text-tertiary);
+  /*
+   * 颜色跟着状态栏走（inherit），不写死某一档。
+   *
+   * 底栏底色在两种主题下不同：普通主题是 tertiary，毛玻璃主题整体提到
+   * secondary（`html.glass .statusbar`）。写死任何一档，都会在另一种下
+   * 和旁边的「自动」差一截 —— 用户看到的就是
+   * 「这块字比旁边暗」。
+   */
+  color: inherit;
   font-size: 11px;
 }
 
+/* 悬停只提一档 + 底衬：跳两档到 primary 会显得这一块在闪 */
 .statusbar__cache:hover {
   background: var(--color-bg-subtle);
   color: var(--color-text-secondary);

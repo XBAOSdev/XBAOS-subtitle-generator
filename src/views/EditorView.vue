@@ -452,6 +452,11 @@ function saveProjectFile(): void {
   else ui.openDialog('save-project')
 }
 
+/** 空态里的「打开项目」：走的是和侧栏那个入口完全一样的一条路 */
+function openProjectFile(): void {
+  void project.openProject()
+}
+
 const saveMenu = ref<{ x: number; y: number } | null>(null)
 
 function openSaveMenu(event: MouseEvent): void {
@@ -575,13 +580,34 @@ function openExport(): void {
     -->
     <div v-if="!project.hasFiles" class="editor__empty">
       <Icon name="list" :size="22" class="editor__empty-icon" />
-      <p class="editor__empty-title">还没有可编辑的字幕</p>
-      <p class="editor__empty-text">
-        导入音频并完成识别，或者直接打开一个 .srt / .vtt / .ass 字幕文件。
-      </p>
-      <button class="btn btn--primary" type="button" @click="ui.navigate('home')">
-        去导入
-      </button>
+      <!--
+        识别刚起步时这个项目还是空的（第一份结果要跑完才落地）。不说一句，
+        用户点进工作台看到的就是「还没有可编辑的字幕」，会以为识别没开始。
+      -->
+      <template v-if="project.recognizing">
+        <p class="editor__empty-title">正在识别</p>
+        <p class="editor__empty-text">
+          这个项目还在等第一份结果，完成后会出现在这里。左侧其他项目现在就能打开。
+        </p>
+        <button class="btn" type="button" @click="ui.navigate('home')">查看进度</button>
+      </template>
+      <template v-else>
+        <p class="editor__empty-title">还没有可编辑的字幕</p>
+        <p class="editor__empty-text">
+          导入音频并完成识别，或者打开一个已有的项目或字幕文件。
+        </p>
+        <!--
+          两条路并列：新导入是常态，但这里已经是「工作台」了 —— 手上没有
+          可编辑内容的人，有一半是想接着上次那份 `.xbsgp` 干活。
+          只给「去导入」会让他退回导入页，再从那里找「打开项目」。
+        -->
+        <div class="editor__empty-actions">
+          <button class="btn btn--primary" type="button" @click="ui.navigate('home')">
+            去导入
+          </button>
+          <button class="btn" type="button" @click="openProjectFile">打开项目</button>
+        </div>
+      </template>
     </div>
 
     <div v-else class="editor__body">
@@ -846,6 +872,13 @@ function openExport(): void {
 }
 
 .editor__empty > .btn {
+  margin-top: var(--space-2);
+}
+
+.editor__empty-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   margin-top: var(--space-2);
 }
 

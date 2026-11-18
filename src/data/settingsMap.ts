@@ -83,6 +83,15 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
     keywords: ['模型目录', '模型路径', '存放位置', '下载目录', '文件夹', 'ggml'],
   },
   {
+    id: 'arch',
+    label: '识别架构',
+    section: 'sec-recognize',
+    anchor: 'field-arch',
+    group: 'engine',
+    keywords: ['架构', '引擎', 'whisper', 'ggml', 'sherpa', 'onnx', 'sensevoice', '自动判定'],
+    note: '仅在模型无法自动判定时指定',
+  },
+  {
     id: 'recognize',
     label: '识别设置入口',
     section: 'sec-recognize',

@@ -249,7 +249,7 @@ function resolveModelInfo(requested) {
  * 用于真正要跑识别的路径（engine:load / engine:transcribe），不用于只读查询 ——
  * 打开模型页看看不该冒出一条警告。
  */
-function resolveModelForRun(requested) {
+function resolveModelForRun(requested, arch) {
   const hit = resolveModelEntry(requested)
   if (!hit) return null
   if (hit.fellBack && requested) {
@@ -263,7 +263,7 @@ function resolveModelForRun(requested) {
       },
     })
   }
-  return hit
+  return { ...hit, entry: applyArchOverride(hit.entry, arch) }
 }
 
 /**
@@ -331,35 +331,53 @@ function writeCustomModelsDir(dir) {
 }
 
 /**
+ * 把用户手动指定的架构盖到模型条目上。
+ *
+ * 只认 `whisper` / `sherpa` 两个值，其余（含 `auto`、空值、垃圾值）一律不管，
+ * 保持主进程按内容判定的结论 —— 界面传什么都不能让引擎跑错，除非它明确指定了
+ * 一个存在的架构。
+ *
+ * 不做「模型与架构是否匹配」的校验：用户自己放的权重只有他知道该交给谁，
+ * 匹配与否由引擎加载模型时的报错回答。
+ */
+function applyArchOverride(entry, arch) {
+  if (!entry || typeof arch !== 'string') return entry
+  if (!ARCH_INFO[arch] || entry.arch === arch) return entry
+  return { ...entry, arch }
+}
+
+/**
  * 当前生效模型 + 架构的快照。
  *
  * 先看记录的架构是否仍然成立（同一个标识、架构判定一致），成立就直接用，
  * 省掉读 tokens.txt；不成立才更新记录。
  */
-function activeModelSnapshot(requested) {
+function activeModelSnapshot(requested, arch) {
   const entry = resolveModelEntry(requested)?.entry ?? null
-  if (!entry) return { entry: null, arch: '', archLabel: '', caps: capsOf('') }
+  if (!entry) return { entry: null, arch: '', archLabel: '', caps: capsOf(''), archForced: false }
 
+  const effective = applyArchOverride(entry, arch)
   const saved = readModelState()
-  if (!saved || saved.id !== entry.id || saved.arch !== entry.arch) {
-    void writeModelState({ id: entry.id, arch: entry.arch, at: Date.now() })
+  if (!saved || saved.id !== effective.id || saved.arch !== effective.arch) {
+    void writeModelState({ id: effective.id, arch: effective.arch, at: Date.now() })
   }
 
   return {
     entry: {
-      id: entry.id,
-      name: entry.name,
-      path: entry.path,
-      kind: entry.kind,
-      size: entry.size,
-      source: entry.source,
-      builtin: entry.builtin,
-      catalogKey: entry.catalogKey,
-      variant: entry.variant,
+      id: effective.id,
+      name: effective.name,
+      path: effective.path,
+      kind: effective.kind,
+      size: effective.size,
+      source: effective.source,
+      builtin: effective.builtin,
+      catalogKey: effective.catalogKey,
+      variant: effective.variant,
     },
-    arch: entry.arch,
-    archLabel: archLabel(entry.arch),
-    caps: capsOf(entry.arch),
+    arch: effective.arch,
+    archLabel: archLabel(effective.arch),
+    caps: capsOf(effective.arch),
+    archForced: effective.arch !== entry.arch,
   }
 }
 
@@ -2142,8 +2160,8 @@ function registerIpc() {
    *   2. 提前把对应引擎拉起来握手，用户点「开始识别」时少等一次进程启动。
    *      这一步失败不影响任何功能，只是少了这点预热。
    */
-  ipcMain.handle('models:active', async (_event, id) => {
-    const snapshot = activeModelSnapshot(id)
+  ipcMain.handle('models:active', async (_event, id, arch) => {
+    const snapshot = activeModelSnapshot(id, arch)
     if (snapshot.entry) {
       const client = ensureEngine()
       if (!client.running) void ensureEngineFor(snapshot.arch).catch(() => {})
@@ -2277,7 +2295,7 @@ function registerIpc() {
   })
 
   ipcMain.handle('engine:load', async (_event, opts = {}) => {
-    const hit = resolveModelForRun(opts.model)
+    const hit = resolveModelForRun(opts.model, opts.arch)
     if (!hit) {
       // 不写死具体文件名：模型不随包之后，用户目录里可能一个模型都没有，
       // 也可能只有个改了名的。指向「模型管理」页比报一个他根本没见过的名字有用。
@@ -2328,7 +2346,7 @@ function registerIpc() {
       throw new Error('已有识别任务在进行中，请先取消')
     }
 
-    const hit = resolveModelForRun(opts.model)
+    const hit = resolveModelForRun(opts.model, opts.arch)
     if (!hit) {
       throw new Error('没有可用的识别模型，请在「模型管理」页先放置一个模型')
     }

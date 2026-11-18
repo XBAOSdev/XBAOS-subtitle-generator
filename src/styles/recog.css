@@ -1,0 +1,415 @@
+/**
+ * 识别设置面板的共用外观。
+ *
+ * 每个架构一份面板（components/recog/RecogWhisper.vue、RecogSherpa.vue），
+ * 字段与文案各自维护 —— 两套引擎能调的参数本来就不一样，硬塞进一套模板
+ * 只会到处是「这个不支持所以灰掉」。但「一项设置长什么样」必须完全一致，
+ * 否则换个模型就像换了个软件。所以外观收在这里，由各面板共用。
+ *
+ * 全部规则以 `.recog` 开头。这是一份全局样式表，不加前缀就会漏到别的页面：
+ * 设置页有同名的 `.field`，被这里改掉之后出问题的地方离这里很远。
+ * `npm run unit` 里有一条断言：本文件里每个选择器都必须以 `.recog` 开头。
+ */
+
+/* ---- 容器：面板自己的滚动区 ---- */
+.recog {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* 没有模型时：一句话 + 一个按钮，居中 */
+.recog.recog--empty {
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  text-align: center;
+}
+
+.recog .recog__empty-icon {
+  color: var(--color-text-tertiary);
+}
+
+.recog .recog__empty-title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.recog .recog__empty-hint {
+  max-width: 24em;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-base);
+  color: var(--color-text-tertiary);
+}
+
+.recog.recog--empty .btn {
+  margin-top: var(--space-2);
+}
+
+/* ---- 当前模型一行（在标题与面板之间，不随内容滚动） ---- */
+.recog__meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 30px;
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.recog__model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+}
+
+.recog__arch {
+  flex: none;
+}
+
+.recog__forced {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  color: var(--color-text-secondary);
+}
+
+.recog__link {
+  flex: none;
+  margin-left: auto;
+  font-size: var(--font-size-xs);
+  color: var(--color-accent-text);
+}
+
+.recog__link:hover {
+  text-decoration: underline;
+}
+
+/* ---- 单项设置 ---- */
+.recog .field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.recog .field__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 20px;
+}
+
+.recog .field__label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.recog .field__tag {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.recog .field__hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: var(--line-base);
+}
+
+/* 只读值：语言这类「由模型决定、用户改不了」的项用它代替下拉框 */
+.recog .recog__value {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-inset);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+/* ---- 分段控件（推理深度 / 声道这类少量互斥选项） ---- */
+.recog .seg {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-inset);
+}
+
+.recog .choice {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+
+.recog .choice:hover {
+  color: var(--color-text-primary);
+}
+
+/* 选中标记（底色 + 内描边 + 投影）由滑动指示块 v-seg-thumb 画，这里只管文字 */
+.recog .choice.is-active {
+  color: var(--color-text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.recog .choice:disabled {
+  color: var(--color-text-tertiary);
+  cursor: not-allowed;
+}
+
+/* ---- 领域词库 ---- */
+.recog .lex-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.recog .lex {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.recog .lex:hover {
+  border-color: var(--color-border-strong);
+}
+
+.recog .lex.is-active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+
+.recog .lex input[type='checkbox'] {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.recog .lex__name {
+  font-size: var(--font-size-xs);
+}
+
+.recog .lex.is-active .lex__name {
+  color: var(--color-accent-text);
+  font-weight: var(--weight-medium);
+}
+
+.recog .lex__count {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.recog .lex-budget {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.recog .lex-budget.is-over {
+  color: var(--color-warning);
+}
+
+/* 热词行右上角的开关：与标题同一行，不额外占一块 */
+.recog .switch--sm {
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+/* ---- 讲话人：独立成块，不是「高级选项」里的调参 ---- */
+.recog .speakers {
+  align-items: stretch;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  /* 用 surface 而不是 inset：开关轨道是 border-strong，压在 inset 上几乎看不见 */
+  background: var(--color-bg-surface);
+}
+
+.recog .speakers__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.recog .speakers__count {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.recog .speakers__count .select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- 高级折叠 ---- */
+.recog .adv {
+  border-top: 1px solid var(--color-border-subtle);
+  padding-top: var(--space-3);
+}
+
+.recog .adv__sum {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+  list-style: none;
+}
+
+.recog .adv__sum::-webkit-details-marker {
+  display: none;
+}
+
+.recog .adv__caret {
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.recog .adv[open] .adv__caret {
+  transform: rotate(90deg);
+}
+
+.recog .adv__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.recog .adv__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.recog .adv__switches {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ---- 批量处理方式 ---- */
+.recog .modes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.recog .mode {
+  position: relative;
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.recog .mode:hover {
+  border-color: var(--color-border-strong);
+}
+
+.recog .mode.is-active {
+  /* 与 .choice 同一套：底色抬到 raised + 1px 内描边，深色下分得出选中的是哪张卡 */
+  border-color: var(--color-accent-border);
+  background: var(--color-bg-raised);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--color-accent-border);
+}
+
+/* 识别中：不再接受切换，但当前生效的那一张仍然看得出来 */
+.recog .mode.is-locked {
+  cursor: default;
+}
+
+.recog .mode.is-locked:not(.is-active) {
+  opacity: 0.6;
+}
+
+.recog .mode.is-locked:not(.is-active):hover {
+  border-color: var(--color-border);
+  background: none;
+}
+
+.recog .mode__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-subtle);
+  color: var(--color-text-secondary);
+}
+
+.recog .mode.is-active .mode__icon {
+  background: var(--color-bg-surface);
+  color: var(--color-accent);
+}
+
+.recog .mode__body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.recog .mode__title {
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+}
+
+.recog .mode__hint {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  line-height: var(--line-base);
+}

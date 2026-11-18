@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, watch, computed } from 'vue'
 import type { ReasoningDepth } from '@/utils/reasoningDepth'
+import type { ArchChoice } from '@/types/engine'
 import type {
   ExportLangMode,
   GapFillOptions,
@@ -49,6 +50,16 @@ export interface SettingsSnapshot {
    * 自己比 —— 用户可能从软件外部删掉文件，这个字段不会跟着变。
    */
   modelFile: string
+  /**
+   * 识别架构：哪一套引擎来跑当前模型。
+   *
+   * 默认 `auto` —— 主进程读取模型内容判定（`.bin` 是 whisper，含
+   * `model.onnx + tokens.txt` 的目录是 sherpa-onnx）。手动值只服务一种情况：
+   * 用户自己放进去的模型自动判定不出来（或判得不对），由他指定交给哪套引擎。
+   *
+   * 与模型是否匹配**不由这里保证**：指定了不匹配的架构，识别会在加载模型时失败。
+   */
+  arch: ArchChoice
   /** 识别语言，zh 表示简体中文 */
   language: string
   /** 是否自动检测语言 */
@@ -231,6 +242,8 @@ export const DEFAULT_SETTINGS: SettingsSnapshot = {
   glassEnabled: true,
   backend: 'auto',
   modelFile: '',
+  // 默认交给主进程判定：软件适配过的模型都不需要用户关心架构
+  arch: 'auto',
   language: 'zh',
   autoDetectLanguage: false,
   promptTerms: '',
@@ -336,6 +349,8 @@ function load(): SettingsSnapshot {
      * 放行就会看到「独立处理却共用一套称呼」—— 勾选框自己勾着，用户没点过。
      */
     merged.speakerNamesShared = false
+    /* 架构只有三个合法值：旧存档没有这一项，手改坏了也回到自动 */
+    if (!['auto', 'whisper', 'sherpa'].includes(merged.arch)) merged.arch = 'auto'
     return merged
   } catch {
     return structuredClone(DEFAULT_SETTINGS)
@@ -349,6 +364,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const glassEnabled = ref(initial.glassEnabled)
   const backend = ref<InferenceBackend>(initial.backend)
   const modelFile = ref(initial.modelFile)
+  const arch = ref<ArchChoice>(initial.arch)
   const language = ref(initial.language)
   const autoDetectLanguage = ref(initial.autoDetectLanguage)
   const promptTerms = ref(initial.promptTerms)
@@ -414,6 +430,7 @@ export const useSettingsStore = defineStore('settings', () => {
       glassEnabled: glassEnabled.value,
       backend: backend.value,
       modelFile: modelFile.value,
+      arch: arch.value,
       language: language.value,
       autoDetectLanguage: autoDetectLanguage.value,
       promptTerms: promptTerms.value,
@@ -534,6 +551,7 @@ export const useSettingsStore = defineStore('settings', () => {
     glassEnabled.value = d.glassEnabled
     backend.value = d.backend
     modelFile.value = d.modelFile
+    arch.value = d.arch
     language.value = d.language
     autoDetectLanguage.value = d.autoDetectLanguage
     promptTerms.value = d.promptTerms
@@ -583,6 +601,7 @@ export const useSettingsStore = defineStore('settings', () => {
     glassEnabled,
     backend,
     modelFile,
+    arch,
     language,
     autoDetectLanguage,
     promptTerms,

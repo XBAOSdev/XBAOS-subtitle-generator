@@ -260,6 +260,17 @@ export const useProjectStore = defineStore('project', () => {
   const activeFileId = ref<string | null>(null)
 
   const recognizing = ref(false)
+  /**
+   * 这一轮识别的成果要落进哪个项目（合并模式）。
+   *
+   * 只用来回答一件事：**这个项目现在能不能关**。识别是「跑一个文件、落地一个
+   * 文件」，落到一半把目标项目关掉，`landBatch` 拿不到落点就直接返回 ——
+   * 而条目已经从队列里摘走了，等于凭空消失。其余项目照旧可以随便关。
+   *
+   * 识别之外的时间恒为空串；独立模式（每个文件一个项目）也不设，因为那些项目
+   * 是落地那一刻才建的，关掉再落就是新建一个，不丢东西。
+   */
+  const recognitionDraftId = ref('')
   const progress = ref(0)
   const progressLabel = ref('')
   /**
@@ -1703,16 +1714,16 @@ export const useProjectStore = defineStore('project', () => {
    * 半分钟的改动，是这类软件最不可原谅的失败。没有路径的（从没保存过）
    * 只能留着那个未保存点，等他自己按保存。
    *
-   * 识别中不许切 —— 正在跑的那一条属于当前项目。
+   * 识别中**照样可以切**：识别跑的那条音频在导入队列（`intake`）里，不属于
+   * 任何项目；成果按 `landBatch` 落到它该去的那个项目，与「此刻在看哪个项目」
+   * 无关。曾经这里挡着不让切，理由是「正在跑的那一条属于当前项目」—— 那是
+   * 队列与工程还没分家时的结论。挡着的实际后果是：一开识别，用户就被锁在
+   * 那个空项目上，侧栏里自己的工程一个都点不开，只能干等半小时。
    */
   async function switchDraft(id: string): Promise<boolean> {
     if (id === activeDraftId.value) return true
     const target = draftOf(id)
     if (!target) return false
-    if (recognizing.value) {
-      useUiStore().notify('warning', '识别进行中', '当前批次完成后再切换项目')
-      return false
-    }
     if (projectDirty.value && projectPath.value && supportedFiles.value.length > 0) {
       const saved = await saveProjectTo(projectPath.value)
       // 存不下就别切：切过去之后这份内容就只剩内存里那一份了
@@ -1739,6 +1750,15 @@ export const useProjectStore = defineStore('project', () => {
   function closeDraft(id: string): boolean {
     const at = drafts.value.findIndex((d) => d.id === id)
     if (at < 0) return false
+    /*
+     * 正在往这个项目里落识别结果：关掉它，下一份结果就没有落点了（`landBatch`
+     * 找不到草稿会直接返回，而条目已经从队列里摘走），等于静默丢文件。
+     * 其它项目不受影响 —— 「切走看老工程」与「把这个目标项目关掉」是两件事。
+     */
+    if (recognizing.value && id === recognitionDraftId.value) {
+      useUiStore().notify('warning', '正在识别', '结果要落进这个项目，完成后再关闭')
+      return false
+    }
     const d = drafts.value[at]
     /*
      * 关掉项目 = 用户主动放弃这一份。草稿跟着销毁：留着它，下次启动又会把
@@ -2152,8 +2172,13 @@ export const useProjectStore = defineStore('project', () => {
       else byBatch.set(batch, [item])
     }
     for (const [batch, items] of byBatch) {
-      // 独立模式下每条各建一个项目，交给 landBatch 的默认分支处理
-      const draftId = isMerge.value && batch ? draftForBatch(batch, true) : ''
+      /*
+       * 独立模式下每条各建一个项目，交给 landBatch 的默认分支处理。
+       *
+       * 识别中建出来的项目**不抢视图**：此刻用户可能正翻着自己的老工程，
+       * 而字幕落地这件事跟他眼前那一屏没关系 —— 侧栏照常出现，别把他顶走。
+       */
+      const draftId = isMerge.value && batch ? draftForBatch(batch, !recognizing.value) : ''
       landBatch(items, draftId)
     }
   }
@@ -2645,6 +2670,8 @@ const MIME_BY_EXT: Record<string, string> = {
       // 这一批的项目定了：字幕跟着进同一个，否则它落地时会自己再建一个新项目
       if (batch) batchDraft.set(batch, targetDraftId)
       if (back && back !== activeDraftId.value) await switchDraft(back)
+      // 这个项目在这一轮里不能关（见 `recognitionDraftId` 的注释）
+      recognitionDraftId.value = targetDraftId
     }
 
     // 浏览器预览：没有桥就走旧的模拟进度，演示数据里已备好「结果」
@@ -2929,6 +2956,7 @@ const MIME_BY_EXT: Record<string, string> = {
               taskId: currentTaskId.value,
               audio: file.path,
               model: settings.modelFile || undefined,
+              arch: settings.arch,
               language,
               prompt: runPrompt.prompt || undefined,
               threads,
@@ -3071,6 +3099,7 @@ const MIME_BY_EXT: Record<string, string> = {
                 taskId: currentTaskId.value,
                 audio: file.path,
                 model: settings.modelFile || undefined,
+                arch: settings.arch,
                 language,
                 prompt: basePrompt.prompt || undefined,
                 threads,
@@ -3436,14 +3465,25 @@ const MIME_BY_EXT: Record<string, string> = {
           revalidate()
           // 合并模式的项目一个条目都没落上（全失败）→ 回收空壳
           const batch = targetDraftId ? draftOf(targetDraftId) : null
-          if (batch && draftItems(batch).length === 0) closeDraft(batch.id)
+          if (batch && draftItems(batch).length === 0) {
+            // 这一轮已经跑完，回收是它自己的动作 —— 先松开「识别中不许关」那道闩
+            recognitionDraftId.value = ''
+            closeDraft(batch.id)
+          }
         } else {
           rebuildMerged()
         }
       }
     } catch (err) {
-      // 引擎进程崩溃或 IPC 异常：把正在跑的文件标记失败，其余退回队列
-      const current = files.value.find((f) => f.id === currentFileId.value)
+      /*
+       * 引擎进程崩溃或 IPC 异常：把正在跑的文件标记失败，其余退回队列。
+       *
+       * 先在**队列**里找那一条：正在跑的文件属于 `intake`，不属于任何项目。
+       * 识别中用户可以切项目，`files.value` 这会儿指向的可能已经是别的工程。
+       */
+      const current =
+        intake.value.find((f) => f.id === currentFileId.value) ??
+        files.value.find((f) => f.id === currentFileId.value)
       if (current && current.status === 'processing') {
         current.status = 'failed'
         current.message = err instanceof Error ? err.message : String(err)
@@ -3459,6 +3499,7 @@ const MIME_BY_EXT: Record<string, string> = {
       offStream()
       window.clearInterval(stallTimer)
       recognizing.value = false
+      recognitionDraftId.value = ''
       progressLabel.value = ''
       progressStage.value = 'idle'
       progressStalled.value = false
@@ -3584,13 +3625,7 @@ const MIME_BY_EXT: Record<string, string> = {
     }
 
     // 一次拖多个项目文件时只开第一个：开一串窗口没人看得懂要哪一个
-    if (projects.length > 0) {
-      if (recognizing.value) {
-        ui.notify('warning', '正在识别，完成后再打开', `${nameOf(projects[0])} 先等这一批识别跑完`)
-      } else {
-        void openProject(projects[0])
-      }
-    }
+    if (projects.length > 0) void openProject(projects[0])
     if (queued.length > 0) {
       // 整批一次性收进队列 = 一个批次；队首若是字幕就立刻漏下去
       addFiles(queued)
@@ -3956,12 +3991,16 @@ const MIME_BY_EXT: Record<string, string> = {
     const bridge = window.xbaos
     const fromAutosave = options?.autosave
 
-    // 识别中不开新项目：这一批跑完再开。所有打开入口都过这里（按钮 / 双击 / 拖拽）
-    if (recognizing.value) {
-      ui.notify('warning', '正在识别，完成后再打开', '先等这一批识别跑完，之后再打开项目')
-      return false
-    }
-
+    /*
+     * 识别中也能开新项目。
+     *
+     * 曾经这里挡着「这一批跑完再开」，理由是打开会替换整个工程状态、怕把正在
+     * 跑的识别搅乱。但识别并不读活动工程：队列、进度、落地目标都是它自己那一份
+     * （`intake` + `targetDraftId`），打开只是换掉**用户正在看**的东西。挡着的
+     * 后果倒很实在 —— 半小时的识别期间，用户连自己的另一个工程都翻不开。
+     *
+     * 有路径又有改动的那次静默保存照旧（下面几行），所以打开不会丢东西。
+     */
     if (!bridge) {
       ui.notify('warning', '浏览器预览无法打开项目', '请在桌面应用里使用')
       return false
@@ -4120,18 +4159,14 @@ const MIME_BY_EXT: Record<string, string> = {
    * 打开还冒出来」的幽灵。
    */
   async function openPendingProject(): Promise<boolean> {
-    const ui = useUiStore()
     const bridge = window.xbaos
+    /*
+     * 取走就等于消费掉：这里**不能再有「稍后再打开」的分支**。
+     * 主进程那份待打开路径在 `takePending` 之后已经清了，当时如果因为
+     * 「正在识别」而拒绝，用户双击的那个项目就彻底没影了 —— 只能再双击一次。
+     */
     const pending = await bridge?.project?.takePending?.()
     if (!pending) return false
-    if (recognizing.value) {
-      ui.notify(
-        'warning',
-        '正在识别，完成后再打开',
-        `${nameOf(pending)} 先等这一批识别跑完，双击它就能打开`,
-      )
-      return false
-    }
     return openProject(pending)
   }
 

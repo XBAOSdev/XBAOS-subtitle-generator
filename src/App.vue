@@ -173,7 +173,7 @@ async function checkModelsOnStart(): Promise<void> {
     ui.notify(
       'warning',
       '还没有可用的识别模型',
-      '请先下载模型，或将 ggml 格式的 .bin 模型文件放入模型文件夹',
+      '请先下载模型，或将模型文件放入模型文件夹',
     )
   } catch {
     /* 拿不到应用信息就静默跳过，不打扰用户 */

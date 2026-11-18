@@ -32,6 +32,28 @@ const model = useModelStore()
 const ui = useUiStore()
 const mediaCache = useMediaCacheStore()
 
+/* ------------------------------------------------------- 识别架构 */
+
+/**
+ * 架构只给「软件没适配过的模型」用。
+ *
+ * 软件内置的模型都能自动判定，选自动即可；用户自己放进模型目录的权重
+ * 认不出来时，才需要在这里指定该交给哪套引擎。
+ */
+const ARCH_OPTIONS = [
+  { value: 'auto', label: '自动（按模型判定）' },
+  { value: 'whisper', label: 'whisper.cpp（GGML）' },
+  { value: 'sherpa', label: 'sherpa-onnx（ONNX Runtime）' },
+]
+
+const archHint = computed(() => {
+  if (model.archForced) {
+    return `当前按${model.archLabel}运行，与模型内容的判定结果不同。模型与架构不匹配时识别会失败。`
+  }
+  if (model.archLabel) return `当前模型使用${model.archLabel}。`
+  return '使用内置模型时保持自动。自行放置的模型无法判定架构时，再在此指定。'
+})
+
 /* ------------------------------------------------------- 解码缓存 */
 
 /** 进入设置页就取一次：用户从底栏点进来时，数字必须是当下的 */
@@ -57,7 +79,7 @@ async function removeCacheFile(name: string): Promise<void> {
 
 async function clearAllCache(): Promise<void> {
   if (!mediaCache.hasCache) return
-  if (!window.confirm('清除全部解码缓存？\n\n不影响已识别的字幕与项目文件，只是下次播放这些音频时要重新解码一次。')) {
+  if (!window.confirm('清除全部解码缓存？\n\n不影响已识别的字幕与项目文件。下次播放这些音频时会重新解码。')) {
     return
   }
   const removed = await mediaCache.clear()
@@ -603,13 +625,12 @@ function reset(): void {
             <!-- 解码缓存：试听与波形用的那份中间文件，会让目录自己长大 -->
             <section id="sec-cache" class="block">
               <div class="block__head">
-                <Icon name="layers" :size="14" />
+                <Icon name="database" :size="14" />
                 <span class="block__title">解码缓存</span>
               </div>
               <div class="block__body">
                 <p class="hint">
-                  M4A、MP4 这类需要系统解码器的音频，试听与波形读的是转出来的一份 WAV。
-                  它是可再生的中间物：删掉不影响已识别的字幕，只是下次播放时重新解一遍。
+                  AAC 等需要通过 Windows 系统解码器解码的音频，将会在识别完成后产生临时缓存。缓存会被用于试听和波形图渲染等。清除缓存不影响软件的正常功能。
                 </p>
 
                 <div class="cache__meter" :class="{ 'is-over': mediaCache.ratio >= 1 }">
@@ -675,27 +696,37 @@ function reset(): void {
                     </button>
                   </li>
                 </ul>
-                <p v-else class="hint">还没有缓存。</p>
+                <p v-else class="hint">暂无缓存。</p>
 
+                <p class="hint">超过 3 日未使用的缓存将会在软件运行时被清除。</p>
                 <p v-if="mediaCache.stats.limit > 0" class="hint">
-                  超过 {{ formatBytes(mediaCache.stats.limit) }} 时按最久未用淘汰，
-                  超过 3 天的也会清掉。过期清理只在启动软件时进行，超上限时转完一份就会淘汰；
-                  正在用的那份会跳过。
+                  缓存超过空间上限后，将会清除部分当前未被使用的缓存以释放空间。
                 </p>
               </div>
             </section>
 
-            <!-- 识别相关的设置已整体移到「导入」页，方便每次导入前顺手调整 -->
+            <!-- 识别：架构选择留在这里，其余识别参数在导入页（按架构分成两份面板） -->
             <section id="sec-recognize" class="block">
               <div class="block__head">
                 <Icon name="wave" :size="14" />
                 <span class="block__title">识别</span>
               </div>
               <div class="block__body">
-                <button class="btn btn--sm" type="button" @click="ui.navigate('home')">
-                  <Icon name="import" :size="13" />
-                  <span>前往导入页设置</span>
-                </button>
+                <label id="field-arch" class="field">
+                  <span class="field__label">识别架构</span>
+                  <select v-model="settings.arch" class="select">
+                    <option v-for="item in ARCH_OPTIONS" :key="item.value" :value="item.value">
+                      {{ item.label }}
+                    </option>
+                  </select>
+                  <span class="field__hint">{{ archHint }}</span>
+                </label>
+                <div class="row-actions">
+                  <button class="btn btn--sm" type="button" @click="ui.navigate('home')">
+                    <Icon name="sliders" :size="13" />
+                    <span>识别设置</span>
+                  </button>
+                </div>
               </div>
             </section>
           </div>
@@ -705,7 +736,7 @@ function reset(): void {
             <!-- 标点处理 -->
             <section id="sec-punctuation" class="block">
               <div class="block__head">
-                <Icon name="spell-check" :size="14" />
+                <Icon name="quote" :size="14" />
                 <span class="block__title">标点处理</span>
               </div>
               <div class="block__body">
