@@ -21,8 +21,8 @@ const cache = useMediaCacheStore()
  * 345MB，是软件里唯一会自己长大的目录。用户不该是在硬盘报警时才发现它。
  * 点一下直接跳到设置里那块，不用自己去翻。
  *
- * 「常驻」的含义是**有缓存时一直在**，不是「恒显示一行 0 B」—— 后者对
- * 刚装好的人只是一个看不懂的数字。
+ * 没有缓存时显示 0 B，而不是整块消失。底栏右侧是两个常驻读数，忽隐忽现会让
+ * 这一段的长度跟着跳，用户每次都得重新找位置；0 至少是个稳定的参照点。
  */
 const cacheText = computed(() => formatBytes(cache.stats.bytes))
 
@@ -226,7 +226,6 @@ watch(issueText, (next, prev) => {
 
     <div class="statusbar__side statusbar__side--right">
       <button
-        v-if="cache.hasCache"
         class="statusbar__cache"
         type="button"
         :title="`解码缓存 ${cacheText}（${cache.stats.count} 份），点击查看与清理`"

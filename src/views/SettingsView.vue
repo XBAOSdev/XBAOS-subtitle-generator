@@ -218,13 +218,20 @@ function selectGroup(id: string): void {
   })
 }
 
-/** 高亮刚跳到的目标，1.6 秒后自己淡出 */
+/**
+ * 高亮刚跳到的目标。
+ *
+ * 闪两次再淡出，而不是亮一下就没了：一次 0.15 秒的亮起很容易被看成「页面重绘了一下」，
+ * 用户还没把视线挪过去就已经结束。两次淡入淡出给了足够的时间定位，最后那段淡出
+ * 负责收尾 —— 硬切会显得像是界面抖了一下。
+ */
+const FLASH_MS = 2600
 let flashTimer = 0
 function flash(el: HTMLElement): void {
   window.clearTimeout(flashTimer)
   for (const node of document.querySelectorAll('.is-flash')) node.classList.remove('is-flash')
   el.classList.add('is-flash')
-  flashTimer = window.setTimeout(() => el.classList.remove('is-flash'), 1600)
+  flashTimer = window.setTimeout(() => el.classList.remove('is-flash'), FLASH_MS)
 }
 
 /**
@@ -1391,19 +1398,60 @@ function reset(): void {
   color: var(--color-text-tertiary);
 }
 
-/* 搜索跳转后的短暂高亮：目标区块描边 + 底色，1.6 秒后淡出 */
+/*
+ * 搜索跳转后的高亮：描边闪两次（淡入淡出），再淡出。
+ *
+ * 只动 box-shadow，不动 border-color —— 动画一结束 class 就被摘掉，中途把边框色
+ * 拉到 transparent 会让区块原本的边框先消失一下，看起来像布局抖了。
+ *
+ * 用 --color-accent 而不是 --color-accent-border：后者在浅色主题是 #c4c4c4，
+ * 白底上就是一条浅灰线，闪烁再久也谈不上「提醒」。accent 在两套主题下都够醒目。
+ *
+ * 时间轴（2.6s）：淡入 → 淡出 → 再淡入 → 长淡出。最后那一段占 1.35 秒，
+ * 是「提醒完了自己走开」，不是硬切。
+ *
+ * 缓动用 ease-in-out 而不是 --ease-out：后者的曲线是「起步极快、末尾渐停」，
+ * 套在每一段上会让第一次亮起在 200ms 内掉光，看着还是「闪一下」。
+ */
 .is-flash {
-  animation: settings-flash 1.6s var(--ease-out);
+  animation: settings-flash 2.6s ease-in-out;
+}
+
+/* 描边跟着元素的圆角走。`.field` 本身没有圆角也没有底色，跟着下拉框的圆角一起圆，
+   比一个方方正正的框套在圆角控件外面顺眼；区块自己的圆角不受影响。 */
+.field.is-flash {
+  border-radius: var(--radius-sm);
 }
 
 @keyframes settings-flash {
-  0%,
-  60% {
-    box-shadow: 0 0 0 2px var(--color-accent-border);
-    border-color: var(--color-accent-border);
+  0% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+  12% {
+    box-shadow: 0 0 0 2px var(--color-accent);
+  }
+  30% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+  48% {
+    box-shadow: 0 0 0 2px var(--color-accent);
   }
   100% {
-    box-shadow: none;
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+/*
+ * 减少动效偏好下换成静态描边。
+ *
+ * global.css 那段把所有动画压到 0.01ms，等于一次都不闪 —— 定位提示会整个消失。
+ * 「不想看动画」不等于「不需要知道跳到了哪里」，所以这里给一个不动的框，
+ * 由 2.6 秒后的定时器收走。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .is-flash {
+    animation: none !important;
+    box-shadow: 0 0 0 2px var(--color-accent);
   }
 }
 

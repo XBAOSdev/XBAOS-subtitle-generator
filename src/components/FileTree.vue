@@ -532,7 +532,7 @@ function closeAll(): void {
         <Icon name="folder-open" :size="14" />
       </button>
       <button
-        class="filetree__tool filetree__tool--end"
+        class="filetree__tool"
         type="button"
         :disabled="project.drafts.length === 0"
         title="关闭全部项目"
@@ -814,12 +814,9 @@ function closeAll(): void {
   box-shadow: inset 0 0 0 1px var(--color-accent);
 }
 
-/* 关闭全部与前两个之间多留一点：它是不可逆的方向（会一次关掉所有项目），
-   紧贴着「新建」排在一起容易被指到。但它仍然跟这一组走 —— 推到最右会让
-   中间空出一大段，看起来像这一行还缺东西 */
-.filetree__tool--end {
-  margin-left: var(--space-2);
-}
+/* 三个按钮等距。曾经给「关闭全部」多留 4px 想拉开距离，结果三格间距 2/2/6，
+   看起来像中间挤、最后一个掉队 —— 一排图标之间的间距只要不一致，眼睛先看到
+   的就是那处不齐，而不是「它更危险」。危险由 hover 与图标本身表达。 */
 
 /* 行内改名：直接在原来的名字位置变成输入框 */
 .filetree__rename {

@@ -227,6 +227,8 @@ const scenarios = {
       `项目 ${info.projects} 个，叉 ${info.closes} 个`,
     )
     check('关闭叉平时可见（不是只在悬停时冒出来）', Number(info.closeOpacity) > 0.2, `opacity=${info.closeOpacity}`)
+    // 顺带留一张图：三个按钮等距与「缓存 0 B」的常驻，都是靠看才看得出对不对的
+    await shot(cdp, 'sidebar-tools.png')
   },
 
   /**
@@ -3077,6 +3079,17 @@ const scenarios = {
       `[...document.querySelectorAll('.setnav__item')].map((b) => b.textContent.replace(/\\s+/g, ''))`,
     )
     check('设置页有左侧分组导航', groups.length === 8, JSON.stringify(groups))
+
+    // 底栏缓存读数常驻：浏览器预览没有缓存，这里应当是 0 B 而不是整块消失
+    const cacheReadout = await cdp.evaluate(`(() => {
+      const el = document.querySelector('.statusbar__cache')
+      return el ? el.textContent.replace(/\s+/g, ' ').trim() : null
+    })()`)
+    check(
+      '没有缓存时底栏仍显示「缓存 0 B」',
+      typeof cacheReadout === 'string' && cacheReadout.includes('缓存') && cacheReadout.includes('0 B'),
+      JSON.stringify(cacheReadout),
+    )
     check('默认停在外观组', (await activeGroup()).includes('外观'), await activeGroup())
     check('同屏只显示一个分组', (await visibleGroups()) === 1, String(await visibleGroups()))
 
@@ -3106,6 +3119,104 @@ const scenarios = {
       return el ? el.classList.contains('is-flash') : false
     })()`)
     check('跳转后目标控件被高亮', flashed === true)
+
+    // 高亮是「闪两次再淡出」，不是亮一下就没了：旧实现 1.6 秒就摘 class，
+    // 用户还没把视线挪过去就已经结束。这里量两件事——动画本身是哪一个、持续多久。
+    const flashStyle = await cdp.evaluate(`(() => {
+      const el = document.getElementById('field-export-encoding')
+      if (!el) return null
+      const cs = getComputedStyle(el)
+      return { name: cs.animationName, dur: cs.animationDuration, shadow: cs.boxShadow }
+    })()`)
+    // scoped 样式会把 keyframes 改名成 `settings-flash-5e0b544f`，所以只比前缀
+    check(
+      '高亮用 2.6 秒的闪两次动画',
+      String(flashStyle?.name ?? '').startsWith('settings-flash') && flashStyle?.dur === '2.6s',
+      JSON.stringify(flashStyle),
+    )
+    // 截图留一份现场：放大的那张看描边，整页那张看它落在哪一块。
+    // 320ms 正好是第一次亮到顶的时候（关键帧 12%），拍淡出中途没有意义
+    await sleep(320)
+    const flashRect = await cdp.evaluate(`(() => {
+      const el = document.getElementById('field-export-encoding')
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { x: r.x, y: r.y, width: r.width, height: r.height }
+    })()`)
+    if (flashRect) {
+      await shot(cdp, 'settings-flash-zoom.png', {
+        x: Math.max(0, flashRect.x - 14),
+        y: Math.max(0, flashRect.y - 14),
+        width: flashRect.width + 28,
+        height: flashRect.height + 28,
+        scale: 2,
+      })
+    }
+    await shot(cdp, 'settings-flash.png')
+
+    /*
+     * 行为判据：自己重放一次，取四个时刻的描边不透明度 —— 亮、暗、再亮、淡出。
+     * 只比动画名与时长是不够的：一次亮起同样满足那两个值。
+     */
+    const pulses = await cdp.evaluate(`(async () => {
+      const el = document.getElementById('field-export-encoding')
+      if (!el) return null
+      const alpha = () => {
+        const m = getComputedStyle(el).boxShadow.match(/rgba?\(([^)]+)\)/)
+        if (!m) return 0
+        const parts = m[1].split(',').map((v) => Number(v))
+        return parts.length === 4 ? parts[3] : 1
+      }
+      el.classList.remove('is-flash')
+      void el.offsetWidth
+      el.classList.add('is-flash')
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+      const out = []
+      // 关键帧落在 12% / 30% / 48% / 100%，换成毫秒是 320 / 780 / 1250 / 2600
+      await wait(320)
+      out.push(alpha())
+      await wait(460)
+      out.push(alpha())
+      await wait(470)
+      out.push(alpha())
+      await wait(1150)
+      out.push(alpha())
+      return out
+    })()`)
+    check(
+      '高亮是亮、暗、再亮、淡出四次采样',
+      Array.isArray(pulses) && pulses[0] > 0.6 && pulses[1] < 0.2 && pulses[2] > 0.6 && pulses[3] < 0.3,
+      JSON.stringify(pulses),
+    )
+
+    /*
+     * 减少动效偏好：global.css 那段把所有动画压到 0.01ms，闪两次等于一次都不闪。
+     * 所以这里必须换成不动的描边 —— 「不想看动画」不等于「不需要知道跳到了哪里」。
+     * 顺带留一张静态图：没有动画时截图不会抓到淡出的中途，2px 描边长什么样一看便知。
+     */
+    await cdp.send('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+    })
+    const reduced = await cdp.evaluate(`(async () => {
+      const el = document.getElementById('field-export-encoding')
+      if (!el) return null
+      el.classList.remove('is-flash')
+      void el.offsetWidth
+      el.classList.add('is-flash')
+      await new Promise((r) => setTimeout(r, 400))
+      const cs = getComputedStyle(el)
+      return { shadow: cs.boxShadow, anim: cs.animationName }
+    })()`)
+    check(
+      '减少动效下换成不动的描边',
+      reduced?.anim === 'none' &&
+        String(reduced?.shadow).includes('2px') &&
+        !/rgba\(0, 0, 0, 0\)|transparent/.test(String(reduced?.shadow)),
+      JSON.stringify(reduced),
+    )
+    await shot(cdp, 'settings-flash-reduced.png')
+    await cdp.send('Emulation.setEmulatedMedia', { features: [] })
+
 
     // 换一个词：验证同义词命中 + 跨组跳转
     await typeSearch('毛玻璃')

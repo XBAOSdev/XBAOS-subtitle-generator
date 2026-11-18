@@ -7100,6 +7100,48 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
   for (const name of ['RecogWhisper.vue', 'RecogSherpa.vue']) {
     check(`面板存在：${name}`, panelNames.includes(name))
   }
+
+  /* ---- 底栏、侧栏与定位高亮的常驻口径（2026-11-18） ---- */
+  const barSrc = readSource('src/components/AppStatusBar.vue')
+  check(
+    '底栏缓存读数常驻，没有缓存时显示 0 B',
+    /class="statusbar__cache"/.test(barSrc) && !/cache\.hasCache/.test(barSrc),
+    '忽隐忽现会让底栏右侧那一截长度跳变，用户每次都得重新找位置',
+  )
+
+  /*
+   * 定位高亮闪两次再淡出。1.6 秒亮一下太短 —— 用户还没把视线挪过去就结束了，
+   * 看起来只像界面重绘了一次。判据取「描边色出现两次、归零三次」。
+   */
+  const setSrc = readSource('src/views/SettingsView.vue')
+  const flashBlock = (setSrc.match(/@keyframes settings-flash \{[\s\S]*?\n\}/) ?? [''])[0]
+  check(
+    '定位高亮闪两次再淡出',
+    (flashBlock.match(/var\(--color-accent\)/g) ?? []).length === 2 &&
+      (flashBlock.match(/2px transparent/g) ?? []).length === 3 &&
+      /animation: settings-flash 2\.6s/.test(setSrc) &&
+      /const FLASH_MS = 2600/.test(setSrc),
+    '只亮一次等于没有提示；动画时长与摘 class 的定时器必须对齐',
+  )
+  check(
+    '高亮不动边框色',
+    !/border-color/.test(flashBlock),
+    '动画一结束就摘 class，中途把边框拉成透明会让区块原本的边框先消失一下',
+  )
+  check(
+    '减少动效下仍留一个静态描边',
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]{0,200}\.is-flash[\s\S]{0,160}box-shadow/.test(
+      setSrc,
+    ),
+    '全局那段把所有动画压到 0.01ms，不留静态框等于定位提示整个消失',
+  )
+
+  const treeSrc = readSource('src/components/FileTree.vue')
+  check(
+    '侧栏三个工具按钮等距',
+    !/filetree__tool--end/.test(treeSrc) && /\.filetree__tools \{[\s\S]{0,140}gap: 2px/.test(treeSrc),
+    '一排图标里只要有一格间距不同，眼睛先看到的就是那处不齐',
+  )
 }
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)
