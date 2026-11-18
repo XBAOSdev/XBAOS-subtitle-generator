@@ -87,6 +87,29 @@ export const useEditorStore = defineStore('editor', () => {
     playheadSec.value = Math.max(0, sec)
   }
 
+  /**
+   * 显式跳转的序号。
+   *
+   * 播放器有两条把「音频位置」写回游标的通道（播放时逐帧推进、暂停时补最后一帧），
+   * 它们会把任何外部写入覆盖掉。方向键一次只挪 0.1 秒，比「游标与音频差 0.15 秒
+   * 才 seek」那个死区还小 —— 走普通通道只会被音频原样写回去，界面看着毫无反应。
+   * 序号一变，播放器就无条件对齐一次，不再看阈值。
+   */
+  const seekSeq = ref(0)
+
+  /**
+   * 跳到指定位置。
+   *
+   * `pause` 为真时先停下再跳：播放中逐帧推进每一帧都会把游标写回音频位置，
+   * 不先停，0.1 秒的微调在下一帧就被抹掉了。停止与跳转必须在同一次调用里完成，
+   * 分成两步会留下「先被补最后一帧、再被跳走」的中间态。
+   */
+  function seekTo(sec: number, options: { pause?: boolean } = {}): void {
+    if (options.pause && isPlaying.value) isPlaying.value = false
+    seekSeq.value += 1
+    playheadSec.value = Math.max(0, sec)
+  }
+
   function togglePlay(): void {
     isPlaying.value = !isPlaying.value
   }
@@ -139,6 +162,8 @@ export const useEditorStore = defineStore('editor', () => {
     beginEdit,
     endEdit,
     setPlayhead,
+    seekSeq,
+    seekTo,
     togglePlay,
     playRange,
     playOneShot,

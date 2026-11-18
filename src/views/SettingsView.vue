@@ -290,6 +290,7 @@ const SHORTCUTS: { keys: string[]; label: string }[] = [
   { keys: ['Esc'], label: '取消编辑' },
   { keys: ['↑', '↓'], label: '上一条 / 下一条' },
   { keys: ['Space'], label: '播放 / 暂停' },
+  { keys: ['←', '→'], label: '游标左移 / 右移 0.1 秒。按住持续移动，播放中会先暂停' },
   { keys: ['L'], label: '循环当前句' },
   { keys: ['Insert'], label: '在当前条之后插入一条' },
   { keys: ['Delete'], label: '删除选中的字幕' },

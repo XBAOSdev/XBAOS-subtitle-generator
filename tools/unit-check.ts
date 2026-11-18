@@ -7142,6 +7142,52 @@ const OPT: PunctuationOptions = { zh: 'strip-split', en: 'keep' }
     !/filetree__tool--end/.test(treeSrc) && /\.filetree__tools \{[\s\S]{0,140}gap: 2px/.test(treeSrc),
     '一排图标里只要有一格间距不同，眼睛先看到的就是那处不齐',
   )
+
+  /* ---- 游标键盘微调（2026-11-18） ---- */
+  const edSrc = readSource('src/views/EditorView.vue')
+  const edStore = readSource('src/stores/editor.ts')
+  const playerSrc = readSource('src/components/AudioPlayer.vue')
+  check(
+    '方向键微调游标，步长 0.1 秒',
+    /key === 'ArrowLeft' \|\| key === 'ArrowRight'/.test(edSrc) && /const NUDGE_SEC = 0\.1/.test(edSrc),
+    '步长写死在别处（例如乘倍速）时，用户量到的就不是 0.1 秒了',
+  )
+  check(
+    '方向键在输入框里让位',
+    /key === 'ArrowLeft' \|\| key === 'ArrowRight'[\s\S]{0,320}isTypingTarget\(event\.target\)/.test(edSrc),
+    '少了这道闸，输入框里按方向键会一边移文本光标一边挪游标',
+  )
+  check(
+    '长按自己排节奏，不认系统重复键',
+    /if \(event\.repeat\) return/.test(edSrc) &&
+      /NUDGE_HOLD_DELAY_MS/.test(edSrc) &&
+      /function startNudgeHold/.test(edSrc),
+    '系统重复键的首延迟与重复率由操作系统决定，快慢不可控',
+  )
+  check(
+    '松手与失焦都收手',
+    /window\.addEventListener\('keyup', onKeyup\)/.test(edSrc) &&
+      /window\.addEventListener\('blur', onWindowBlur\)/.test(edSrc) &&
+      /onBeforeUnmount[\s\S]{0,220}stopNudgeHold\(\)/.test(edSrc),
+    '丢一次 keyup（切窗口、切输入法）游标就会一直走',
+  )
+  check(
+    '显式跳转绕过差值死区',
+    /const seekSeq = ref\(0\)/.test(edStore) &&
+      /function seekTo\(sec: number, options: \{ pause\?: boolean \}/.test(edStore) &&
+      /syncAudioToPlayhead\(true\)/.test(playerSrc),
+    '0.1 秒比「差 0.15 秒才 seek」还小，走普通通道等于没按',
+  )
+  check(
+    '暂停补最后一帧不与显式跳转打架',
+    /editor\.seekSeq === appliedSeekSeq/.test(playerSrc),
+    '先停再跳时，补帧会把刚设好的目标位置盖回音频原来的位置',
+  )
+  check(
+    '快捷键一览里有方向键这一条',
+    /keys: \['←', '→'\]/.test(readSource('src/views/SettingsView.vue')),
+    '能用的快捷键没写进一览，用户只能自己试出来',
+  )
 }
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)

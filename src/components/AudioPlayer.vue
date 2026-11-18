@@ -481,7 +481,14 @@ function stopSmoothAdvance(): void {
 
 onBeforeUnmount(stopSmoothAdvance)
 
-function syncAudioToPlayhead(): void {
+/**
+ * 把音频对齐到游标。
+ *
+ * `force` 为假时只处理「差得比较远」的情况（解码延迟、拖动之后的抖动都会带来
+ * 几十毫秒的偏差，每次都 seek 声音会碎）。方向键那种 0.1 秒级的微调必须传 true：
+ * 差值落在死区里，不强制就等于没按。
+ */
+function syncAudioToPlayhead(force = false): void {
   // 播放中的逐帧推进不是「用户挪了游标」，别把它再 seek 回去
   if (advancing) return
   const el = audioEl.value
@@ -498,7 +505,7 @@ function syncAudioToPlayhead(): void {
     }
     const part = project.mergedParts[loadedPart]
     const local = Math.max(0, editor.playheadSec - (part?.offsetSec ?? 0))
-    if (Math.abs(el.currentTime - local) > 0.15) {
+    if (force || Math.abs(el.currentTime - local) > 0.15) {
       seekTo(local)
       scheduleFadeOut()
     }
@@ -506,10 +513,20 @@ function syncAudioToPlayhead(): void {
   }
 
   // 只在播放头与音频实际位置差得比较远时才跳，微小的解码延迟不折腾
-  if (Math.abs(el.currentTime - editor.playheadSec) > 0.15) seekTo(editor.playheadSec)
+  if (force || Math.abs(el.currentTime - editor.playheadSec) > 0.15) {
+    seekTo(editor.playheadSec)
+  }
 }
 
 /* ------------------------------------------------------------- 播放控制 */
+
+/**
+ * 已经处理过的显式跳转序号（见 `editor.seekTo`）。
+ *
+ * 「暂停时补最后一帧」会把游标写成音频当前的位置。方向键的微调恰好是「先停再跳」，
+ * 两者落在同一次 flush 里，补帧就会把刚设好的目标位置盖掉 —— 序号对不上时让位。
+ */
+let appliedSeekSeq = 0
 
 watch(
   () => editor.isPlaying,
@@ -521,7 +538,7 @@ watch(
       buffering.value = false
       el?.pause()
       // 停下时补最后一帧，免得游标停在半拍的位置上
-      if (el && !advancing) {
+      if (el && !advancing && editor.seekSeq === appliedSeekSeq) {
         advancing = true
         if (isMerged.value) {
           const part = project.mergedParts[loadedPart]
@@ -566,6 +583,20 @@ watch(
   () => editor.playheadSec,
   () => {
     if (loadedSrc) syncAudioToPlayhead()
+  },
+)
+
+/*
+ * 显式跳转（方向键微调）：绕过上面那个差值阈值，直接对齐。
+ *
+ * 0.1 秒比死区（0.15 秒）还小，走普通通道只会被音频原样写回去。
+ * 放在 `isPlaying` 那个 watcher **之后**：同一轮 flush 里先让它判断要不要补帧。
+ */
+watch(
+  () => editor.seekSeq,
+  () => {
+    appliedSeekSeq = editor.seekSeq
+    if (loadedSrc) syncAudioToPlayhead(true)
   },
 )
 

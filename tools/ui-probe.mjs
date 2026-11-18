@@ -259,6 +259,143 @@ const scenarios = {
   },
 
   /**
+   * 游标键盘微调（2026-11-18）。
+   *
+   * 空格播放 / 暂停本来就有，这一轮加的是 ←/→：每下 0.1 秒，按住持续移动，
+   * 输入框里让位。四件事分开验，因为它们各自都会单独坏：
+   *
+   *   1. 单次位移正好 0.1 秒；
+   *   2. 按住多走几步（长按由自己定时器排节奏，不认系统重复键）；
+   *   3. 在输入框里按方向键不动游标（那是文本光标的活）；
+   *   4. 播放中按一下先暂停 —— 不暂停的话逐帧推进会把它写回去。
+   *
+   * 断言读的是 store 里的 `playheadSec`，不是截图：游标移动 0.1 秒在 1080p 的
+   * 一条时间轴上不到一个像素，看是看不出来的。
+   */
+  async 'editor-nudge'(cdp) {
+    await goto(cdp, BASE + '/?demo=1&view=editor')
+    await sleep(500)
+
+    const run = (body) =>
+      cdp.evaluate(`(() => {
+        const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+        const project = pinia.get('project')
+        const editor = pinia.get('editor')
+        ${body}
+      })()`)
+
+    await run(`
+      const file = project.files.find((f) => f.status !== 'unsupported')
+      file.durationSec = 30
+      file.segments = [{ id: 'n1', start: 0, end: 30, text: '游标微调', origin: '游标微调', issues: [] }]
+      file.status = 'pending'
+      project.activeFileId = file.id
+      editor.isPlaying = false
+      editor.setPlayhead(10)
+    `)
+    await sleep(300)
+
+    /** 按一下就松：keyup 立刻停掉长按定时器，只留第一次位移 */
+    const tap = (key, target = 'window') => `(() => {
+      const el = ${target === 'window' ? 'window' : `document.querySelector(${JSON.stringify(target)})`}
+      if (!el) return 'no-target'
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true }))
+      el.dispatchEvent(new KeyboardEvent('keyup', { key: ${JSON.stringify(key)}, bubbles: true }))
+      return 'ok'
+    })()`
+
+    const right = await cdp.evaluate(tap('ArrowRight'))
+    const afterRight = await run('return editor.playheadSec')
+    check(
+      '按一下 → 游标前进 0.1 秒',
+      right === 'ok' && Math.abs(afterRight - 10.1) < 1e-6,
+      `${right} / playhead=${afterRight}`,
+    )
+
+    await cdp.evaluate(tap('ArrowLeft'))
+    await cdp.evaluate(tap('ArrowLeft'))
+    const afterLeft = await run('return editor.playheadSec')
+    check(
+      '按两下 ← 游标后退 0.2 秒',
+      Math.abs(afterLeft - 9.9) < 1e-6,
+      `playhead=${afterLeft}`,
+    )
+
+    // 0 处不许往负数走
+    await run('editor.setPlayhead(0)')
+    await cdp.evaluate(tap('ArrowLeft'))
+    const atZero = await run('return editor.playheadSec')
+    check('游标不会移到 0 之前', atZero === 0, `playhead=${atZero}`)
+
+    /*
+     * 输入框里让位：侧栏搜索框是工作台里现成的 <input>，焦点真的落上去之后
+     * 再按方向键 —— 这一步验证的是 `isTypingTarget` 这道闸，不是标签。
+     */
+    await run('editor.setPlayhead(5)')
+    const inInput = await cdp.evaluate(`(() => {
+      const el = document.querySelector('.filetree__search')
+      if (!el) return 'no-input'
+      el.focus()
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', bubbles: true }))
+      return document.activeElement === el ? 'focused' : 'not-focused'
+    })()`)
+    const afterTyping = await run('return editor.playheadSec')
+    check(
+      '输入框里的方向键不动游标',
+      inInput === 'focused' && afterTyping === 5,
+      `${inInput} / playhead=${afterTyping}`,
+    )
+
+    // 播放中按方向键：先停，再挪。
+    // 演示数据没有真实音频，游标由 100ms 的定时器驱动，所以基准位置要按下之前现读 ——
+    // 写死 8 的话，等待那 150ms 里定时器已经把它推走了。
+    await run(`
+      editor.setPlayhead(8)
+      editor.isPlaying = true
+    `)
+    await sleep(150)
+    const playingFrom = await run('return editor.playheadSec')
+    await cdp.evaluate(tap('ArrowRight'))
+    const paused = await run('return { playing: editor.isPlaying, at: editor.playheadSec }')
+    const moved = paused.at - playingFrom
+    check(
+      '播放中按 → 会先暂停再往前挪一点',
+      paused?.playing === false && moved >= 0.1 - 1e-6 && moved <= 0.25,
+      `${playingFrom} → ${paused?.at}（${moved.toFixed(2)}）`,
+    )
+
+    /*
+     * 长按：按下不松 700ms。首延迟 300ms + 每步 55ms，加上第一下本身，
+     * 应当走 8 步上下。只断言「明显多于一步、又没有失控」—— 具体的毫秒数
+     * 取决于定时器精度，卡死数字等于给自己埋一条偶发失败。
+     */
+    const held = await cdp.evaluate(`(async () => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s
+      const editor = pinia.get('editor')
+      editor.setPlayhead(10)
+      const before = editor.playheadSec
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+      await new Promise((r) => setTimeout(r, 700))
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', bubbles: true }))
+      await new Promise((r) => setTimeout(r, 200))
+      return { before, after: editor.playheadSec }
+    })()`)
+    const steps = (held.after - held.before) / 0.1
+    check(
+      '按住 → 持续移动（700ms 至少五步）',
+      steps >= 5 && steps <= 20,
+      `${held.before} → ${held.after}（${steps.toFixed(1)} 步）`,
+    )
+
+    // 松手之后不许继续走
+    const afterRelease = await run('return editor.playheadSec')
+    await sleep(300)
+    const stillMoving = await run('return editor.playheadSec')
+    check('松手即停', Math.abs(stillMoving - afterRelease) < 1e-6, `${afterRelease} → ${stillMoving}`)
+  },
+
+  /**
    * 识别设置按架构分家（2026-11-18）。
    *
    * 浏览器预览没有 Electron 桥，`models.active` 永远是 undefined，面板只会
